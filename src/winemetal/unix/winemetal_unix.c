@@ -1,4 +1,6 @@
 #include <stdatomic.h>
+#include <stdbool.h>
+#include <pthread.h>
 #include <dlfcn.h>
 #include <os/lock.h>
 #import <Cocoa/Cocoa.h>
@@ -2716,35 +2718,76 @@ _MTLSharedEvent_signalValue(void *obj) {
 
 #ifndef DXMT_NATIVE
 
+/*
+ * A listener is shared by the PE thread that owns it (create and destroy),
+ * the PE thread that runs its run loop (start), and Metal's notification
+ * blocks, which run on a dispatch queue at any time, also after destroy.
+ * The mutex guards run_loop, stop_requested and shared_listener; the cond
+ * wakes notification blocks that wait for the run loop. The structure is
+ * freed when the last reference goes: one is the owner's (dropped by
+ * destroy), one the start thread's, and each pending notification holds
+ * one. destroy never waits for the start thread, since that thread may
+ * already be gone at process exit; the owner joins it on the PE side.
+ */
 typedef struct {
-  _Atomic(CFRunLoopRef) runloop_ref;
+  pthread_mutex_t mutex;
+  pthread_cond_t cond;
+  /* The listener thread's run loop, retained; NULL before start publishes
+   * it and after CFRunLoopRun returned. */
+  CFRunLoopRef run_loop;
+  bool stop_requested;
+  atomic_uint refcount;
   MTLSharedEventListener *shared_listener;
 } *shared_event_listener_t;
 
 extern NTSTATUS NtSetEvent(void *handle, void *prev_state);
 
+static void
+shared_event_listener_release(shared_event_listener_t q) {
+  if (atomic_fetch_sub(&q->refcount, 1) == 1) {
+    pthread_cond_destroy(&q->cond);
+    pthread_mutex_destroy(&q->mutex);
+    free(q);
+  }
+}
+
 static NTSTATUS
 _MTLSharedEvent_setWin32EventAtValue(void *obj) {
   struct unixcall_mtlsharedevent_setevent *params = obj;
-  void *nt_event_handle = (shared_event_listener_t)params->event_handle;
+  void *nt_event_handle = (void *)params->event_handle;
   shared_event_listener_t q = (shared_event_listener_t)params->shared_event_listener;
+  MTLSharedEventListener *listener;
+
+  pthread_mutex_lock(&q->mutex);
+  if (q->stop_requested) {
+    pthread_mutex_unlock(&q->mutex);
+    return STATUS_SUCCESS;
+  }
+  listener = [q->shared_listener retain];
+  atomic_fetch_add(&q->refcount, 1);
+  pthread_mutex_unlock(&q->mutex);
+
   [(id<MTLSharedEvent>)params->shared_event
-      notifyListener:q->shared_listener
+      notifyListener:listener
              atValue:params->value
                block:^(id<MTLSharedEvent> _e, uint64_t _v) {
-                 // NOTE: must ensure no more notification comes after listener been destroyed.
-                 while (!atomic_load_explicit(&q->runloop_ref, memory_order_acquire)) {
-#if defined(__x86_64__)
-                   _mm_pause();
-#elif defined(__aarch64__)
-          __asm__ __volatile__("yield");
-#endif
+                 /* NtSetEvent needs a Wine thread, so hand it to the
+                  * listener's run loop. A notification may come before the
+                  * run loop is published; wait for it then. Once the
+                  * listener is being destroyed, drop the notification. */
+                 pthread_mutex_lock(&q->mutex);
+                 while (!q->run_loop && !q->stop_requested)
+                   pthread_cond_wait(&q->cond, &q->mutex);
+                 if (q->run_loop && !q->stop_requested) {
+                   CFRunLoopPerformBlock(q->run_loop, kCFRunLoopCommonModes, ^{
+                     NtSetEvent(nt_event_handle, NULL);
+                   });
+                   CFRunLoopWakeUp(q->run_loop);
                  }
-                 CFRunLoopPerformBlock(q->runloop_ref, kCFRunLoopCommonModes, ^{
-                   NtSetEvent(nt_event_handle, NULL);
-                 });
-                 CFRunLoopWakeUp(q->runloop_ref);
+                 pthread_mutex_unlock(&q->mutex);
+                 shared_event_listener_release(q);
                }];
+  [listener release];
   return STATUS_SUCCESS;
 }
 
@@ -2752,14 +2795,38 @@ static NTSTATUS
 _SharedEventListener_start(void *obj) {
   struct unixcall_generic_obj_noret *params = obj;
   shared_event_listener_t q = (shared_event_listener_t)params->handle;
-  CFRunLoopRef uninited = NULL;
-  if (q && atomic_compare_exchange_strong(&q->runloop_ref, &uninited, CFRunLoopGetCurrent())) {
-    /* Add a dummy source so the runloop stays running */
-    CFRunLoopSourceContext source_context = {0};
-    CFRunLoopSourceRef source = CFRunLoopSourceCreate(NULL, 0, &source_context);
-    CFRunLoopAddSource(q->runloop_ref, source, kCFRunLoopCommonModes);
-    CFRunLoopRun();
+  CFRunLoopRef run_loop;
+  CFRunLoopSourceContext source_context = {0};
+  CFRunLoopSourceRef source;
+
+  if (!q)
+    return STATUS_SUCCESS;
+
+  pthread_mutex_lock(&q->mutex);
+  if (q->stop_requested) {
+    /* destroy came first: nothing will ever stop a run loop started now. */
+    pthread_mutex_unlock(&q->mutex);
+    shared_event_listener_release(q);
+    return STATUS_SUCCESS;
   }
+  run_loop = CFRunLoopGetCurrent();
+  /* Add a dummy source so the runloop stays running */
+  source = CFRunLoopSourceCreate(NULL, 0, &source_context);
+  CFRunLoopAddSource(run_loop, source, kCFRunLoopCommonModes);
+  CFRelease(source);
+  q->run_loop = (CFRunLoopRef)CFRetain(run_loop);
+  pthread_cond_broadcast(&q->cond);
+  /* destroy stops the run loop with a block queued on it, which runs even
+   * when it is queued before CFRunLoopRun starts, unlike CFRunLoopStop. */
+  while (!q->stop_requested) {
+    pthread_mutex_unlock(&q->mutex);
+    CFRunLoopRun();
+    pthread_mutex_lock(&q->mutex);
+  }
+  q->run_loop = NULL;
+  pthread_mutex_unlock(&q->mutex);
+  CFRelease(run_loop);
+  shared_event_listener_release(q);
   return STATUS_SUCCESS;
 }
 
@@ -2768,7 +2835,12 @@ _SharedEventListener_create(void *obj) {
   struct unixcall_generic_obj_ret *params = obj;
   shared_event_listener_t q = malloc(sizeof(*q));
   if (q) {
-    q->runloop_ref = NULL;
+    pthread_mutex_init(&q->mutex, NULL);
+    pthread_cond_init(&q->cond, NULL);
+    q->run_loop = NULL;
+    q->stop_requested = false;
+    /* The owner's reference and the start thread's. */
+    atomic_init(&q->refcount, 2);
     q->shared_listener = [[MTLSharedEventListener alloc] init];
   }
   params->ret = (obj_handle_t)q;
@@ -2779,13 +2851,27 @@ static NTSTATUS
 _SharedEventListener_destroy(void *obj) {
   struct unixcall_generic_obj_noret *params = obj;
   shared_event_listener_t q = (shared_event_listener_t)params->handle;
-  if (q && q->runloop_ref) {
-    CFRunLoopStop(q->runloop_ref);
-    q->runloop_ref = NULL;
-    [q->shared_listener release];
-    q->shared_listener = nil;
-    free(q);
+  MTLSharedEventListener *listener;
+
+  if (!q)
+    return STATUS_SUCCESS;
+
+  pthread_mutex_lock(&q->mutex);
+  q->stop_requested = true;
+  if (q->run_loop) {
+    CFRunLoopPerformBlock(q->run_loop, kCFRunLoopCommonModes, ^{
+      CFRunLoopStop(CFRunLoopGetCurrent());
+    });
+    CFRunLoopWakeUp(q->run_loop);
   }
+  listener = q->shared_listener;
+  q->shared_listener = nil;
+  /* Wake notifications waiting for a run loop; they are dropped now. */
+  pthread_cond_broadcast(&q->cond);
+  pthread_mutex_unlock(&q->mutex);
+
+  [listener release];
+  shared_event_listener_release(q);
   return STATUS_SUCCESS;
 }
 
