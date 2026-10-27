@@ -28,6 +28,7 @@
 #include "dxmt_presenter.hpp"
 #include "dxmt_residency.hpp"
 #include "dxmt_sampler.hpp"
+#include "util_env.hpp"
 #include "dxmt_scaler.hpp"
 #include "dxmt_statistics.hpp"
 #include "dxmt_texture.hpp"
@@ -769,7 +770,9 @@ public:
   
   AllocatedTempBufferSlice allocateTempBuffer1(size_t size, size_t alignment);
 
-  QueryReadbacks flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId, uint64_t event_seq_id);
+  // cmdbuf may be committed and replaced (the present split): the caller commits what it returns in
+  // cmdbuf.
+  QueryReadbacks flushCommands(WMT::CommandBuffer &cmdbuf, uint64_t seqId, uint64_t event_seq_id);
 
   uint64_t currentSeqId() {return seq_id_;}
 
@@ -925,6 +928,8 @@ private:
   uint64_t barrier_index_ = 0;
 
   uint64_t intrapass_barrier_control_bits_ = 0;
+
+  bool present_split_ = env::getEnvVar("DXMT_PRESENT_SPLIT") != "0";
 
   CommandQueue& queue_;
 };

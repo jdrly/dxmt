@@ -158,7 +158,7 @@ CommandQueue::CommitChunkInternal(CommandChunk &chunk, uint64_t seq) {
     cmdbuf.encodeWaitForEvent(initializer.event(), chunk.resource_initializer_event_id);
   }
   chunk.encode(chunk.attached_cmdbuf, this->argument_encoding_ctx);
-  cmdbuf.commit();
+  chunk.attached_cmdbuf.commit();
 
   ready_for_commit.fetch_add(1, std::memory_order_release);
   ready_for_commit.notify_one();

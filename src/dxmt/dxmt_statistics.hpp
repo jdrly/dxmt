@@ -54,6 +54,7 @@ struct FrameStatistics {
   clock::duration encode_flush_interval{};
   clock::duration drawable_blocking_interval{};
   clock::duration present_latency_interval{};
+  uint32_t present_split_count = 0;
   ScalerInfo last_scaler_info{};
 
   void
@@ -76,6 +77,7 @@ struct FrameStatistics {
     encode_flush_interval = {};
     drawable_blocking_interval = {};
     present_latency_interval = {};
+    present_split_count = 0;
     last_scaler_info.type = {};
   };
 };

@@ -107,6 +107,7 @@ public:
 
   void
   encode(WMT::CommandBuffer cmdbuf, ArgumentEncodingContext &enc) {
+    // flushCommands may commit cmdbuf and continue in a new one
     enc.$$setEncodingContext(
       chunk_id,
       frame_
@@ -114,9 +115,9 @@ public:
     auto& statistics = enc.currentFrameStatistics();
     auto t0 = clock::now();
     list_enc.execute(enc);
-    attached_cmdbuf = cmdbuf;
     auto t1 = clock::now();
     readback = enc.flushCommands(cmdbuf, chunk_id, chunk_event_id);
+    attached_cmdbuf = cmdbuf; // the last command buffer of the chunk, the one to commit and wait for
     auto t2 = clock::now();
     statistics.encode_prepare_interval += (t1 - t0);
     statistics.encode_flush_interval += (t2 - t1);
@@ -194,6 +195,12 @@ private:
   CaptureState capture_state;
 
 public:
+  // a command buffer on this queue, for work split off a chunk (the present split)
+  WMT::CommandBuffer
+  CreateCommandBuffer() {
+    return commandQueue.commandBuffer();
+  }
+
   InternalCommandLibrary cmd_library;
   ArgumentEncodingContext argument_encoding_ctx;
   WMT::Reference<WMT::SharedEvent> event;

@@ -766,11 +766,27 @@ public:
       return hr;
     }
 
-    double vsync_duration =
-        std::max(SyncInterval * 1.0 /
-                     (preferred_max_frame_rate ? preferred_max_frame_rate
-                                               : init_refresh_rate_),
-                 preferred_max_frame_rate ? 1.0 / preferred_max_frame_rate : 0);
+    double vsync_duration;
+    bool display_sync = display_sync_vsync_ && SyncInterval > 0;
+    presenter->changeDisplaySync(display_sync);
+    if (display_sync) {
+      // gw2: vsync by the display (Metal's FIFO), as d9mt fd76b39: a minimum duration of exactly one
+      // refresh on top of it makes a frame that is a hair late wait a whole refresh more, and
+      // presentation latches at half rate. A limit stays only for longer intervals (SyncInterval
+      // > 1, a frame cap below the refresh rate), half a refresh short so it lands on the refresh
+      // it aims for. DXMT_DISPLAY_SYNC=0 restores DXMT's own pacing.
+      double refresh = init_refresh_rate_ != DBL_MAX ? init_refresh_rate_ : 60.0;
+      double interval = SyncInterval / refresh;
+      if (preferred_max_frame_rate)
+        interval = std::max(interval, 1.0 / preferred_max_frame_rate);
+      vsync_duration = interval > 1.5 / refresh ? interval - 0.5 / refresh : 0;
+    } else {
+      vsync_duration =
+          std::max(SyncInterval * 1.0 /
+                       (preferred_max_frame_rate ? preferred_max_frame_rate
+                                                 : init_refresh_rate_),
+                   preferred_max_frame_rate ? 1.0 / preferred_max_frame_rate : 0);
+    }
 
     auto &cmd_queue = device_->GetDXMTDevice().queue();
     auto chunk = cmd_queue.CurrentChunk();
@@ -817,7 +833,65 @@ public:
     return hr;
   };
 
+  // gw2: one STATS line every 2 s from the frame statistics the HUD shows (DXMT_STATS=0 turns it
+  // off). Times are ms per frame as avg/max over the window; fps and ms from the encode thread's
+  // present-to-present interval.
+  struct StatsWindow {
+    clock::time_point start{}, last{};
+    uint32_t frames = 0, cb = 0, rp = 0, rp_opt = 0, clear = 0, split = 0, sync = 0, stall = 0;
+    double frame_max = 0, drawable = 0, drawable_max = 0, commit = 0, commit_max = 0, sync_ms = 0, sync_max = 0;
+    double prepare = 0, flush = 0, flush_max = 0, latency = 0, latency_max = 0;
+  } stats_;
+  bool stats_enabled_ = env::getEnvVar("DXMT_STATS") != "0";
+
+  void LogStatistics(const FrameStatistics &frame) {
+    auto ms = [](clock::duration d) { return std::chrono::duration<double, std::milli>(d).count(); };
+    auto now = clock::now();
+    auto &w = stats_;
+    if (w.frames == 0 && w.start == clock::time_point{}) {
+      w.start = w.last = now;
+      return;
+    }
+    w.frame_max = std::max(w.frame_max, ms(now - w.last));
+    w.last = now;
+    w.frames++;
+    w.cb += frame.command_buffer_count;
+    w.rp += frame.render_pass_count;
+    w.rp_opt += frame.render_pass_optimized;
+    w.clear += frame.clear_pass_count - frame.clear_pass_optimized;
+    w.split += frame.present_split_count;
+    w.sync += frame.sync_count;
+    w.stall += frame.event_stall;
+    w.drawable += ms(frame.drawable_blocking_interval);
+    w.drawable_max = std::max(w.drawable_max, ms(frame.drawable_blocking_interval));
+    w.commit += ms(frame.commit_interval);
+    w.commit_max = std::max(w.commit_max, ms(frame.commit_interval));
+    w.sync_ms += ms(frame.sync_interval);
+    w.sync_max = std::max(w.sync_max, ms(frame.sync_interval));
+    w.prepare += ms(frame.encode_prepare_interval);
+    w.flush += ms(frame.encode_flush_interval - frame.drawable_blocking_interval);
+    w.flush_max = std::max(w.flush_max, ms(frame.encode_flush_interval - frame.drawable_blocking_interval));
+    w.latency += ms(frame.present_latency_interval);
+    w.latency_max = std::max(w.latency_max, ms(frame.present_latency_interval));
+    double elapsed = ms(now - w.start);
+    if (elapsed < 2000)
+      return;
+    double n = w.frames;
+    Logger::info(std::format(
+        "STATS fps={:.1f} ms={:.1f}/{:.1f} cb={:.1f} rp={:.1f}(+{:.1f} merged) clear={:.1f} split={:.2f} "
+        "drawable={:.2f}/{:.1f} commit={:.2f}/{:.1f} sync={:.1f}x {:.2f}/{:.1f} stall={} "
+        "encode={:.2f}+{:.2f}/{:.1f} latency={:.1f}/{:.1f}",
+        n * 1000 / elapsed, elapsed / n, w.frame_max, w.cb / n, (w.rp - w.rp_opt) / n, w.rp_opt / n, w.clear / n,
+        w.split / n, w.drawable / n, w.drawable_max, w.commit / n, w.commit_max, w.sync / n, w.sync_ms / n,
+        w.sync_max, w.stall, w.prepare / n, w.flush / n, w.flush_max, w.latency / n, w.latency_max
+    ));
+    w = StatsWindow{};
+    w.start = w.last = now;
+  }
+
   void UpdateStatistics(const FrameStatisticsContainer& statistics, uint64_t frame_id) {
+    if (stats_enabled_)
+      LogStatistics(statistics.at(frame_id - 1));
     hud.begin();
     auto &frame = statistics.at(frame_id - 1); // show the previous one frame statistics
     auto &average = statistics.average();
@@ -1081,6 +1155,7 @@ private:
   DXGI_COLOR_SPACE_TYPE colorspace_ = DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
   double init_refresh_rate_ = DBL_MAX;
   int preferred_max_frame_rate = 0;
+  bool display_sync_vsync_ = env::getEnvVar("DXMT_DISPLAY_SYNC") != "0";
   HUDState hud;
   Rc<Presenter> presenter;
   ModeSetGuard modeset_guard_;

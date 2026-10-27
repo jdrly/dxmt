@@ -4,6 +4,7 @@
 #include "dxmt_format.hpp"
 #include "dxmt_presenter.hpp"
 #include "util_likely.hpp"
+#include "log/log.hpp"
 
 
 namespace dxmt {
@@ -99,6 +100,15 @@ Presenter::changeGammaRamp(const DXMTGammaRamp *gamma_ramp) {
           0);
     pso_valid.clear();
   }
+}
+
+void
+Presenter::changeDisplaySync(bool enabled) {
+  if (layer_props_.display_sync_enabled == enabled)
+    return;
+  layer_props_.display_sync_enabled = enabled;
+  layer_.setProps(layer_props_);
+  Logger::info(str::format("Presenter: display sync ", enabled ? "on" : "off"));
 }
 
 Presenter::PresentState
