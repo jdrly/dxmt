@@ -5,6 +5,7 @@
 #include "d3d11_1.h"
 #include "util_math.hpp"
 #include "log/log.hpp"
+#include "util_env.hpp"
 #include <mutex>
 #include <set>
 
@@ -370,12 +371,16 @@ CreateMTLTextureDescriptorInternal(
   }
 
   if (metal_format.Flag & MTL_DXGI_FORMAT_TYPELESS) {
-    // gw2: a depth buffer without stencil (R32_TYPELESS, R16_TYPELESS bound as depth-stencil) can
-    // only be viewed in its own depth format, so it doesn't need PixelFormatView, which turns off
-    // lossless compression (d9mt #18). Stencil views and typeless colour formats keep it.
+    // gw2: a typeless depth buffer bound as depth-stencil doesn't get PixelFormatView, which turns
+    // off lossless compression (d9mt #18): its depth views keep its own format. Its stencil views
+    // (X24_TYPELESS_G8_UINT, X32_TYPELESS_G8X24_UINT) may need the flag; TextureView warns when one
+    // is made without it. GW2's 4K depth buffer is R24G8_TYPELESS with a shader view.
+    // DXMT_STENCIL_PFV=1 keeps the flag on depth-stencil formats with a stencil plane.
+    static const bool stencil_pfv = env::getEnvVar("DXMT_STENCIL_PFV") == "1";
     bool depth_only = (BindFlags & D3D11_BIND_DEPTH_STENCIL) &&
                       (metal_format.PixelFormat == WMTPixelFormatDepth32Float ||
-                       metal_format.PixelFormat == WMTPixelFormatDepth16Unorm);
+                       metal_format.PixelFormat == WMTPixelFormatDepth16Unorm ||
+                       (!stencil_pfv && metal_format.PixelFormat == WMTPixelFormatDepth32Float_Stencil8));
     if (!depth_only) {
       // well this is necessary for passing validation layer
       metal_usage |= WMTTextureUsagePixelFormatView;

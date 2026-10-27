@@ -19,6 +19,7 @@
 #include "dxmt_texture.hpp"
 #include "dxmt_residency.hpp"
 #include "wsi_platform.hpp"
+#include "log/log.hpp"
 #include <atomic>
 #include <cassert>
 
@@ -48,6 +49,17 @@ TextureView::TextureView(TextureAllocation *allocation, unsigned index, TextureV
     allocation(allocation),
     key(descriptor, index, allocation->descriptor->miplevelCount()) {
   auto parent = allocation->texture();
+  // gw2: depth-stencil textures no longer get PixelFormatView (d3d11_resource_helper.cpp); say so if
+  // a stencil view of one is made anyway, it's the case that may need the flag
+  if (!(allocation->descriptor->usage() & WMTTextureUsagePixelFormatView)) {
+    auto f = (WMTPixelFormat)ORIGINAL_FORMAT(descriptor.format);
+    if (f == WMTPixelFormatX32_Stencil8 || f == WMTPixelFormatX24_Stencil8) {
+      static std::atomic<unsigned> warned = 0;
+      if (warned++ < 8)
+        WARN("TextureView: stencil view of a depth-stencil texture without PixelFormatView (DXMT_STENCIL_PFV=1 "
+             "restores the flag if stencil reads look wrong)");
+    }
+  }
   texture = parent.newTextureView(
       descriptor.format, descriptor.type, descriptor.firstMiplevel, descriptor.miplevelCount,
       descriptor.firstArraySlice, descriptor.arraySize,
