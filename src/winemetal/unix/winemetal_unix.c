@@ -1316,6 +1316,14 @@ _MTLCommandBuffer_presentDrawableAfterMinimumDuration(void *obj) {
 }
 
 static NTSTATUS
+_MTLCommandBuffer_presentDrawableWithDeadline(void *obj) {
+  struct unixcall_generic_obj_obj_double_noret *params = obj;
+  [(id<MTLCommandBuffer>)params->handle presentDrawable:(id<MTLDrawable>)params->arg0
+                                                 atTime:CACurrentMediaTime() + params->arg1];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
 _MTLDevice_supportsFamily(void *obj) {
   struct unixcall_generic_obj_uint64_uint64_ret *params = obj;
   params->ret = [(id<MTLDevice>)params->handle supportsFamily:(MTLGPUFamily)params->arg];
@@ -3328,6 +3336,7 @@ const void *__wine_unix_call_funcs[] = {
     &_MTLDevice_newIndirectCommandBuffer,
     &_MTLDevice_newLibraryWithSource,
     &_MTLTexture_getBytes,
+    &_MTLCommandBuffer_presentDrawableWithDeadline,
 };
 
 #ifndef DXMT_NATIVE
@@ -3478,5 +3487,6 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_MTLDevice_newIndirectCommandBuffer,
     &_MTLDevice_newLibraryWithSource,
     &_MTLTexture_getBytes,
+    &_MTLCommandBuffer_presentDrawableWithDeadline,
 };
 #endif

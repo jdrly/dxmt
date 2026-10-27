@@ -251,6 +251,7 @@ struct PresentData : EncoderData {
   WMT::Reference<WMT::Texture> backbuffer;
   Rc<Presenter> presenter;
   double after;
+  double deadline; // gw2: present at encode time + deadline (s) when no minimum duration applies; 0 = plain
   DXMTPresentMetadata metadata;
 };
 
@@ -666,7 +667,9 @@ public:
     return (new (allocate_cpu_heap(sizeof(T), alignof(T))) T());
   };
 
-  void present(Rc<Texture> &texture, Rc<Presenter> &presenter, double after, DXMTPresentMetadata metadata);
+  void present(
+      Rc<Texture> &texture, Rc<Presenter> &presenter, double after, double deadline, DXMTPresentMetadata metadata
+  );
 
   void upscale(Rc<Texture> &texture, Rc<Texture> &upscaled, Rc<SpatialScaler> &scaler);
 

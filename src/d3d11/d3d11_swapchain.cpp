@@ -788,6 +788,19 @@ public:
                    preferred_max_frame_rate ? 1.0 / preferred_max_frame_rate : 0);
     }
 
+    // gw2: a present without a minimum duration goes out with a deadline one refresh ahead
+    // (presentDrawable:atTime:). macOS runs the GPU at the lowest clock that meets the deadline it
+    // can infer, and a plain present carries none: GW2 ran 78% of the time at the minimum clock,
+    // the CPU waiting for a slow GPU (LASRecomp #203 measured the same). DXMT_PRESENT_DEADLINE=0
+    // turns it off; DXMT_PRESENT_DEADLINE=<ms> sets the deadline.
+    double present_deadline = 0;
+    if (present_deadline_ms_ != 0) {
+      double refresh = init_refresh_rate_ != DBL_MAX ? init_refresh_rate_ : 60.0;
+      present_deadline = present_deadline_ms_ > 0 ? present_deadline_ms_ / 1000.0 : 1.0 / refresh;
+    }
+    stats_deadline_ms_ = present_deadline * 1000;
+    stats_sync_interval_ = SyncInterval;
+
     auto &cmd_queue = device_->GetDXMTDevice().queue();
     auto chunk = cmd_queue.CurrentChunk();
     chunk->signal_frame_latency_fence_ = cmd_queue.CurrentFrameSeq();
@@ -797,7 +810,7 @@ public:
     }
     if constexpr (EnableMetalFX) {
       chunk->emitcc([
-        this, vsync_duration, backbuffer = backbuffer_->texture(),
+        this, vsync_duration, present_deadline, backbuffer = backbuffer_->texture(),
         sync_state = SyncFrame(++presentation_count_),
         upscaled = upscaled_backbuffer_->texture(),
         scaler = this->metalfx_scaler, state = presenter->synchronizeLayerProperties()
@@ -809,17 +822,17 @@ public:
         scaler_info.output_width = upscaled->width();
         scaler_info.output_height = upscaled->height();
         ctx.upscale(backbuffer, upscaled, scaler);
-        ctx.present(upscaled, presenter, vsync_duration, state.metadata);
+        ctx.present(upscaled, presenter, vsync_duration, present_deadline, state.metadata);
         ReleaseSemaphore(present_semaphore_, 1, nullptr);
         this->UpdateStatistics(ctx.queue().statistics, ctx.currentFrameId());
       });
     } else {
       chunk->emitcc([
-        this, vsync_duration, state = presenter->synchronizeLayerProperties(),
+        this, vsync_duration, present_deadline, state = presenter->synchronizeLayerProperties(),
         sync_state = SyncFrame(++presentation_count_),
         backbuffer = backbuffer_->texture()
       ](ArgumentEncodingContext &ctx) mutable {
-        ctx.present(backbuffer, presenter, vsync_duration, state.metadata);
+        ctx.present(backbuffer, presenter, vsync_duration, present_deadline, state.metadata);
         ReleaseSemaphore(present_semaphore_, 1, nullptr);
         this->UpdateStatistics(ctx.queue().statistics, ctx.currentFrameId());
       });
@@ -843,6 +856,8 @@ public:
     double prepare = 0, flush = 0, flush_max = 0, latency = 0, latency_max = 0;
   } stats_;
   bool stats_enabled_ = env::getEnvVar("DXMT_STATS") != "0";
+  std::atomic<double> stats_deadline_ms_ = 0;
+  std::atomic<uint32_t> stats_sync_interval_ = 0;
 
   void LogStatistics(const FrameStatistics &frame) {
     auto ms = [](clock::duration d) { return std::chrono::duration<double, std::milli>(d).count(); };
@@ -880,10 +895,11 @@ public:
     Logger::info(std::format(
         "STATS fps={:.1f} ms={:.1f}/{:.1f} cb={:.1f} rp={:.1f}(+{:.1f} merged) clear={:.1f} split={:.2f} "
         "drawable={:.2f}/{:.1f} commit={:.2f}/{:.1f} sync={:.1f}x {:.2f}/{:.1f} stall={} "
-        "encode={:.2f}+{:.2f}/{:.1f} latency={:.1f}/{:.1f}",
+        "encode={:.2f}+{:.2f}/{:.1f} latency={:.1f}/{:.1f} maxlatency={} interval={} deadline={:.1f}",
         n * 1000 / elapsed, elapsed / n, w.frame_max, w.cb / n, (w.rp - w.rp_opt) / n, w.rp_opt / n, w.clear / n,
         w.split / n, w.drawable / n, w.drawable_max, w.commit / n, w.commit_max, w.sync / n, w.sync_ms / n,
-        w.sync_max, w.stall, w.prepare / n, w.flush / n, w.flush_max, w.latency / n, w.latency_max
+        w.sync_max, w.stall, w.prepare / n, w.flush / n, w.flush_max, w.latency / n, w.latency_max, frame.latency,
+        stats_sync_interval_.load(), stats_deadline_ms_.load()
     ));
     w = StatsWindow{};
     w.start = w.last = now;
@@ -1156,6 +1172,17 @@ private:
   double init_refresh_rate_ = DBL_MAX;
   int preferred_max_frame_rate = 0;
   bool display_sync_vsync_ = env::getEnvVar("DXMT_DISPLAY_SYNC") != "0";
+  // -1: one refresh; 0: off; > 0: that many ms
+  double present_deadline_ms_ = [] {
+    auto v = env::getEnvVar("DXMT_PRESENT_DEADLINE");
+    if (v.empty())
+      return -1.0;
+    try {
+      return std::stod(v);
+    } catch (...) {
+      return -1.0;
+    }
+  }();
   HUDState hud;
   Rc<Presenter> presenter;
   ModeSetGuard modeset_guard_;
