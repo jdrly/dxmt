@@ -6,6 +6,7 @@
 #include "dxmt_staging.hpp"
 #include "dxmt_texture.hpp"
 #include "d3d11_resource.hpp"
+#include "dxmt_gw2_map.hpp"
 #include "d3d11_enumerable.hpp"
 
 namespace dxmt {
@@ -49,6 +50,7 @@ public:
       TResourceBase<tag_texture, IMTLMinLODClampable>(*pDesc, pDevice),
       subresources_(std::move(subresources)) {
     this->texture_ = std::move(u_texture);
+    this->gw2_map_kind_ = (uint8_t)gw2::MapKind::Tex; // gw2 (#25)
   }
   Rc<StagingResource> staging(UINT) final { return nullptr; }
   Rc<DynamicBuffer> dynamicBuffer(UINT*, UINT*) final { return {}; }

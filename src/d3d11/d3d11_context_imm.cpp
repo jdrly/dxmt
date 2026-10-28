@@ -1,5 +1,6 @@
 #include "config/config.hpp"
 #include "dxmt_gw2_stats.hpp"
+#include "dxmt_gw2_map.hpp"
 #include "d3d11_context_state.hpp"
 #include "d3d11_fence.hpp"
 #include "d3d11_private.h"
@@ -85,6 +86,12 @@ public:
       d3dmt_(this, mutex) {
         ignore_map_flag_no_wait_ = Config::getInstance().getOption<bool>("d3d11.ignoreMapFlagNoWait", false);
         InitPromoteFlush();
+        if (gw2_map_fast_) // gw2 (#25)
+          Logger::info(
+              "Map fast path: on (DXMT_MAP_FAST): buffer Map/Unmap without virtual lookups, one lock per page "
+              "rename, pages that grow up to 64 KB, default-usage buffers renamed into suballocated CPU-visible "
+              "pages, Map/Unmap API time sampled 1 in 16"
+          );
       }
 
   gw2::TimestampMode timestamp_mode_ = gw2::timestampMode(); // gw2 (#24)
@@ -141,7 +148,9 @@ public:
         allocation->useSuballocation(next_sub);
       });
     } else {
-      dynamic->updateImmediateName(current_seq_id, dynamic->allocate(coherent_seq_id), 0, false);
+      uint32_t gw2_result = 0; // gw2 (#25)
+      dynamic->updateImmediateName(current_seq_id, dynamic->allocate(coherent_seq_id, &gw2_result), 0, false);
+      CountRename(gw2_result);
       EmitST([allocation = dynamic->immediateName(),
               buffer = Rc(dynamic->buffer)](ArgumentEncodingContext &enc) mutable {
         allocation->useSuballocation(0);
@@ -152,15 +161,100 @@ public:
     return dynamic->immediateMappedMemory();
   }
 
+  // gw2 (#25): DXMT_MAP_FAST's MapDynamicBuffer: the page's end renames under one lock
+  // (DynamicBuffer::renameImmediate, which may grow the page), and the sequence ids are read only then
+  void *
+  MapDynamicBufferFast(DynamicBuffer &dynamic) {
+    if (auto next_sub = dynamic.nextSuballocation()) {
+      EmitST([allocation = dynamic.immediateName(), next_sub](ArgumentEncodingContext &enc) mutable {
+        allocation->useSuballocation(next_sub);
+      });
+    } else {
+      CountRename(dynamic.renameImmediate(cmd_queue.CurrentSeqId(), cmd_queue.CoherentSeqId()));
+      EmitST([allocation = dynamic.immediateName(),
+              buffer = Rc(dynamic.buffer)](ArgumentEncodingContext &enc) mutable {
+        allocation->useSuballocation(0);
+        auto _ = buffer->rename(forward_rc(allocation));
+      });
+    }
+
+    return dynamic.immediateMappedMemory();
+  }
+
+  // gw2 (#25): DXMT_MAP_FAST's Map of a buffer with a DynamicBuffer: the GetDynamicBuffer branch of
+  // Map, from the resource's fields instead of its virtual lookup and reference count
+  HRESULT
+  MapBufferFast(DynamicBuffer &dynamic, D3D11ResourceCommon *common, D3D11_MAP MapType,
+                D3D11_MAPPED_SUBRESOURCE *pMappedResource) {
+    if (!pMappedResource)
+      return E_INVALIDARG;
+    UINT buffer_length = common->gw2_byte_width_;
+    UINT bind_flag = common->bindFlags();
+    switch (MapType) {
+    case D3D11_MAP_READ:
+    case D3D11_MAP_WRITE:
+    case D3D11_MAP_READ_WRITE:
+      return E_INVALIDARG;
+    case D3D11_MAP_WRITE_DISCARD: {
+      if (bind_flag & D3D11_BIND_VERTEX_BUFFER) {
+        state_.InputAssembler.VertexBuffers.set_dirty();
+      }
+      if (bind_flag & D3D11_BIND_CONSTANT_BUFFER) {
+        for (auto &stage : state_.ShaderStages) {
+          stage.ConstantBuffers.set_dirty();
+        }
+      }
+      if (bind_flag & D3D11_BIND_SHADER_RESOURCE) {
+        for (auto &stage : state_.ShaderStages) {
+          stage.SRVs.set_dirty();
+        }
+      }
+
+      pMappedResource->pData = MapDynamicBufferFast(dynamic);
+      pMappedResource->RowPitch = buffer_length;
+      pMappedResource->DepthPitch = buffer_length;
+      break;
+    }
+    case D3D11_MAP_WRITE_NO_OVERWRITE: {
+      pMappedResource->pData = dynamic.immediateMappedMemory();
+      pMappedResource->RowPitch = buffer_length;
+      pMappedResource->DepthPitch = buffer_length;
+      break;
+    }
+    }
+    return S_OK;
+  }
+
+  // gw2 (#25): a rename's outcome, for the MAP section
+  void
+  CountRename(uint32_t result) {
+    if (!gw2_map_.on)
+      return;
+    gw2_map_.dirty = true;
+    gw2_map_.renames++;
+    if (result & DynamicBuffer::RenameCreated)
+      gw2_map_.created++;
+    if (result & DynamicBuffer::RenameGrown)
+      gw2_map_.grown++;
+    if (result & DynamicBuffer::RenameDropped)
+      gw2_map_.dropped++;
+  }
+
   HRESULT
   STDMETHODCALLTYPE
   Map(ID3D11Resource *pResource, UINT Subresource, D3D11_MAP MapType, UINT MapFlags,
       D3D11_MAPPED_SUBRESOURCE *pMappedResource) override {
-    GW2_API_SCOPE(Map);
+    // gw2 (#25): DXMT_MAP_FAST times Map and Unmap 1 call in 16, as Draw is (each timed call is two
+    // clock syscalls in Wine)
+    gw2::ApiScope gw2_api_scope_(gw2::Api::Map, gw2_map_fast_);
     std::lock_guard<d3d11_device_mutex> lock(mutex);
 
     if (unlikely(!pResource))
       return E_INVALIDARG;
+    auto gw2_common = GetResourceCommon(pResource);
+    gw2::MapScope gw2_map(gw2_map_, gw2::MapKind(gw2_common->gw2_map_kind_), gw2::mapOp(MapType)); // gw2 (#25)
+    if (gw2_map_fast_ && gw2_common->gw2_dynamic_)
+      return MapBufferFast(*gw2_common->gw2_dynamic_, gw2_common, MapType, pMappedResource);
     UINT buffer_length = 0, &row_pitch = buffer_length;
     UINT bind_flag = 0, &depth_pitch = bind_flag;
     auto current_seq_id = cmd_queue.CurrentSeqId();
@@ -322,10 +416,15 @@ public:
   void
   STDMETHODCALLTYPE
   Unmap(ID3D11Resource *pResource, UINT Subresource) override {
-    GW2_API_SCOPE(Map);
+    gw2::ApiScope gw2_api_scope_(gw2::Api::Map, gw2_map_fast_); // gw2 (#25): as Map
     std::lock_guard<d3d11_device_mutex> lock(mutex);
 
     if (unlikely(!pResource))
+      return;
+    auto gw2_common = GetResourceCommon(pResource);
+    gw2::MapScope gw2_map(gw2_map_, gw2::MapKind(gw2_common->gw2_map_kind_), gw2::MapOp::Unmap); // gw2 (#25)
+    // gw2 (#25): a D3D11Buffer has nothing to unmap (its staging() and dynamicTexture() are null)
+    if (gw2_map_fast_ && gw2_common->gw2_dynamic_)
       return;
     UINT row_pitch = 0;
     UINT depth_pitch = 0;
@@ -694,6 +793,7 @@ public:
     ctx_state.cmd_queue.CommitCurrentChunk();
     ctx_state.has_dirty_op_since_last_event = false;
     gw2_front_.publish(); // gw2 (#4): once per chunk
+    gw2_map_.publish();   // gw2 (#25)
   };
 
   HRESULT STDMETHODCALLTYPE Signal(ID3D11Fence *pFence, UINT64 Value) override {
@@ -997,6 +1097,7 @@ private:
   D3D11Multithread d3dmt_;
   bool ignore_map_flag_no_wait_;
   Com<MTLD3D11DeviceContextState, false> state_object_;
+  gw2::MapCounters gw2_map_; // gw2 (#25): the MAP section, published at each commit
 };
 
 std::unique_ptr<MTLD3D11DeviceContextBase>

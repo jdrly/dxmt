@@ -23,6 +23,7 @@
 #include "Metal.hpp"
 #include "dxmt_gw2_stats.hpp"
 #include "dxmt_gw2_timestamp.hpp"
+#include "dxmt_gw2_map.hpp"
 #include "d3d11_annotation.hpp"
 #include "d3d11_context.hpp"
 #include "d3d11_device_child.hpp"
@@ -1202,6 +1203,33 @@ public:
 
     if (!pDstResource)
       return;
+
+    // gw2 (#25): with DXMT_MAP_FAST, a discard or no-overwrite update of a buffer with a DynamicBuffer
+    // (the whole buffer counts as a discard) skips BlitObject's and GetDesc's virtual calls and the
+    // virtual lookup; it makes the same Map/Unmap calls as the branch below
+    if (gw2_map_fast_ && GetResourceCommon(pDstResource)->gw2_dynamic_) {
+      auto common = GetResourceCommon(pDstResource);
+      uint32_t buffer_len = common->gw2_byte_width_;
+      uint32_t copy_offset = 0;
+      uint32_t copy_len = buffer_len;
+      if (pDstBox) {
+        if (pDstBox->right <= pDstBox->left) {
+          return;
+        }
+        copy_offset = pDstBox->left;
+        copy_len = pDstBox->right - copy_offset;
+      }
+      bool discard = (CopyFlags & D3D11_COPY_DISCARD) || (copy_len == buffer_len && copy_offset == 0);
+      if (discard || (CopyFlags & D3D11_COPY_NO_OVERWRITE)) {
+        Rc<DynamicBuffer> dynamic = common->gw2_dynamic_;
+        D3D11_MAPPED_SUBRESOURCE mapped;
+        Map(pDstResource, 0, discard ? D3D11_MAP_WRITE_DISCARD : D3D11_MAP_WRITE_NO_OVERWRITE, 0, &mapped);
+        auto [allocation, sub] = GetDynamicBufferAllocation(dynamic);
+        allocation->updateContents(copy_offset, pSrcData, copy_len, sub);
+        Unmap(pDstResource, 0);
+        return;
+      }
+    }
 
     BlitObject Dst(device, pDstResource);
 
@@ -4302,6 +4330,9 @@ public:
 #pragma region CommandEncoder Maintain State
 
   bool promote_flush = false;
+
+  // gw2 (#25): DXMT_MAP_FAST, cached
+  const bool gw2_map_fast_ = gw2::mapFast();
 
   // gw2 (#4): the speculative commit's bookkeeping, for CMDS and DXMT_PROMOTE_FLUSH_MIN. The
   // immediate context publishes gw2_front_ at each commit; a deferred context's never is.
