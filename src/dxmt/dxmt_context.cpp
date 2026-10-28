@@ -1109,12 +1109,17 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer &cmdbuf, uint64_t seqI
       );
       auto t1 = clock::now();
       currentFrameStatistics().drawable_blocking_interval += (t1 - t0);
-      if (data->after > 0)
+      currentFrameStatistics().next_drawable_interval += data->presenter->lastNextDrawable();
+      if (data->after > 0) {
         cmdbuf.presentDrawableAfterMinimumDuration(drawable, data->after);
-      else if (data->deadline > 0)
+        currentFrameStatistics().present_after++;
+      } else if (data->deadline > 0) {
         cmdbuf.presentDrawableWithDeadline(drawable, data->deadline);
-      else
+        currentFrameStatistics().present_deadline++;
+      } else {
         cmdbuf.presentDrawable(drawable);
+        currentFrameStatistics().present_plain++;
+      }
       data->~PresentData();
       break;
     }

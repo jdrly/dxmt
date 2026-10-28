@@ -55,6 +55,8 @@ struct FrameStatistics {
   clock::duration drawable_blocking_interval{};
   clock::duration present_latency_interval{};
   uint32_t present_split_count = 0;
+  clock::duration next_drawable_interval{}; // gw2: nextDrawable alone (#3)
+  uint32_t present_plain = 0, present_deadline = 0, present_after = 0; // gw2: the present branch taken (#3)
   ScalerInfo last_scaler_info{};
 
   void
@@ -78,6 +80,8 @@ struct FrameStatistics {
     drawable_blocking_interval = {};
     present_latency_interval = {};
     present_split_count = 0;
+    next_drawable_interval = {};
+    present_plain = present_deadline = present_after = 0;
     last_scaler_info.type = {};
   };
 };
