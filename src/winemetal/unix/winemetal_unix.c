@@ -15,6 +15,7 @@
 #define WINEMETAL_API
 #include "../winemetal_thunks.h"
 #include "../airconv_thunks.h"
+#include "pso_archive.h"
 
 typedef int NTSTATUS;
 #define STATUS_SUCCESS 0
@@ -390,8 +391,13 @@ _MTLDevice_newComputePipelineState(void *obj) {
                                                     count:info->num_binary_archives_for_lookup];
   MTLPipelineOption options =
       info->fail_on_binary_archive_miss ? MTLPipelineOptionFailOnBinaryArchiveMiss : MTLPipelineOptionNone;
-  params->ret_pso =
-      (obj_handle_t)[device newComputePipelineStateWithDescriptor:descriptor options:options reflection:nil error:&err];
+  /* gw2 (#5): DXMT_PSO_ARCHIVE=1 looks the pipeline up in earlier sessions' archives and adds it
+     to this session's, unless the caller manages archives itself */
+  if (pso_archive_enabled() && !info->num_binary_archives_for_lookup && !info->binary_archive_for_serialization)
+    params->ret_pso = (obj_handle_t)pso_archive_new_compute(device, descriptor, &err);
+  else
+    params->ret_pso =
+        (obj_handle_t)[device newComputePipelineStateWithDescriptor:descriptor options:options reflection:nil error:&err];
   params->ret_error = (obj_handle_t)[err retain];
   if (!err && info->binary_archive_for_serialization) {
     [(id<MTLBinaryArchive>)info->binary_archive_for_serialization addComputePipelineFunctionsWithDescriptor:descriptor
@@ -573,10 +579,15 @@ _MTLDevice_newRenderPipelineState(void *obj) {
   NSError *err = NULL;
   MTLPipelineOption options =
       info->fail_on_binary_archive_miss ? MTLPipelineOptionFailOnBinaryArchiveMiss : MTLPipelineOptionNone;
-  params->ret_pso = (obj_handle_t)[(id<MTLDevice>)params->device newRenderPipelineStateWithDescriptor:descriptor
-                                                                                              options:options
-                                                                                           reflection:nil
-                                                                                                error:&err];
+  /* gw2 (#5): DXMT_PSO_ARCHIVE=1 looks the pipeline up in earlier sessions' archives and adds it
+     to this session's, unless the caller manages archives itself */
+  if (pso_archive_enabled() && !info->num_binary_archives_for_lookup && !info->binary_archive_for_serialization)
+    params->ret_pso = (obj_handle_t)pso_archive_new_render((id<MTLDevice>)params->device, descriptor, &err);
+  else
+    params->ret_pso = (obj_handle_t)[(id<MTLDevice>)params->device newRenderPipelineStateWithDescriptor:descriptor
+                                                                                                options:options
+                                                                                             reflection:nil
+                                                                                                  error:&err];
   params->ret_error = (obj_handle_t)[err retain];
   if (!err && info->binary_archive_for_serialization) {
     [(id<MTLBinaryArchive>)info->binary_archive_for_serialization addRenderPipelineFunctionsWithDescriptor:descriptor
@@ -3475,11 +3486,10 @@ const void *__wine_unix_call_funcs[] = {
     &_MTLCommandBuffer_presentDrawableWithDeadline,
     &_MetalView_visibility, /* 147, gw2 (#1) */
     &_MTLDrawable_trackPresented, /* 148: gw2 (#7) */
-    /* gw2: 149-152 are reserved for #5 */
-    NULL,
-    NULL,
-    NULL,
-    NULL,
+    &_WMTPSOArchiveInit, /* 149-151: gw2 (#5) PSO archives */
+    &_WMTPSOArchiveFlush,
+    &_WMTPSOArchiveQuery,
+    NULL, /* 152: reserved for jdrly/dxmt #5 */
     &_WMTSetThreadQoSClassSelf, /* 153, gw2 #9 */
 };
 
@@ -3634,11 +3644,10 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_MTLCommandBuffer_presentDrawableWithDeadline,
     &_MetalView_visibility, /* 147, gw2 (#1) */
     &_MTLDrawable_trackPresented, /* 148: gw2 (#7) */
-    /* gw2: 149-152 are reserved for #5 */
-    NULL,
-    NULL,
-    NULL,
-    NULL,
+    &_WMTPSOArchiveInit, /* 149-151: gw2 (#5) PSO archives */
+    &_WMTPSOArchiveFlush,
+    &_WMTPSOArchiveQuery,
+    NULL, /* 152: reserved for jdrly/dxmt #5 */
     &_WMTSetThreadQoSClassSelf, /* 153, gw2 #9 */
 };
 #endif

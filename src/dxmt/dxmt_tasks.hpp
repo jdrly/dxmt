@@ -1,5 +1,6 @@
 #pragma once
 
+#include "dxmt_gw2_compile.hpp"
 #include "thread.hpp"
 #include "util_win32_compat.h"
 #include <atomic>
@@ -53,6 +54,7 @@ template <typename Task> task_scheduler<Task>::task_scheduler() {
   for (unsigned i = 0; i < threads; i++) {
     workers_.emplace_back([this]() { worker_func(); });
   }
+  gw2::compileThreads(threads); // gw2 (#5)
 }
 
 template <typename Task> task_scheduler<Task>::~task_scheduler() {
@@ -107,6 +109,7 @@ task_scheduler<Task>::worker_func() {
           task_continuation_.erase(range.first, range.second);
           task_trait.set_done(continuation);
         }
+        gw2::compileQueue(-1); // gw2 (#5): a submitted task completed
         {
           std::unique_lock<dxmt::mutex> lock(worker_mutex_);
           for (auto &task : continuation_buffer) {
@@ -134,10 +137,12 @@ void
 task_scheduler<Task>::submit(Task task) {
   std::unique_lock<dxmt::mutex> lock(worker_mutex_);
   task_queue_.push(task);
+  gw2::compileQueue(1); // gw2 (#5): compile queue depth = submitted, not yet completed
 
   if (running.load(std::memory_order_relaxed) == threads && threads < max_threads) {
     workers_.emplace_back([this]() { worker_func(); });
     threads++;
+    gw2::compileThreads(threads); // gw2 (#5)
   }
 
   worker_cond_.notify_one();

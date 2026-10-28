@@ -21,6 +21,8 @@
 #include "d3d11_device.hpp"
 #include "d3d11_pipeline.hpp"
 #include "log/log.hpp"
+#include "dxmt_gw2_compile.hpp"
+#include "dxmt_gw2_stats.hpp"
 
 namespace dxmt {
 
@@ -63,7 +65,10 @@ public:
   }
 
   void GetPipeline(MTL_COMPILED_GRAPHICS_PIPELINE *pPipeline) final {
-    ready_.wait(false, std::memory_order_acquire);
+    if (!ready_.load(std::memory_order_acquire)) {
+      gw2::CompileWaitScope wait; // gw2 (#5): the encode thread waits for this compile
+      ready_.wait(false, std::memory_order_acquire);
+    }
     *pPipeline = {state_mesh_};
   }
 
@@ -131,7 +136,9 @@ public:
 
     info.raster_sample_count = SampleCount;
 
+    auto t0 = gw2::nowNs();
     state_mesh_ = device_->GetMTLDevice().newRenderPipelineState(info, err);
+    gw2::compilePipelineBuilt(gw2::nowNs() - t0, state_mesh_ != nullptr); // gw2 (#5)
 
     if (state_mesh_ == nullptr) {
       ERR("Failed to create mesh PSO: ", err.description().getUTF8String());
