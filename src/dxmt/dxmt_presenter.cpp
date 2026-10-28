@@ -3,6 +3,7 @@
 #include "Metal.hpp"
 #include "dxmt_format.hpp"
 #include "dxmt_presenter.hpp"
+#include "dxmt_gw2_stats.hpp"
 #include "util_likely.hpp"
 #include "log/log.hpp"
 
@@ -166,9 +167,14 @@ Presenter::encodeCommands(
     std::function<void(WMT::RenderCommandEncoder)> &&wait_fences,
     std::function<void(WMT::RenderCommandEncoder)> &&update_fences
 ) {
-  auto t0 = std::chrono::high_resolution_clock::now();
+  // gw2 (#3): nextDrawable alone for STATS2, only with DXMT_STATS on
+  bool stats = gw2::statsEnabled();
+  std::chrono::high_resolution_clock::time_point t0;
+  if (stats)
+    t0 = std::chrono::high_resolution_clock::now();
   auto drawable = layer_.nextDrawable();
-  last_next_drawable_ = std::chrono::high_resolution_clock::now() - t0;
+  if (stats)
+    last_next_drawable_ = std::chrono::high_resolution_clock::now() - t0;
 
   WMTRenderPassInfo info;
   WMT::InitializeRenderPassInfo(info);

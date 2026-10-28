@@ -10,7 +10,7 @@ GW2 on Mac sets `DXMT_LOG_PATH` to its `work/logs`, so the lines below land in
 
 | Variable | Default | What it does | Off restores |
 |---|---|---|---|
-| `DXMT_STATS` | on | The 2 s statistics lines (`STATS`, `STATS2`, `PACE`, `GPU`, the sections), `HITCH` lines, the startup line, and all their measuring | none of it, and no measuring |
+| `DXMT_STATS` | on | The 2 s statistics lines (`STATS`, `STATS2`, `PACE`, `GPU`, the sections), `HITCH` lines, the startup line, and all their measuring (the fork's timers, the `nextDrawable` timer, the present-branch counts, keeping split-off command buffers until they complete) | none of it, and no measuring beyond upstream's frame statistics |
 | `DXMT_HITCH_MS` | 50 | A `HITCH` line for a Present-to-Present interval (game's render thread) at least this long; `0` turns them off | — |
 | `DXMT_PRESENT_SPLIT` | on | Commit the frame's command buffer before `nextDrawable` and present from a new one | the present in the frame's last buffer |
 | `DXMT_DISPLAY_SYNC` | on | A present with a sync interval uses `CAMetalLayer`'s vsync (`displaySyncEnabled`); a minimum duration only for intervals over one refresh, half a refresh short | DXMT's own pacing (minimum duration of exactly one refresh, display sync off) |
@@ -64,13 +64,15 @@ All are written right after `STATS`, from the same window.
 |---|---|---|
 | `STATS2` | `nextdrawable` | `nextDrawable` alone, avg/max ms per frame (part of `drawable`) |
 | | `present` | Presents per branch in the window: `plain`, `deadline` (`presentDrawable:atTime:`), `after` (minimum duration) |
-| | `wait` | The render thread's waits per frame, `commit` + `sync` + `latency`, avg/max |
-| `PACE` | `app` | The **game's** Present-to-Present interval on its render thread: p50/p95/p99/max ms (p99 over ~100 frames is noisy) |
+| | `wait` | The render thread's waits per frame, `commit` + `sync` + `latency`, avg/max (per frame-statistics slot, as `STATS`) |
+| `PACE` | `app` | The **game's** Present-to-Present interval on its render thread: p50/p95/p99/max ms (p99 over ~100 frames is noisy). An interval runs from the top of one Present to the top of the next |
 | | `slow33`, `slow50`, `n` | Intervals over 33.4 and 50 ms, and how many intervals |
-| | `dxmt` | Render-thread time inside DXMT's entry points, ms per frame, then per category `ms/calls` per frame: `present` (Present's own work, without the throttle and the latency wait), `map` (Map and Unmap, **their waits included**), `flush`, `create` (every device `Create*`, any thread), `draw` and `dispatch` (one call in 16 timed and scaled: an estimate). Nested calls count once |
-| `GPU` | `gpuspan` | Per frame, the union of DXMT's command buffers' GPU execution spans (`GPUStartTime`..`GPUEndTime`), avg/max ms. A span union, not the GPU's active time; never compare it with Instruments' fragment/vertex busy time |
-| | `gpugap` | The gap between one frame's last GPU end and the next one's first GPU start, avg/max ms (frames that overlap don't count) |
-| | `frames`, `buffers`, `missing` | Frames collected, command buffers per frame, buffers without timestamps |
+| | `dxmt` | The **presenting thread's** time inside DXMT's entry points within those same intervals (each interval is stored with its own time, so calls and durations can't fall into different windows), ms per frame, then per category `ms/calls` per frame: `present` (Present's own work, without the background throttle's and the frame limiter's sleeps and the latency wait), `presentwait` (Present's wait in `PresentBoundary` for frame N − `maxlatency`, the same wait as `STATS`' `latency`; `present` + `presentwait` is the whole Present, they don't overlap), `map` (Map and Unmap, **their waits included**), `flush`, `create` (`Create*` on this thread), `draw` and `dispatch` (each times one in 16 of its **own** calls and scales it: an estimate; all calls are counted). Nested calls count once. A Present is counted in the interval its own work and wait fall into, so a frame's interval holds the previous Present |
+| | `other` | Every other thread's time inside DXMT (worker threads' `Create*`, deferred contexts' draws, …), ms per frame of the window, then the non-zero categories `ms/calls` per frame. Not part of `dxmt`, and not paired with intervals: it is drained when the line is written |
+| `GPU` | `gpuspan` | Per frame, the union of the GPU execution spans (`GPUStartTime`..`GPUEndTime`) of **all** of the frame's command buffers on this device's queue, the ones the present split committed included, avg/max ms over the complete frames. A span union, not the GPU's active time; never compare it with Instruments' fragment/vertex busy time. `unavailable` when no frame in the window was complete |
+| | `gpugap` | The gap between one complete frame's last GPU end and the next complete frame's first GPU start, avg/max ms over the positive gaps (frames that overlap count as no gap); `0.00/0.0` if every pair overlapped, `unavailable` without two consecutive complete frames. Gaps are taken on the finish thread, so the one across two windows counts too |
+| | `frames`, `incomplete` | Complete frames (every buffer had timestamps) and frames with a buffer without timestamps; incomplete frames are left out of `gpuspan` and `gpugap` |
+| | `buffers`, `missing`, `dropped` | Command buffers per frame (all frames), buffers without timestamps, and (only if non-zero) frames the queue's bounded handoff (1024) dropped before the line was written |
 | sections | | A feature's own line, `<NAME> k=v …` (see below) |
 
 Sections: a feature registers a function with `gw2::SectionRegistrar` (`src/dxmt/dxmt_gw2_stats.hpp`) that returns its part of the window; each non-empty one is logged as its own line after `GPU`. A feature that adds a section documents it here.
@@ -79,8 +81,8 @@ Sections: a feature registers a function with `gw2::SectionRegistrar` (`src/dxmt
 
 | Line | When |
 |---|---|
-| `GW2 fork <commit>: DXMT_…=… WINENCPU=… chunks=… cpus=… refresh=…` | Once, at the first Present: the build, every `DXMT_*` variable set, the chunk count in effect (`DXMT_CHUNKS`), the CPUs the game sees |
-| `HITCH frame=… ms=… commit=… sync=…x… latency=… bgsleep=… dxmt(ms/calls): …` | A Present-to-Present interval of at least `DXMT_HITCH_MS`: that frame's waits and its render-thread time inside DXMT per category |
+| `GW2 fork <commit>: DXMT_STATS=1 DXMT_HITCH_MS=… DXMT_PRESENT_SPLIT=… DXMT_DISPLAY_SYNC=… DXMT_PRESENT_DEADLINE=… DXMT_CAP_LIMITER=… DXMT_STENCIL_PFV=… DXMT_DEPTH_PFV=… DXMT_BG_FPS=… DXMT_BG_FPS_MINIMIZED=… DXMT_BG_POLICY=… DXMT_RENDER_THREAD_PRIORITY=… DXMT_PSO_BLEND_HASH=… DXMT_PSO_MRU=… DXMT_PSO_TOPOLOGY_KEEP=… DXMT_CHUNKS=… DXMT_MAX_FRAME_LATENCY=… cpus=… refresh=… set: …` | Once per process, at the first Present: the build, the **effective** value of every switch above (defaults included; `DXMT_PRESENT_DEADLINE=refresh` is one refresh, `DXMT_CHUNKS` is the ring size in effect, `DXMT_MAX_FRAME_LATENCY=unset` leaves the game's value), the CPUs the game sees, the refresh rate (0 if unknown), then every `DXMT_*`, `WINENCPU` and `WINEMSYNC` variable set (`set: none` if none). A PR that adds a switch adds its effective value here |
+| `HITCH frame=… ms=… commit=…x… sync=…x… bgsleep=… dxmt(ms/calls): …` | A Present-to-Present interval of at least `DXMT_HITCH_MS`, logged at the top of the Present that ends it. `frame` is the frame that Present presents (1-based, as the latency fence counts); the interval holds the previous Present and the game's work on this frame. `commit` (waits for a free chunk) and `sync` (Map's waits for the GPU) are ms × count, from the same interval; they overlap the categories they happen in. `bgsleep` is whether the background throttle was on. The categories are as `PACE`'s `dxmt` (`presentwait` is the latency wait) |
 | `SetMaximumFrameLatency(n)` | Every call; 0 is taken as 3 |
 | `SetMaximumFrameLatency(n): DXMT_MAX_FRAME_LATENCY keeps m` | Every call while `DXMT_MAX_FRAME_LATENCY` is set: the game asked for `n`, `m` stays in effect |
 | `CommandQueue: chunks=N (default\|DXMT_CHUNKS) metalbuffers=M maxlatency=L (…)` | Once per device: the ring's size, the Metal queue's bound on command buffers, and the frame latency it starts with (`DXMT_MAX_FRAME_LATENCY`, or 3 until the game sets it) |

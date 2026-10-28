@@ -15,6 +15,7 @@
 #include "log/log.hpp"
 #include "d3d11_resource.hpp"
 #include "d3d11_device.hpp"
+#include "d3d11_pipeline.hpp"
 #include "util_cpu_fence.hpp"
 #include "util_env.hpp"
 #include "util_string.hpp"
@@ -29,6 +30,7 @@
 #include <cfloat>
 #include <format>
 #include <algorithm>
+#include <mutex>
 #include <thread>
 
 /**
@@ -875,7 +877,7 @@ public:
     // gw2 (#7): the pacing of this present; a frame cap that display sync can't express sleeps here
     Pacing pacing = ComputePacing(SyncInterval);
     LimitFrameRate(pacing.limiter);
-    int64_t gw2_present_t0 = gw2::nowNs();
+    int64_t gw2_present_t0 = gw2::statsEnabled() ? gw2::nowNs() : 0;
 
     if (should_exit_fs)
       SetFullscreenState(FALSE, nullptr);
@@ -886,6 +888,7 @@ public:
     if (hr == DXGI_STATUS_OCCLUDED) {
       // flush commands without presenting
       device_context_->Commit();
+      PresentEnd(gw2_present_t0, 0);
       return hr;
     }
 
@@ -946,45 +949,102 @@ public:
 
     lock.unlock(); // since PresentBoundary() will and should only stall current thread
 
-    if (gw2::statsEnabled())
-      gw2::apiAdd(gw2::Api::Present, uint64_t(gw2::nowNs() - gw2_present_t0));
-
+    int64_t gw2_wait_t0 = gw2_present_t0 ? gw2::nowNs() : 0;
     cmd_queue.PresentBoundary();
+    PresentEnd(gw2_present_t0, gw2_wait_t0);
 
     return hr;
   };
 
+  // gw2 (#3): Present's time, counted at its end so that its call and its time fall into the same
+  // Present-to-Present interval: `present`, its own work (the throttle's and limiter's sleeps
+  // excluded), and `presentwait`, PresentBoundary's wait for frame N - maxlatency. Together they
+  // are the whole Present; they don't overlap.
+  void PresentEnd(int64_t t0, int64_t wait_t0) {
+    if (!t0)
+      return;
+    int64_t t1 = gw2::nowNs();
+    gw2::apiCall(gw2::Api::Present);
+    gw2::apiAdd(gw2::Api::Present, uint64_t((wait_t0 ? wait_t0 : t1) - t0));
+    if (wait_t0) {
+      gw2::apiCall(gw2::Api::PresentWait);
+      gw2::apiAdd(gw2::Api::PresentWait, uint64_t(t1 - wait_t0));
+    }
+  }
+
   // gw2 (#3): the game's own pacing, HITCH lines and the startup line, at the top of Present on
-  // the game's render thread.
+  // the game's render thread. Each interval runs from the top of one Present to the top of the
+  // next and is kept with the presenting thread's DXMT time and waits inside it, so a frame's
+  // calls and its duration can't end up in different windows or in different frames.
+  struct PaceRecord {
+    double ms;
+    gw2::ApiTotals api;
+  };
+  static constexpr size_t kPaceMax = 16384;
+  std::mutex pace_mutex_;
+  std::vector<PaceRecord> pace_; // drained by LogPace on the encode thread
+  int64_t pace_last_ns_ = 0;     // render thread
+
   void PresentStart() {
     if (!gw2::statsEnabled())
       return;
-    static const double s_hitch_ms = [] {
-      auto v = env::getEnvVar("DXMT_HITCH_MS");
-      return v.empty() ? 50.0 : std::strtod(v.c_str(), nullptr);
-    }();
-    gw2::logStartup(str::format(
-        "chunks=", device_->GetDXMTDevice().queue().ChunkCount(), " cpus=", GetActiveProcessorCount(ALL_PROCESSOR_GROUPS), " refresh=",
-        init_refresh_rate_ != DBL_MAX ? init_refresh_rate_ : 0.0
-    ));
-    gw2::apiCall(gw2::Api::Present);
-    double interval = gw2::appPresent();
-    auto &cmd_queue = device_->GetDXMTDevice().queue();
-    if (s_hitch_ms > 0 && interval >= s_hitch_ms) {
-      auto ms = [](auto d) { return std::chrono::duration<double, std::milli>(d).count(); };
-      auto &f = cmd_queue.CurrentFrameStatistics();
-      auto api = gw2::apiFrameOfThisThread();
-      std::string cats;
-      for (unsigned i = 0; i < gw2::kApiCount; i++)
-        if (api.calls[i])
-          cats += str::format(" ", gw2::kApiNames[i], "=", std::format("{:.1f}", api.ns[i] / 1e6), "/", api.calls[i]);
-      Logger::info(std::format(
-          "HITCH frame={} ms={:.1f} commit={:.1f} sync={:.1f}x{} latency={:.1f} bgsleep={}{}", cmd_queue.CurrentFrameSeq(),
-          interval, ms(f.commit_interval), ms(f.sync_interval), f.sync_count, ms(f.present_latency_interval),
-          bg_fps_ ? "on" : "off", cats.empty() ? std::string(" dxmt=none") : " dxmt(ms/calls):" + cats
-      ));
+    if (gw2::takeStartup())
+      LogStartup();
+    int64_t now = gw2::nowNs();
+    auto interval = gw2::takeThreadInterval();
+    if (!pace_last_ns_) {
+      pace_last_ns_ = now;
+      return;
     }
-    gw2::apiFrameReset();
+    double ms = (now - pace_last_ns_) / 1e6;
+    pace_last_ns_ = now;
+    {
+      std::lock_guard lock(pace_mutex_);
+      if (pace_.size() < kPaceMax)
+        pace_.push_back({ms, interval.api});
+    }
+    double hitch_ms = gw2::hitchMs();
+    if (hitch_ms <= 0 || ms < hitch_ms)
+      return;
+    // frame: the frame this Present presents (1-based, as the latency fence counts); its interval
+    // holds the previous Present (its work and latency wait) and the game's work on this frame
+    auto &w = interval;
+    std::string cats;
+    for (unsigned i = 0; i < gw2::kApiCount; i++)
+      if (w.api.calls[i])
+        cats += std::format(" {}={:.1f}/{}", gw2::kApiNames[i], w.api.ns[i] / 1e6, w.api.calls[i]);
+    auto commit = (unsigned)gw2::Wait::Commit, sync = (unsigned)gw2::Wait::Sync;
+    Logger::info(std::format(
+        "HITCH frame={} ms={:.1f} commit={:.1f}x{} sync={:.1f}x{} bgsleep={}{}",
+        device_->GetDXMTDevice().queue().CurrentFrameSeq(), ms, w.wait_ns[commit] / 1e6, w.wait_count[commit],
+        w.wait_ns[sync] / 1e6, w.wait_count[sync], bg_fps_ ? "on" : "off",
+        cats.empty() ? std::string(" dxmt=none") : " dxmt(ms/calls):" + cats
+    ));
+  }
+
+  // gw2 (#3): the startup line, with every fork switch's effective value, taken from the code that
+  // owns it where it is reachable from here
+  void LogStartup() {
+    auto &queue = device_->GetDXMTDevice().queue();
+    auto &bg = bgConfig();
+    auto &pso = gw2::psoSettings();
+    double refresh = init_refresh_rate_ != DBL_MAX ? init_refresh_rate_ : 0.0;
+    std::string deadline = present_deadline_ms_ < 0 ? std::string("refresh") : std::format("{}", present_deadline_ms_);
+    std::string max_latency = queue.MaxLatencyOverride() ? std::to_string(queue.MaxLatencyOverride()) : "unset";
+    gw2::logStartup(std::format(
+        "DXMT_STATS=1 DXMT_HITCH_MS={} DXMT_PRESENT_SPLIT={} DXMT_DISPLAY_SYNC={} DXMT_PRESENT_DEADLINE={} "
+        "DXMT_CAP_LIMITER={} DXMT_STENCIL_PFV={} DXMT_DEPTH_PFV={} DXMT_BG_FPS={} DXMT_BG_FPS_MINIMIZED={} "
+        "DXMT_BG_POLICY={} DXMT_RENDER_THREAD_PRIORITY={} DXMT_PSO_BLEND_HASH={} DXMT_PSO_MRU={} "
+        "DXMT_PSO_TOPOLOGY_KEEP={} DXMT_CHUNKS={} DXMT_MAX_FRAME_LATENCY={} cpus={} refresh={}",
+        gw2::hitchMs(), int(queue.argument_encoding_ctx.presentSplit()), int(display_sync_vsync_), deadline,
+        int(cap_limiter_),
+        // read as d3d11_resource_helper.cpp and RaiseRenderThreadPriority read them
+        int(env::getEnvVar("DXMT_STENCIL_PFV") == "1"), int(env::getEnvVar("DXMT_DEPTH_PFV") == "1"), bg.fps,
+        bg.fps_minimized, bg.policy == BgPolicy::Occlusion ? "occlusion" : "focus",
+        std::strtoul(env::getEnvVar("DXMT_RENDER_THREAD_PRIORITY").c_str(), nullptr, 10), int(pso.blend_hash),
+        int(pso.mru), int(pso.topology_keep), queue.ChunkCount(), max_latency,
+        GetActiveProcessorCount(ALL_PROCESSOR_GROUPS), refresh
+    ));
   }
 
   // gw2 (#9): DXMT_RENDER_THREAD_PRIORITY raises the thread that calls Present (GW2's bgfx render
@@ -1374,20 +1434,35 @@ public:
         "STATS2 nextdrawable={:.2f}/{:.1f} present=plain:{}/deadline:{}/after:{} wait={:.2f}/{:.1f}", w.next_drawable / n,
         w.next_drawable_max, w.br_plain, w.br_deadline, w.br_after, w.wait / n, w.wait_max
     ));
-    LogPace(elapsed);
+    LogPace();
     LogGpu();
     gw2::emitSections(elapsed, w.frames);
     w = StatsWindow{};
     w.start = w.last = now;
   }
 
-  // gw2 (#3): the game's own Present-to-Present interval on its render thread, and the render
-  // thread's time inside DXMT (Draw/Dispatch sampled 1 in 16 and scaled; Map includes its waits).
-  void LogPace(double elapsed) {
-    auto app = gw2::appDrain();
-    auto api = gw2::apiDrain();
-    if (app.empty())
+  // gw2 (#3): the game's own Present-to-Present interval on its render thread, the render
+  // thread's time inside DXMT in those intervals (Draw/Dispatch sampled 1 in 16 and scaled; Map
+  // includes its waits), and the other threads' time inside DXMT.
+  void LogPace() {
+    std::vector<PaceRecord> records;
+    {
+      std::lock_guard lock(pace_mutex_);
+      records.swap(pace_);
+    }
+    auto other = gw2::otherDrain();
+    if (records.empty())
       return;
+    std::vector<double> app;
+    app.reserve(records.size());
+    gw2::ApiTotals api;
+    for (auto &r : records) {
+      app.push_back(r.ms);
+      for (unsigned i = 0; i < gw2::kApiCount; i++) {
+        api.calls[i] += r.api.calls[i];
+        api.ns[i] += r.api.ns[i];
+      }
+    }
     std::sort(app.begin(), app.end());
     auto pct = [&](double p) { return app[std::min(app.size() - 1, size_t(p * (app.size() - 1) + 0.5))]; };
     uint32_t slow33 = 0, slow50 = 0;
@@ -1396,44 +1471,61 @@ public:
       slow50 += v > 50.0;
     }
     double frames = app.size();
-    std::string dxmt;
-    double total = 0;
+    std::string dxmt, others;
+    double total = 0, other_total = 0;
     for (unsigned i = 0; i < gw2::kApiCount; i++) {
       total += api.ns[i] / 1e6;
       dxmt += std::format(" {}={:.2f}/{:.0f}", gw2::kApiNames[i], api.ns[i] / 1e6 / frames, api.calls[i] / frames);
+      other_total += other.ns[i] / 1e6;
+      if (other.calls[i])
+        others += std::format(
+            " {}={:.2f}/{:.1f}", gw2::kApiNames[i], other.ns[i] / 1e6 / frames, other.calls[i] / frames
+        );
     }
     Logger::info(std::format(
         "PACE app=p50:{:.1f}/p95:{:.1f}/p99:{:.1f}/max:{:.1f} slow33={} slow50={} n={} dxmt={:.2f}ms/frame (sampled 1/16 "
-        "draw+dispatch; ms/calls per frame:{})",
-        pct(0.50), pct(0.95), pct(0.99), app.back(), slow33, slow50, app.size(), total / frames, dxmt
+        "draw, 1/16 dispatch; ms/calls per frame:{}) other={:.2f}ms/frame{}",
+        pct(0.50), pct(0.95), pct(0.99), app.back(), slow33, slow50, app.size(), total / frames, dxmt,
+        other_total / frames, others.empty() ? std::string() : " (" + others.substr(1) + ")"
     ));
   }
 
   // gw2 (#3): per frame, the union of DXMT's command buffers' GPU execution spans (not the GPU's
-  // active time) and the gap between one frame's last GPU end and the next one's first GPU start.
+  // active time) and the gap between one frame's last GPU end and the next one's first GPU start,
+  // from this device's queue. Only frames with timestamps on every buffer count; with none, the
+  // numbers are "unavailable".
   void LogGpu() {
-    auto frames = gw2::gpuSpanDrain();
+    uint32_t dropped = 0;
+    auto frames = device_->GetDXMTDevice().queue().gpu_collector.drain(dropped);
     if (frames.empty())
       return;
     double span = 0, span_max = 0, gap = 0, gap_max = 0;
-    uint32_t gaps = 0, buffers = 0, missing = 0;
-    for (size_t i = 0; i < frames.size(); i++) {
-      double s = frames[i].span_ns / 1e6;
+    uint32_t complete = 0, pairs = 0, gaps = 0, buffers = 0, missing = 0;
+    for (auto &f : frames) {
+      buffers += f.buffers;
+      missing += f.missing;
+      if (!f.complete)
+        continue;
+      complete++;
+      double s = f.span_ns / 1e6;
       span += s;
       span_max = std::max(span_max, s);
-      buffers += frames[i].buffers;
-      missing += frames[i].missing;
-      if (i && frames[i].first_ns && frames[i - 1].last_ns && frames[i].first_ns > frames[i - 1].last_ns) {
-        double g = (frames[i].first_ns - frames[i - 1].last_ns) / 1e6;
+      if (!f.has_gap)
+        continue;
+      pairs++;
+      if (f.gap_ns) {
+        double g = f.gap_ns / 1e6;
         gap += g;
         gap_max = std::max(gap_max, g);
         gaps++;
       }
     }
-    double n = frames.size();
+    std::string span_text = complete ? std::format("{:.2f}/{:.1f}", span / complete, span_max) : "unavailable";
+    std::string gap_text = pairs ? std::format("{:.2f}/{:.1f}", gaps ? gap / gaps : 0.0, gap_max) : "unavailable";
     Logger::info(std::format(
-        "GPU gpuspan={:.2f}/{:.1f} gpugap={:.2f}/{:.1f} frames={} buffers={:.1f} missing={}", span / n, span_max,
-        gaps ? gap / gaps : 0.0, gap_max, frames.size(), buffers / n, missing
+        "GPU gpuspan={} gpugap={} frames={} incomplete={} buffers={:.1f} missing={}{}", span_text, gap_text, complete,
+        frames.size() - complete, double(buffers) / frames.size(), missing,
+        dropped ? std::format(" dropped={}", dropped) : std::string()
     ));
   }
 
