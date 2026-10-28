@@ -135,7 +135,8 @@ section(double, uint32_t) {
         continue;
       }
       auto it = g_gpu_end.find(frame);
-      if (it == g_gpu_end.end() || frame >= g_gpu_latest || presented_ns <= it->second) {
+      // a GPU end of 0: none of the frame's command buffers reported one (GPUEndTime 0)
+      if (it == g_gpu_end.end() || !it->second || frame >= g_gpu_latest || presented_ns <= it->second) {
         nogpu++;
         continue;
       }
