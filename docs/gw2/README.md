@@ -20,6 +20,7 @@ GW2 on Mac sets `DXMT_LOG_PATH` to its `work/logs`, so the lines below land in
 | `DXMT_BG_FPS_MINIMIZED` | 10 | The same while GW2's window is minimized | `=0`: no throttle |
 | `DXMT_RENDER_THREAD_PRIORITY` | off | On the first Present of each thread that presents (GW2's render thread): `=1` sets the macOS QoS class user-interactive (`pthread_set_qos_class_self_np` through the bridge), `=2` calls `SetThreadPriority(THREAD_PRIORITY_HIGHEST)`, `=3` both; see [Render thread priority](#render-thread-priority) | unset or `=0`: the thread keeps the priority and QoS it had |
 | `DXMT_DEPTH_PFV` | off | `=1` keeps `PixelFormatView` (no lossless compression) on typeless single-plane depth targets (`R32_TYPELESS`, `R16_TYPELESS` bound as depth), the part `DXMT_STENCIL_PFV` doesn't cover (#2) | — |
+| `DXMT_BG_POLICY` | `focus` | What "in the background" means for `DXMT_BG_FPS`. `focus`: another process's window is in the foreground, or none is (pid 0, counted as another process). `occlusion`: GW2's window isn't visible on screen (`NSWindow.occlusionState` without `Visible`, read through the bridge at most 10 times a second) or is miniaturized (`DXMT_BG_FPS_MINIMIZED`), whoever has the focus, as d9mt does. A minimized window (`IsIconic`) throttles under both | `focus` |
 
 Not switchable: `SetMaximumFrameLatency(0)` means the default, 3 (DXGI's definition). Typeless
 depth targets without stencil (`R32_TYPELESS`, `R16_TYPELESS` as depth) get `PixelFormatView` only
@@ -76,7 +77,8 @@ Sections: a feature registers a function with `gw2::SectionRegistrar` (`src/dxmt
 | `HITCH frame=… ms=… commit=… sync=…x… latency=… bgsleep=… dxmt(ms/calls): …` | A Present-to-Present interval of at least `DXMT_HITCH_MS`: that frame's waits and its render-thread time inside DXMT per category |
 | `SetMaximumFrameLatency(n)` | Every call; 0 is taken as 3 |
 | `Presenter: display sync on/off` | When `DXMT_DISPLAY_SYNC` switches the layer's vsync |
-| `Present: <reason>, throttling to N fps (foreground window …, pid …, ours …)` | The background throttle engages |
+| `Present: background throttle policy P (DXMT_BG_POLICY), N fps in the background (DXMT_BG_FPS), M fps minimized (DXMT_BG_FPS_MINIMIZED)` | Once, at the first Present (a warning before it if `DXMT_BG_POLICY` is neither `focus` nor `occlusion`) |
+| `Present: <reason>, throttling to N fps (policy …, <details>)` | The background throttle engages, or its rate or reason changes. Reasons: `window minimized` (details `IsIconic`); `another process in the foreground` (focus: `foreground window H pid N, ours M`, or `no foreground window (pid 0), counted as another process; ours M`); `window not visible (occluded)` and `window miniaturized` (occlusion: `visibility 0x…: visible= miniaturized= activeSpace=`) |
 | `Present: presenting normally again (was: …)` | It lets go |
 | `PixelFormatView (no lossless compression): format F bind B WxH` | Once per format and bind flags of a render or depth target that keeps the flag |
 | `RenderThreadPriority: thread T QoS OLD -> NEW (pthread_set_qos_class_self_np user-interactive: ok\|error E, left unchanged)` | `DXMT_RENDER_THREAD_PRIORITY` 1 or 3, once per presenting thread: its Win32 thread id, `qos_class_self()` before and after, and the call's result (an errno) |
@@ -145,3 +147,19 @@ subresources: a pass that writes one mip or slice while reading another also sho
 | `readonly` | The pass's read-only planes from the DSV flags (`depth`, `stencil`, `depth+stencil`, `none`). D3D11 only lets a plane be read while it's bound as depth if it's read-only, so `depth` or `depth+stencil` is the soft-particle case |
 | `stage`, `slot` | The shader stage and SRV slot that reads it |
 | `view`, `swizzled`, `aspect` | The SRV's Metal format (without swizzle bits), whether it's one of DXMT's swizzled formats, and the planes it covers |
+
+### BG
+
+`BG throttled=T/N share=S% bgsleep=avg/max fps=F reason=R policy=P`, only for a 2 s window in
+which the background throttle engaged. **A `BG` line marks that window's `STATS`, `PACE` and `GPU`
+lines as throttled: they aren't game performance.** From process-wide counters fed by every
+swapchain's throttle on the game's render thread.
+
+| Field | Meaning |
+|---|---|
+| `throttled` | Presents with the throttle engaged / all Presents in the window |
+| `share` | The share of the window spent throttled (each Present-to-Present interval counts under the decision of the Present that started it) |
+| `bgsleep` | ms the throttle slept per Present (all Presents of the window), avg/max |
+| `fps` | The throttle's rate at the window's last Present; `0`: it had let go |
+| `reason` | Why it last engaged: `minimized`, `foreground` (another process), `noforeground` (no foreground window, pid 0), `occluded`, `miniaturized` |
+| `policy` | `DXMT_BG_POLICY` |

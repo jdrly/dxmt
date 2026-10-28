@@ -739,6 +739,15 @@ ReleaseMetalView(obj_handle_t view) {
   UNIX_CALL(73, &params);
 }
 
+WINEMETAL_API uint64_t
+MetalView_visibility(obj_handle_t view) {
+  struct unixcall_generic_obj_uint64_ret params;
+  params.handle = view;
+  params.ret = 0;
+  UNIX_CALL(147, &params);
+  return params.ret;
+}
+
 WINEMETAL_API void
 MTLCommandEncoder_setLabel(obj_handle_t encoder, obj_handle_t label) {
   struct unixcall_generic_obj_obj_noret params;

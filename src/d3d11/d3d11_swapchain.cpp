@@ -95,6 +95,117 @@ GetMonitorFormatBpp(DXGI_FORMAT Format) {
   }
 }
 
+// gw2 (#1): the background throttle's policy and its 2 s numbers. Process-wide: fed by every
+// swapchain's ThrottleBackground() on the game's render thread, drained by the BG section on the
+// encode thread.
+namespace {
+
+enum class BgPolicy { Focus, Occlusion };
+
+struct BgPolicyConfig {
+  BgPolicy policy = BgPolicy::Focus;
+  uint32_t fps = 30, fps_minimized = 10;
+};
+
+const BgPolicyConfig &
+bgConfig() {
+  static const BgPolicyConfig config = [] {
+    BgPolicyConfig c;
+    auto fps = env::getEnvVar("DXMT_BG_FPS");
+    if (!fps.empty())
+      c.fps = uint32_t(std::strtoul(fps.c_str(), nullptr, 10));
+    auto min = env::getEnvVar("DXMT_BG_FPS_MINIMIZED");
+    if (!min.empty())
+      c.fps_minimized = uint32_t(std::strtoul(min.c_str(), nullptr, 10));
+    auto policy = env::getEnvVar("DXMT_BG_POLICY");
+    if (policy == "occlusion")
+      c.policy = BgPolicy::Occlusion;
+    else if (!policy.empty() && policy != "focus")
+      Logger::warn(str::format("Present: unknown DXMT_BG_POLICY=", policy, ", using focus"));
+    Logger::info(str::format(
+        "Present: background throttle policy ", c.policy == BgPolicy::Occlusion ? "occlusion" : "focus",
+        " (DXMT_BG_POLICY), ", c.fps, " fps in the background (DXMT_BG_FPS), ", c.fps_minimized,
+        " fps minimized (DXMT_BG_FPS_MINIMIZED)"
+    ));
+    return c;
+  }();
+  return config;
+}
+
+// Why the throttle engaged; the BG section shows the code.
+enum class BgReason : uint32_t { None, Minimized, Foreground, NoForeground, Occluded, Miniaturized };
+
+const char *
+bgReasonText(BgReason r) {
+  switch (r) {
+  case BgReason::None:
+    return nullptr;
+  case BgReason::Minimized:
+    return "window minimized";
+  // A NULL foreground window (pid 0) counts as another process: the Cmd+Tab case under winemac.
+  case BgReason::Foreground:
+  case BgReason::NoForeground:
+    return "another process in the foreground";
+  case BgReason::Occluded:
+    return "window not visible (occluded)";
+  case BgReason::Miniaturized:
+    return "window miniaturized";
+  }
+  return nullptr;
+}
+
+const char *
+bgReasonCode(BgReason r) {
+  switch (r) {
+  case BgReason::None:
+    return "none";
+  case BgReason::Minimized:
+    return "minimized";
+  case BgReason::Foreground:
+    return "foreground";
+  case BgReason::NoForeground:
+    return "noforeground";
+  case BgReason::Occluded:
+    return "occluded";
+  case BgReason::Miniaturized:
+    return "miniaturized";
+  }
+  return "none";
+}
+
+std::atomic<uint64_t> g_bg_presents{0};    // Presents that went through the throttle
+std::atomic<uint64_t> g_bg_throttled{0};   // of them, with the throttle engaged
+std::atomic<uint64_t> g_bg_engaged_ns{0};  // time between Presents while engaged
+std::atomic<uint64_t> g_bg_sleep_ns{0};    // time slept
+std::atomic<uint64_t> g_bg_sleep_max_ns{0};
+std::atomic<uint32_t> g_bg_fps{0};         // the rate in effect at the last Present
+std::atomic<uint32_t> g_bg_reason{0};      // the last reason it engaged for (BgReason)
+
+std::string
+BgSection(double window_ms, uint32_t) {
+  uint64_t presents = g_bg_presents.exchange(0, std::memory_order_relaxed);
+  uint64_t throttled = g_bg_throttled.exchange(0, std::memory_order_relaxed);
+  uint64_t engaged_ns = g_bg_engaged_ns.exchange(0, std::memory_order_relaxed);
+  uint64_t sleep_ns = g_bg_sleep_ns.exchange(0, std::memory_order_relaxed);
+  uint64_t sleep_max_ns = g_bg_sleep_max_ns.exchange(0, std::memory_order_relaxed);
+  uint32_t fps = g_bg_fps.load(std::memory_order_relaxed);
+  // Only a window in which the throttle engaged gets a line: it marks that window's STATS as
+  // throttled, not game performance.
+  if (!throttled && !engaged_ns && !fps)
+    return {};
+  double share = window_ms > 0 ? std::min(100.0, engaged_ns / 1e6 / window_ms * 100) : 0;
+  return std::format(
+      "throttled={}/{} share={:.0f}% bgsleep={:.1f}/{:.1f} fps={} reason={} policy={}", throttled, presents, share,
+      presents ? sleep_ns / 1e6 / presents : 0.0, sleep_max_ns / 1e6, fps,
+      bgReasonCode(BgReason(g_bg_reason.load(std::memory_order_relaxed))),
+      bgConfig().policy == BgPolicy::Occlusion ? "occlusion" : "focus"
+  );
+}
+
+gw2::SectionRegistrar g_bg_section("BG", &BgSection);
+
+} // namespace
+
 class ModeSetGuard {
   std::atomic_flag in_progress_;
 public:
@@ -961,26 +1072,47 @@ public:
   // the Mac ran hot. Present sleeps to DXMT_BG_FPS (default 30) while another process's window is
   // in the foreground and to DXMT_BG_FPS_MINIMIZED (default 10) while it is minimized; 0 turns
   // either off. Fixed cadence from the previous deadline; a frame that overran restarts it.
+  //
+  // gw2 (#1): DXMT_BG_POLICY picks what "in the background" means. focus (default): another
+  // process's window, or none, is in the foreground. occlusion (d9mt 42b0c47): the window isn't
+  // visible on screen (NSWindow occlusionState) or is miniaturized, whoever has the focus, so a
+  // visible GW2 behind another process's small window (Blish HUD) keeps its frame rate. Every
+  // transition is logged with its reason; the BG section reports the sleep and the share.
   uint32_t bg_fps_ = 0;
   const char *bg_reason_ = nullptr;
   HWND bg_fg_ = nullptr;
   DWORD bg_fg_pid_ = 0;
+  uint64_t bg_vis_ = 0;        // WMTViewVisibility, cached
+  int64_t bg_vis_at_ = 0;      // when bg_vis_ was read (gw2::nowNs); 0: never
+  int64_t bg_last_ns_ = 0;     // the previous Present through the throttle (for BG)
+  bool bg_last_engaged_ = false;
   clock::time_point bg_deadline_{};
 
+  static constexpr int64_t kBgVisibilityPollNs = 100'000'000; // read the cached state at most 10x/s
+
   void ThrottleBackground() {
-    static const uint32_t s_bg = [] {
-      auto v = env::getEnvVar("DXMT_BG_FPS");
-      return v.empty() ? 30u : uint32_t(std::strtoul(v.c_str(), nullptr, 10));
-    }();
-    static const uint32_t s_min = [] {
-      auto v = env::getEnvVar("DXMT_BG_FPS_MINIMIZED");
-      return v.empty() ? 10u : uint32_t(std::strtoul(v.c_str(), nullptr, 10));
-    }();
+    const auto &config = bgConfig();
     uint32_t fps = 0;
-    const char *reason = nullptr;
+    BgReason code = BgReason::None;
     if (wsi::isMinimized(hWnd)) {
-      fps = s_min;
-      reason = "window minimized";
+      fps = config.fps_minimized;
+      code = BgReason::Minimized;
+    } else if (config.policy == BgPolicy::Occlusion) {
+      int64_t t = gw2::nowNs();
+      if (!bg_vis_at_ || t - bg_vis_at_ >= kBgVisibilityPollNs) {
+        bg_vis_ = WMT::MetalViewVisibility(native_view_);
+        bg_vis_at_ = t;
+      }
+      // Unknown (before the first main-thread refresh) or not in a window: treated as visible.
+      if ((bg_vis_ & WMTViewVisibilityKnown) && !(bg_vis_ & WMTViewVisibilityNoWindow)) {
+        if (bg_vis_ & WMTViewVisibilityMiniaturized) {
+          fps = config.fps_minimized;
+          code = BgReason::Miniaturized;
+        } else if (!(bg_vis_ & WMTViewVisibilityVisible)) {
+          fps = config.fps;
+          code = BgReason::Occluded;
+        }
+      }
     } else {
       // Another process in front (Cmd+Tab under winemac), not "hWnd isn't the foreground window":
       // GW2's swapchain window isn't the one Wine reports as foreground while the game is in
@@ -990,33 +1122,89 @@ public:
       if (fg)
         GetWindowThreadProcessId(fg, &fg_pid);
       if (fg_pid != GetCurrentProcessId()) {
-        fps = s_bg;
-        reason = "another process in the foreground";
+        fps = config.fps;
+        code = fg ? BgReason::Foreground : BgReason::NoForeground;
       }
       bg_fg_ = fg;
       bg_fg_pid_ = fg_pid;
     }
+    const char *reason = fps ? bgReasonText(code) : nullptr;
+    if (!fps)
+      code = BgReason::None;
     auto now = clock::now();
     if (fps != bg_fps_ || reason != bg_reason_) {
       if (fps)
-        Logger::info(str::format(
-            "Present: ", reason, ", throttling to ", fps, " fps (foreground window ", (void *)bg_fg_, " pid ",
-            bg_fg_pid_, ", ours ", GetCurrentProcessId(), ")"
-        ));
+        Logger::info(str::format("Present: ", reason, ", throttling to ", fps, " fps (", BgDetails(code), ")"));
       else
         Logger::info(str::format("Present: presenting normally again (was: ", bg_reason_ ? bg_reason_ : "-", ")"));
       bg_fps_ = fps;
       bg_reason_ = reason;
       bg_deadline_ = now;
     }
-    if (!fps)
-      return;
-    bg_deadline_ += std::chrono::duration_cast<clock::duration>(std::chrono::nanoseconds(1000000000ull / fps));
-    if (bg_deadline_ <= now) {
-      bg_deadline_ = now;
-      return;
+
+    bool stats = gw2::statsEnabled();
+    int64_t t0 = 0;
+    if (stats) {
+      t0 = gw2::nowNs();
+      g_bg_presents.fetch_add(1, std::memory_order_relaxed);
+      // The interval since the previous Present (its sleep included) ran under that Present's
+      // decision: engaged time when it throttled.
+      if (bg_last_engaged_ && bg_last_ns_)
+        g_bg_engaged_ns.fetch_add(uint64_t(t0 - bg_last_ns_), std::memory_order_relaxed);
+      bg_last_ns_ = t0;
+      bg_last_engaged_ = fps != 0;
+      g_bg_fps.store(fps, std::memory_order_relaxed);
+      if (fps) {
+        g_bg_throttled.fetch_add(1, std::memory_order_relaxed);
+        g_bg_reason.store(uint32_t(code), std::memory_order_relaxed);
+      }
     }
-    std::this_thread::sleep_until(bg_deadline_);
+
+    bool slept = false;
+    if (fps) {
+      bg_deadline_ += std::chrono::duration_cast<clock::duration>(std::chrono::nanoseconds(1000000000ull / fps));
+      if (bg_deadline_ <= now) {
+        bg_deadline_ = now;
+      } else {
+        std::this_thread::sleep_until(bg_deadline_);
+        slept = true;
+      }
+    }
+
+    if (stats && slept) {
+      uint64_t ns = uint64_t(gw2::nowNs() - t0);
+      g_bg_sleep_ns.fetch_add(ns, std::memory_order_relaxed);
+      uint64_t prev = g_bg_sleep_max_ns.load(std::memory_order_relaxed);
+      while (ns > prev && !g_bg_sleep_max_ns.compare_exchange_weak(prev, ns, std::memory_order_relaxed))
+        ;
+    }
+  }
+
+  // gw2 (#1): what the throttle decided on, for its transition line.
+  std::string BgDetails(BgReason code) {
+    const char *policy = bgConfig().policy == BgPolicy::Occlusion ? "occlusion" : "focus";
+    switch (code) {
+    case BgReason::Minimized:
+      return str::format("policy ", policy, ", IsIconic");
+    case BgReason::Foreground:
+      return str::format(
+          "policy focus, foreground window ", (void *)bg_fg_, " pid ", bg_fg_pid_, ", ours ", GetCurrentProcessId()
+      );
+    case BgReason::NoForeground:
+      return str::format(
+          "policy focus, no foreground window (pid 0), counted as another process; ours ", GetCurrentProcessId()
+      );
+    case BgReason::Occluded:
+    case BgReason::Miniaturized:
+      return std::format(
+          "policy occlusion, visibility 0x{:x}: visible={} miniaturized={} activeSpace={}", bg_vis_,
+          (bg_vis_ & WMTViewVisibilityVisible) ? 1 : 0, (bg_vis_ & WMTViewVisibilityMiniaturized) ? 1 : 0,
+          (bg_vis_ & WMTViewVisibilityOnActiveSpace) ? 1 : 0
+      );
+    case BgReason::None:
+      break;
+    }
+    return str::format("policy ", policy);
   }
 
   // gw2: one STATS line every 2 s from the frame statistics the HUD shows (DXMT_STATS=0 turns it
