@@ -851,11 +851,13 @@ public:
 
   // gw2: the background throttle (d9mt 42b0c47). When the window isn't visible, macOS doesn't make
   // presents wait for vsync, so after a Cmd+Tab the game rendered uncapped in the background and
-  // the Mac ran hot. Present sleeps to DXMT_BG_FPS (default 30) while the window is not the
-  // foreground window and to DXMT_BG_FPS_MINIMIZED (default 10) while it is minimized; 0 turns
+  // the Mac ran hot. Present sleeps to DXMT_BG_FPS (default 30) while another process's window is
+  // in the foreground and to DXMT_BG_FPS_MINIMIZED (default 10) while it is minimized; 0 turns
   // either off. Fixed cadence from the previous deadline; a frame that overran restarts it.
   uint32_t bg_fps_ = 0;
   const char *bg_reason_ = nullptr;
+  HWND bg_fg_ = nullptr;
+  DWORD bg_fg_pid_ = 0;
   clock::time_point bg_deadline_{};
 
   void ThrottleBackground() {
@@ -872,14 +874,28 @@ public:
     if (wsi::isMinimized(hWnd)) {
       fps = s_min;
       reason = "window minimized";
-    } else if (!wsi::isForeground(hWnd)) {
-      fps = s_bg;
-      reason = "window not in the foreground";
+    } else {
+      // Another process in front (Cmd+Tab under winemac), not "hWnd isn't the foreground window":
+      // GW2's swapchain window isn't the one Wine reports as foreground while the game is in
+      // front, which throttled the whole session to 30 fps (a6047fe).
+      HWND fg = GetForegroundWindow();
+      DWORD fg_pid = 0;
+      if (fg)
+        GetWindowThreadProcessId(fg, &fg_pid);
+      if (fg_pid != GetCurrentProcessId()) {
+        fps = s_bg;
+        reason = "another process in the foreground";
+      }
+      bg_fg_ = fg;
+      bg_fg_pid_ = fg_pid;
     }
     auto now = clock::now();
     if (fps != bg_fps_ || reason != bg_reason_) {
       if (fps)
-        Logger::info(str::format("Present: ", reason, ", throttling to ", fps, " fps"));
+        Logger::info(str::format(
+            "Present: ", reason, ", throttling to ", fps, " fps (foreground window ", (void *)bg_fg_, " pid ",
+            bg_fg_pid_, ", ours ", GetCurrentProcessId(), ")"
+        ));
       else
         Logger::info(str::format("Present: presenting normally again (was: ", bg_reason_ ? bg_reason_ : "-", ")"));
       bg_fps_ = fps;
