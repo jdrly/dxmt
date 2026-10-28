@@ -24,10 +24,12 @@ GW2 on Mac sets `DXMT_LOG_PATH` to its `work/logs`, so the lines below land in
 | `DXMT_PSO_BLEND_HASH` | on | The pipeline key's hash includes a fingerprint of the blend state (exactly what the key's equality compares: disabled fields left out, one render target without independent blend, else one per color attachment) and `RasterizationEnabled`; computed once per blend state object. The equality rejects keys whose fingerprints differ without reading both blend descriptions | `=0`: the upstream hash (no blend, no `RasterizationEnabled`) and equality |
 | `DXMT_PSO_MRU` | on | Each context keeps its last 4 plain (VS/PS) pipelines with their keys and checks them, with the cache's own equality, before the device's pipeline cache (its lock, hash and bucket) | `=0`: every pipeline change looks up the cache |
 | `DXMT_PSO_TOPOLOGY_KEEP` | on | `IASetPrimitiveTopology` keeps the current pipeline when the new topology has the same class (point, line, triangle) and the pipeline is a plain one (no GS, HS or DS bound); adjacency and patch lists always invalidate | `=0`: every topology change invalidates the pipeline |
+| `DXMT_CHUNKS` | unset (32) | The chunk ring's size, `32`, `64` or `128` (anything else: 32, with a warning). The render thread blocks in `CommitCurrentChunk` at size − 1 chunks in flight. Set (even to 32), the Metal queue's bound on uncompleted command buffers is the size + 16 (headroom for the present split's extra buffer, one per frame in flight); unset, it stays 32. An experiment (#8) | unset: upstream's ring of 32 and Metal bound of 32 |
+| `DXMT_MAX_FRAME_LATENCY` | unset | `=1`…`16` replaces the frame latency the game sets with `SetMaximumFrameLatency` (and the default of 3 before it calls); out of range: ignored, with a warning. At 15–16 the 16 per-frame statistics slots (STATS, HUD) can mix frames | unset: the game's value, 0 taken as 3 |
 
-Not switchable: `SetMaximumFrameLatency(0)` means the default, 3 (DXGI's definition). Typeless
-depth targets without stencil (`R32_TYPELESS`, `R16_TYPELESS` as depth) get `PixelFormatView` only
-with `DXMT_DEPTH_PFV=1`.
+Not switchable: `SetMaximumFrameLatency(0)` means the default, 3 (DXGI's definition; only
+`DXMT_MAX_FRAME_LATENCY` replaces the result). Typeless depth targets without stencil
+(`R32_TYPELESS`, `R16_TYPELESS` as depth) get `PixelFormatView` only with `DXMT_DEPTH_PFV=1`.
 
 ## The STATS line
 
@@ -76,9 +78,12 @@ Sections: a feature registers a function with `gw2::SectionRegistrar` (`src/dxmt
 
 | Line | When |
 |---|---|
-| `GW2 fork <commit>: DXMT_…=… WINENCPU=… chunks=… cpus=… refresh=…` | Once, at the first Present: the build, every `DXMT_*` variable set, the chunk count, the CPUs the game sees |
+| `GW2 fork <commit>: DXMT_…=… WINENCPU=… chunks=… cpus=… refresh=…` | Once, at the first Present: the build, every `DXMT_*` variable set, the chunk count in effect (`DXMT_CHUNKS`), the CPUs the game sees |
 | `HITCH frame=… ms=… commit=… sync=…x… latency=… bgsleep=… dxmt(ms/calls): …` | A Present-to-Present interval of at least `DXMT_HITCH_MS`: that frame's waits and its render-thread time inside DXMT per category |
 | `SetMaximumFrameLatency(n)` | Every call; 0 is taken as 3 |
+| `SetMaximumFrameLatency(n): DXMT_MAX_FRAME_LATENCY keeps m` | Every call while `DXMT_MAX_FRAME_LATENCY` is set: the game asked for `n`, `m` stays in effect |
+| `CommandQueue: chunks=N (default\|DXMT_CHUNKS) metalbuffers=M maxlatency=L (…)` | Once per device: the ring's size, the Metal queue's bound on command buffers, and the frame latency it starts with (`DXMT_MAX_FRAME_LATENCY`, or 3 until the game sets it) |
+| `DXMT_CHUNKS=… is not 32, 64 or 128; using 32`, `DXMT_MAX_FRAME_LATENCY=… is not 1-16; ignored` | Once, at device creation, for a value out of range (warnings) |
 | `Presenter: display sync on/off` | When `DXMT_DISPLAY_SYNC` switches the layer's vsync |
 | `Present: background throttle policy P (DXMT_BG_POLICY), N fps in the background (DXMT_BG_FPS), M fps minimized (DXMT_BG_FPS_MINIMIZED)` | Once, at the first Present (a warning before it if `DXMT_BG_POLICY` is neither `focus` nor `occlusion`) |
 | `Present: <reason>, throttling to N fps (policy …, <details>)` | The background throttle engages, or its rate or reason changes. Reasons: `window minimized` (details `IsIconic`); `another process in the foreground` (focus: `foreground window H pid N, ours M`, or `no foreground window (pid 0), counted as another process; ours M`); `window not visible (occluded)` and `window miniaturized` (occlusion: `visibility 0x…: visible= miniaturized= activeSpace=`) |
@@ -188,3 +193,20 @@ tessellation) together. Omitted when nothing was looked up.
 
 With all three switches off the numbers measure the upstream lookup: `mru=0`, `topokept=0`,
 `lookups` = `builds`.
+
+### RING
+
+`RING chunks= occupancy=avg/peak stalls= stalled= ms=avg/max` (#8): the chunk ring the render
+thread commits into. A chunk is in flight from `CommitCurrentChunk` until the finish thread has
+seen its command buffer complete (waiting to encode, encoding, on the GPU, or done but not yet
+retired). A line holds whole frames only: a frame's totals join the window at the next frame's
+first commit, so it can land one window late, and "per frame" divides by the frames the line
+holds, not STATS' `frames`. No line in a window without commits.
+
+| Field | Meaning |
+|---|---|
+| `chunks` | The ring's size (`DXMT_CHUNKS`); at most `chunks` − 1 are in flight |
+| `occupancy` | Chunks in flight right after each commit: the mean over the window's commits, and the peak (high-water mark). A peak of `chunks` − 1 means the ring filled |
+| `stalls` | Commits that found the ring full and blocked, per frame |
+| `stalled` | Frames in the window with at least one ring stall |
+| `ms` | Time blocked on a full ring, ms per frame (avg over the window's frames), and the longest one frame's total. Part of STATS' `commit`, which also counts the non-blocking commits' tiny cost |

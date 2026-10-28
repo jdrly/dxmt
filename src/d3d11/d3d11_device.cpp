@@ -1292,10 +1292,18 @@ public:
   HRESULT STDMETHODCALLTYPE SetMaximumFrameLatency(UINT MaxLatency) override {
     // gw2: 0 means the default, 3 (IDXGIDevice1::SetMaximumFrameLatency). Taken as 0, every Present
     // waited for its own frame to finish on the GPU, so CPU and GPU took turns (GW2 sets 0).
-    Logger::info(str::format("SetMaximumFrameLatency(", MaxLatency, ")"));
+    // gw2 (#8): DXMT_MAX_FRAME_LATENCY replaces the game's value (after the 0 -> 3 mapping).
+    auto override_latency = cmd_queue_.MaxLatencyOverride();
+    if (override_latency)
+      Logger::info(str::format(
+          "SetMaximumFrameLatency(", MaxLatency, "): DXMT_MAX_FRAME_LATENCY keeps ", override_latency
+      ));
+    else
+      Logger::info(str::format("SetMaximumFrameLatency(", MaxLatency, ")"));
     if (MaxLatency > 16)
       return DXGI_ERROR_INVALID_CALL;
-    cmd_queue_.SetMaxLatency(MaxLatency ? MaxLatency : 3);
+    UINT latency = MaxLatency ? MaxLatency : 3;
+    cmd_queue_.SetMaxLatency(override_latency ? override_latency : latency);
     return S_OK;
   }
 
