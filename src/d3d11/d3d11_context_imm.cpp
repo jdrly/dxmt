@@ -286,6 +286,8 @@ public:
         auto t1 = clock::now();
         statistics.sync_count++;
         statistics.sync_interval += (t1 - t0);
+        if (gw2::statsEnabled()) // gw2 (#3): HITCH's sync, with the render thread's interval
+          gw2::waitAdd(gw2::Wait::Sync, std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
         current_seq_id = cmd_queue.CurrentSeqId();
         coherent_seq_id = cmd_queue.CoherentSeqId();
       };

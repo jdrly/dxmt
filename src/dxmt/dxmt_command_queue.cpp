@@ -221,6 +221,8 @@ CommandQueue::CommitCurrentChunk() {
   uint64_t in_flight = chunk_ongoing.fetch_add(1, std::memory_order_relaxed) + 1;
   auto t1 = clock::now();
   statistics.commit_interval += (t1 - t0);
+  if (gw2::statsEnabled())
+    gw2::waitAdd(gw2::Wait::Commit, std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
 
   if (gw2::statsEnabled()) {
     // gw2 (#8): the first commit of a new frame publishes the previous frame's totals
@@ -334,10 +336,16 @@ CommandQueue::WaitForFinishThread() {
       }
     }
 
-    // gw2: the chunk's GPU execution span for STATS' gpuspan/gpugap (#3)
+    // gw2 (#3): the GPU execution spans of all the chunk's buffers for the GPU line: those the
+    // present split committed first (earlier on this queue, so done or about to be), then the last
     if (gw2::statsEnabled()) {
+      for (auto &split : chunk.split_cmdbufs) {
+        if (split.status() <= WMTCommandBufferStatusScheduled)
+          split.waitUntilCompleted();
+        gpu_collector.add(chunk.frame_, split.gpuStartTime(), split.gpuEndTime());
+      }
       uint64_t gpu_end = chunk.attached_cmdbuf.gpuEndTime();
-      gw2::gpuSpanAdd(chunk.frame_, chunk.attached_cmdbuf.gpuStartTime(), gpu_end);
+      gpu_collector.add(chunk.frame_, chunk.attached_cmdbuf.gpuStartTime(), gpu_end);
       gw2::presentGpuEnd(chunk.frame_, gpu_end); // gw2 (#7): PRESENT's aftergpu
     }
 

@@ -787,6 +787,9 @@ public:
 
   CommandQueue& queue() { return queue_;}
 
+  // gw2 (#3): DXMT_PRESENT_SPLIT, for the startup line
+  bool presentSplit() const { return present_split_; }
+
   void
   $$setEncodingContext(uint64_t seq_id, uint64_t frame_id);
 
