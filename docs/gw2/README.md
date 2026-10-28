@@ -31,6 +31,8 @@ GW2 on Mac sets `DXMT_LOG_PATH` to its `work/logs`, so the lines below land in
 | `DXMT_PSO_ARCHIVE` | off | `=1`: Metal binary archives for pipelines. Pipelines are looked up in the archives of the last 4 sessions, and every render and compute pipeline built is added to this session's archive (see [COMPILE](#compile)) | no archives: no lookup, no capture, no files |
 | `DXMT_PSO_ARCHIVE_DIR` | user cache dir | With `DXMT_PSO_ARCHIVE=1`: an absolute unix directory that replaces `$(getconf DARWIN_USER_CACHE_DIR)dxmt/pso` | — |
 | `DXMT_PSO_FLUSH_EVERY` | 256 | With `DXMT_PSO_ARCHIVE=1`: serialize this session's archive every this many new pipelines (also every 120 s if any are new; never at exit) | — |
+| `DXMT_PROMOTE_FLUSH_MIN` | 0 | `=<n>`: a speculative commit of an occlusion or timestamp query `End` waits until `n` such requests have accumulated, with a progress guarantee (see [CMDS](#cmds)). `1` commits as upstream does | `=0`: upstream (commit at the next pass change) |
+| `DXMT_PROMOTE_FLUSH_MS` | 2 | With `DXMT_PROMOTE_FLUSH_MIN`: the longest a held commit waits (the timer at the next pass change, and the watchdog's period) | — |
 
 Not switchable: `SetMaximumFrameLatency(0)` means the default, 3 (DXGI's definition; only
 `DXMT_MAX_FRAME_LATENCY` replaces the result). Typeless depth targets without stencil
@@ -85,7 +87,7 @@ Sections: a feature registers a function with `gw2::SectionRegistrar` (`src/dxmt
 
 | Line | When |
 |---|---|
-| `GW2 fork <commit>: DXMT_STATS=1 DXMT_HITCH_MS=… DXMT_PRESENT_SPLIT=… DXMT_DISPLAY_SYNC=… DXMT_PRESENT_DEADLINE=… DXMT_CAP_LIMITER=… DXMT_STENCIL_PFV=… DXMT_DEPTH_PFV=… DXMT_BG_FPS=… DXMT_BG_FPS_MINIMIZED=… DXMT_BG_POLICY=… DXMT_RENDER_THREAD_PRIORITY=… DXMT_PSO_BLEND_HASH=… DXMT_PSO_MRU=… DXMT_PSO_TOPOLOGY_KEEP=… DXMT_CHUNKS=… DXMT_MAX_FRAME_LATENCY=… DXMT_COMPILE_WAIT_MS=… DXMT_PSO_ARCHIVE=… DXMT_PSO_ARCHIVE_DIR=… DXMT_PSO_FLUSH_EVERY=… cpus=… refresh=… set: …` | Once per process, at the first Present: the build, the **effective** value of every switch above (defaults included; `DXMT_PRESENT_DEADLINE=refresh` is one refresh, `DXMT_CHUNKS` is the ring size in effect, `DXMT_MAX_FRAME_LATENCY=unset` leaves the game's value, `DXMT_PSO_ARCHIVE` is `1` when the archives are on, `0` when not asked for, `failed` when asked for but they couldn't start, `DXMT_PSO_ARCHIVE_DIR=default` is the user cache dir), the CPUs the game sees, the refresh rate (0 if unknown), then every `DXMT_*`, `WINENCPU` and `WINEMSYNC` variable set (`set: none` if none). A PR that adds a switch adds its effective value here |
+| `GW2 fork <commit>: DXMT_STATS=1 DXMT_HITCH_MS=… DXMT_PRESENT_SPLIT=… DXMT_DISPLAY_SYNC=… DXMT_PRESENT_DEADLINE=… DXMT_CAP_LIMITER=… DXMT_STENCIL_PFV=… DXMT_DEPTH_PFV=… DXMT_BG_FPS=… DXMT_BG_FPS_MINIMIZED=… DXMT_BG_POLICY=… DXMT_RENDER_THREAD_PRIORITY=… DXMT_PSO_BLEND_HASH=… DXMT_PSO_MRU=… DXMT_PSO_TOPOLOGY_KEEP=… DXMT_CHUNKS=… DXMT_MAX_FRAME_LATENCY=… DXMT_COMPILE_WAIT_MS=… DXMT_PSO_ARCHIVE=… DXMT_PSO_ARCHIVE_DIR=… DXMT_PSO_FLUSH_EVERY=… DXMT_PROMOTE_FLUSH_MIN=… DXMT_PROMOTE_FLUSH_MS=… cpus=… refresh=… set: …` | Once per process, at the first Present: the build, the **effective** value of every switch above (defaults included; `DXMT_PRESENT_DEADLINE=refresh` is one refresh, `DXMT_CHUNKS` is the ring size in effect, `DXMT_MAX_FRAME_LATENCY=unset` leaves the game's value, `DXMT_PSO_ARCHIVE` is `1` when the archives are on, `0` when not asked for, `failed` when asked for but they couldn't start, `DXMT_PSO_ARCHIVE_DIR=default` is the user cache dir, `DXMT_PROMOTE_FLUSH_MIN`/`_MS` as the immediate context parsed them: `MS` is at least 1 and is shown even when `MIN=0` turns it off), the CPUs the game sees, the refresh rate (0 if unknown), then every `DXMT_*`, `WINENCPU` and `WINEMSYNC` variable set (`set: none` if none). A PR that adds a switch adds its effective value here |
 | `HITCH frame=… ms=… commit=…x… sync=…x… bgsleep=… dxmt(ms/calls): …` | A Present-to-Present interval of at least `DXMT_HITCH_MS`, logged at the top of the Present that ends it. `frame` is the frame that Present presents (1-based, as the latency fence counts); the interval holds the previous Present and the game's work on this frame. `commit` (waits for a free chunk) and `sync` (Map's waits for the GPU) are ms × count, from the same interval; they overlap the categories they happen in. `bgsleep` is whether the background throttle was on. The categories are as `PACE`'s `dxmt` (`presentwait` is the latency wait) |
 | `SetMaximumFrameLatency(n)` | Every call; 0 is taken as 3 |
 | `SetMaximumFrameLatency(n): DXMT_MAX_FRAME_LATENCY keeps m` | Every call while `DXMT_MAX_FRAME_LATENCY` is set: the game asked for `n`, `m` stays in effect |
@@ -103,8 +105,8 @@ Sections: a feature registers a function with `gw2::SectionRegistrar` (`src/dxmt
 | `DEPTHVIEW base=… view=… swizzle=… type=… size=… usage=… pfv=… aspect=… nil=…` | Once per distinct view of a depth/stencil texture, and for any view that came back nil (a warning then); at most 64, then `DEPTHVIEW: more than 64 distinct views, the rest are suppressed`. Replaces the old stencil-only `TextureView` warning. Fields below |
 | `DEPTHSRV format=… size=… pfv=… readonly=… stage=… slot=… view=… swizzled=… aspect=…` | Once per texture (with `DXMT_STATS` on) that is a render pass's depth-stencil attachment and is read by a shader of the same pass as a shader resource; at most 64, then `DEPTHSRV: more than 64 textures, the rest are suppressed`. Fields below |
 | `PSO: blend hash on/off (DXMT_PSO_BLEND_HASH), MRU on, 4 entries/off (DXMT_PSO_MRU), topology keep on/off (DXMT_PSO_TOPOLOGY_KEEP)` | Once per device: the effective pipeline lookup settings |
-
 | `Present pacing: mode=… rate=… refresh=… cap=… interval=… duration=… ms limiter=… ms deadline=…` | At the first Present and whenever one of its values changes. `mode`: `vsync` (display sync alone), `vsync+after` (display sync and a minimum duration of `duration`), `vsync+limiter` (display sync and the frame limiter at `limiter`, `DXMT_CAP_LIMITER`), `vsync (cap dropped)` (`DXMT_CAP_LIMITER=0` and a cap that isn't a whole number of refreshes), `after` and `plain` (display sync off: DXMT's own minimum duration, or none). `rate`: the frame rate the pacing aims for (`uncapped` without a limit). `refresh`: the display's rate, `(assumed)` when DXMT didn't get one and uses 60. `cap`: `d3d11.preferredMaxFrameRate` (0 = none). `interval`: the game's sync interval. `deadline`: what a present without a minimum duration asks `presentDrawable:atTime:` for (`DXMT_PRESENT_DEADLINE`: one refresh by default, `=8` → `8.0 ms`, `=12` → `12.0 ms`, `=0` → `off`); `- (minimum duration)` when the minimum-duration branch ignores it |
+| `Promote flush: a speculative commit (occlusion/timestamp query End) waits for N requests, at most M ms (a watchdog thread under the device lock, now always on) …` | Once per device, when `DXMT_PROMOTE_FLUSH_MIN` is on |
 
 ### Render thread priority
 
@@ -329,3 +331,85 @@ bridge calls 149–151):
 | `PSO archive: flush of <file> failed after T ms: <reason>` | A failed flush; the next one tries again |
 | `dxmt: PSO archive: about N pipelines added since the last flush are not saved (no flush at exit)` | At exit, on Wine's stderr (DXMT's log is gone by then), if the last completed flush missed some: adds not in it plus adds still queued (a flush still running counts as not done; an add in progress can count twice) |
 | `PSO archive: N pipelines could not be added so far; first error: …` | At the next flush after an add failed |
+
+### CMDS
+
+`CMDS cb= cbwhy=k:v,… close=k:v,… promote=off|min:N,k:v,…` (jdrly/dxmt #4). Why the game's render
+thread commits chunks (command buffers) and closes encoder passes. Counted with plain increments in
+the immediate context and handed over once per chunk; with `DXMT_STATS=0` nothing is counted. `cb`
+and `cbwhy` come from one drain of the totals, so they always agree.
+
+| Field | Meaning |
+|---|---|
+| `cb` | Chunks committed per frame, the sum of `cbwhy` (should match STATS `cb`) |
+| `cbwhy` | Commits per frame by reason; reasons that didn't occur are left out, `other` is always shown and should stay 0 |
+| `close` | Encoder passes (render, compute, blit) closed per frame, by what closed them |
+| `promote` | `off`, or with `DXMT_PROMOTE_FLUSH_MIN`: `min` and what happened at speculative commits, **window totals** |
+
+`cbwhy` reasons. The issue's `query` is `occlusion` + `timestamp`. A commit counts once, under the
+outermost reason (a staging `Map` that waits commits through `Flush()` as `map`).
+
+| Key | The commit |
+|---|---|
+| `flush` | The game's `Flush`/`Flush1` (and D3D10's) |
+| `getdata` | `GetData` without `DONOTFLUSH` on a query that isn't ready, or an event query that stalls (after 64 polls `DONOTFLUSH` is ignored) |
+| `map` | `Map` of a staging resource that has to wait for the GPU |
+| `occlusion`, `timestamp`, `event` | Speculative (`promote_flush`): the next pass change after an occlusion, timestamp (or timestamp-disjoint), event query `End` |
+| `staging`, `readback` | Speculative: after a staging → staging copy, after a device → staging copy (readback) |
+| `cmdlist` | Speculative: after `ExecuteCommandList` of a list that ended a query or copied to staging |
+| `present` | Present (an occluded one too) |
+| `fence`, `keyedmutex`, `idle` | `ID3D11Fence` Signal/Wait; `AcquireSync`/`ReleaseSync`; `WaitUntilGPUIdle` (resize, fullscreen switch) |
+| `poll`, `timer`, `watchdog` | `DXMT_PROMOTE_FLUSH_MIN` only: a held commit, committed at a poll that isn't ready, at a pass change after `DXMT_PROMOTE_FLUSH_MS`, by the watchdog |
+| `other` | None of these: a commit path nobody attributed (a bug in the counting) |
+
+`close` keys: `render` (a draw needs a render pass), `compute` (a dispatch or a UAV clear), `blit`
+(a copy or update), `targets` (`OMSetRenderTargets*`), `clear`, `resolve`, `query` (event/timestamp
+`End`), `flush` (Flush, fences, keyed mutex, `WaitUntilGPUIdle`, a held commit's commit), `present`,
+`state` (`ExecuteCommandList`, `SwapDeviceContextState`), `upscale` (MetalFX through the context
+extension), `copy` (depth-stencil copy to or from staging), `other`.
+
+`promote` keys (with `DXMT_PROMOTE_FLUSH_MIN=<n>`), totals in the 2 s window:
+
+| Key | Meaning |
+|---|---|
+| `skip` | Pass changes where a speculative commit was held back |
+| `reached` | Speculative commits made because `n` requests had accumulated (with `n=1`: all of them) |
+| `nodefer` | Speculative commits made at once because a request that is never held joined: event query, staging copy, readback, command list |
+| `gpuidle` | Speculative commits made at once because no earlier chunk was still on the GPU (it would idle) |
+| `present`, `explicit`, `poll`, `timer`, `watchdog` | Held commits ended by Present, by an explicit commit (Flush, fences, keyed mutex, waiting `Map`/`GetData`, `WaitUntilGPUIdle`), by a poll that wasn't ready, by the timer, by the watchdog |
+
+**The rule.** Only an occlusion or timestamp query `End` can be held. Explicit Flush, fences, keyed
+mutex, event queries, staging copies, readbacks, and a `Map`/`GetData` that waits are never held. A
+held commit is committed at the latest:
+- by **Present**, so a chunk never spans frames;
+- by **any way the game can see a result**: a waiting `Map`/`GetData` and `Flush` commit as upstream;
+  a `GetData(DONOTFLUSH)` that returns `S_FALSE` and a `Map(DO_NOT_WAIT)` that would wait for the
+  held chunk commit it first (upstream would already have committed it), so a game that only polls
+  still makes progress;
+- by the **timer**: the next pass change at least `DXMT_PROMOTE_FLUSH_MS` after the first hold;
+- by the **watchdog**, even if the game never calls the context again: a thread waits
+  `DXMT_PROMOTE_FLUSH_MS` after a hold and, if it is still pending, commits under the device lock
+  every context entry point takes. Upstream's lock is a no-op unless the game turns on multithread
+  protection (`ID3D11Multithread`), so `DXMT_PROMOTE_FLUSH_MIN` forces it on for the device's life:
+  it then excludes the game's threads whatever the game asks, and `SetMultithreadProtected(FALSE)`
+  neither disables it nor drops its owner. The cost of the switch: an uncontended lock and unlock per
+  context call, and a game call that meets the watchdog's commit spins until it ends.
+
+### ENCODE
+
+`ENCODE draws= dispatches= tile= pso= useres= blitcmds= enc=k:v,… perchunk=avg/max loadMB=… storeMB=…
+refuse=k:v,…` (jdrly/dxmt #4). What the encode thread encodes, per frame. The command counts are
+plain increments decided at compile time; the encode thread hands its totals over once per chunk.
+With `DXMT_STATS=0` nothing is counted.
+
+| Field | Meaning |
+|---|---|
+| `draws`, `dispatches` | Draw and dispatch commands encoded, DXMT's internal ones (clears, emulation) included |
+| `tile` | Tile dispatches (tile barriers inside a render pass) |
+| `pso` | Render and compute pipeline binds |
+| `useres` | `useResource` commands (render and compute) |
+| `blitcmds` | Blit commands |
+| `enc` | Metal encoders per frame by type, as encoded after the optimizer's merges: `render`, `compute`, `blit`, `clear`, `resolve`, `present`, `upscale`, `event` (signal/wait), `timestamp` |
+| `perchunk` | Encoders per chunk: average, and the most in one chunk |
+| `loadMB`, `storeMB` | Attachment bytes per frame (MB = 10⁶) loaded (`Load` action) and stored (`Store`, plus resolved targets), by aspect `color`/`depth`/`stencil`: render area × layers × texel size × samples. Uncompressed, an upper bound (lossless compression moves less); clear and resolve passes included, the present pass not |
+| `refuse` | Why the encoder optimizer (`checkEncoderRelation`) didn't merge, per frame. Per render → render pair it tried: `target` (different targets, planes, read-only flags, array length: the usual case), `argbuf` (argument buffers in different blocks), `load` (the later pass clears or doesn't load), `store` (the earlier pass doesn't store), `vfence` (the later pass's vertex stage waits for the earlier one's fragments). For any pair: `dep` (a data dependency ends the search) and `sync` (an event or timestamp encoder ends it) |

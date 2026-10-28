@@ -24,6 +24,7 @@
 #include "dxmt_command_clear.hpp"
 #include "dxmt_counter.hpp"
 #include "dxmt_deptrack.hpp"
+#include "dxmt_gw2_cmds.hpp"
 #include "dxmt_occlusion_query.hpp"
 #include "dxmt_presenter.hpp"
 #include "dxmt_residency.hpp"
@@ -36,6 +37,7 @@
 #include "rc/util_rc_ptr.hpp"
 #include "airconv_public.h"
 #include <cassert>
+#include <type_traits>
 
 #define DXMT_IMPLEMENT_ME __builtin_unreachable();
 #define DXMT_UNREACHABLE __builtin_unreachable();
@@ -598,10 +600,44 @@ public:
     };
   }
 
+  // gw2 (#4): ENCODE's command counts, decided at compile time from the command's type: a plain
+  // increment for the counted kinds, nothing for the others; nothing at all with DXMT_STATS=0.
+  template <typename cmd_struct>
+  void
+  gw2CountCommand() {
+    if (!gw2_enc_.on)
+      return;
+    if constexpr (std::is_same_v<cmd_struct, wmtcmd_render_draw> ||
+                  std::is_same_v<cmd_struct, wmtcmd_render_draw_indexed> ||
+                  std::is_same_v<cmd_struct, wmtcmd_render_draw_indirect> ||
+                  std::is_same_v<cmd_struct, wmtcmd_render_draw_indexed_indirect> ||
+                  std::is_same_v<cmd_struct, wmtcmd_render_dxmt_geometry_draw> ||
+                  std::is_same_v<cmd_struct, wmtcmd_render_dxmt_geometry_draw_indexed> ||
+                  std::is_same_v<cmd_struct, wmtcmd_render_dxmt_geometry_draw_indirect> ||
+                  std::is_same_v<cmd_struct, wmtcmd_render_dxmt_geometry_draw_indexed_indirect> ||
+                  std::is_same_v<cmd_struct, wmtcmd_render_dxmt_tessellation_mesh_draw> ||
+                  std::is_same_v<cmd_struct, wmtcmd_render_dxmt_tessellation_mesh_draw_indexed> ||
+                  std::is_same_v<cmd_struct, wmtcmd_render_dxmt_tessellation_mesh_draw_indirect> ||
+                  std::is_same_v<cmd_struct, wmtcmd_render_dxmt_tessellation_mesh_draw_indexed_indirect>)
+      gw2_enc_.draws++;
+    else if constexpr (std::is_same_v<cmd_struct, wmtcmd_compute_dispatch> ||
+                       std::is_same_v<cmd_struct, wmtcmd_compute_dispatch_indirect>)
+      gw2_enc_.dispatches++;
+    else if constexpr (std::is_same_v<cmd_struct, wmtcmd_render_dispatch_threads_per_tile>)
+      gw2_enc_.tile++;
+    else if constexpr (std::is_same_v<cmd_struct, wmtcmd_render_setpso> ||
+                       std::is_same_v<cmd_struct, wmtcmd_compute_setpso>)
+      gw2_enc_.pso++;
+    else if constexpr (std::is_same_v<cmd_struct, wmtcmd_render_useresource> ||
+                       std::is_same_v<cmd_struct, wmtcmd_compute_useresource>)
+      gw2_enc_.use_resource++;
+  }
+
   template <typename cmd_struct>
   cmd_struct &
   encodeRenderCommand() {
     assert(encoder_current->type == EncoderType::Render);
+    gw2CountCommand<cmd_struct>();
     auto encoder = static_cast<RenderEncoderData *>(encoder_current);
     auto storage = (cmd_struct *)allocate_cpu_heap(sizeof(cmd_struct), 16);
     encoder->cmd_tail->next.set(storage);
@@ -641,6 +677,7 @@ public:
   cmd_struct &
   encodeComputeCommand() {
     assert(encoder_current->type == EncoderType::Compute);
+    gw2CountCommand<cmd_struct>();
     auto encoder = static_cast<ComputeEncoderData *>(encoder_current);
     auto storage = (cmd_struct *)allocate_cpu_heap(sizeof(cmd_struct), 16);
     encoder->cmd_tail->next.set(storage);
@@ -653,6 +690,8 @@ public:
   cmd_struct &
   encodeBlitCommand() {
     assert(encoder_current->type == EncoderType::Blit);
+    if (gw2_enc_.on)
+      gw2_enc_.blit_cmds++; // gw2 (#4)
     auto encoder = static_cast<BlitEncoderData *>(encoder_current);
     auto storage = (cmd_struct *)allocate_cpu_heap(sizeof(cmd_struct), 16);
     encoder->cmd_tail->next.set(storage);
@@ -861,7 +900,9 @@ public:
 private:
   DXMT_ENCODER_LIST_OP checkEncoderRelation(EncoderData* former, EncoderData* latter);
   bool hasDataDependency(EncoderData* from, EncoderData* to);
-  bool isEncoderSignatureMatched(RenderEncoderData* former, RenderEncoderData* latter);
+  // gw2 (#4): was isEncoderSignatureMatched; returns why the two can't merge, Refuse::None if they can
+  gw2::Refuse encoderSignatureMismatch(RenderEncoderData* former, RenderEncoderData* latter);
+  void gw2CountAttachments(RenderEncoderData *data);
   RenderEncoderColorAttachmentData *isClearColorSignatureMatched(ClearEncoderData* former, RenderEncoderData* latter);
   RenderEncoderDepthAttachmentData *isClearDepthSignatureMatched(ClearEncoderData* former, RenderEncoderData* latter);
   RenderEncoderStencilAttachmentData *isClearStencilSignatureMatched(ClearEncoderData* former, RenderEncoderData* latter);
@@ -945,6 +986,7 @@ private:
   uint64_t intrapass_barrier_control_bits_ = 0;
 
   bool present_split_ = env::getEnvVar("DXMT_PRESENT_SPLIT") != "0";
+  gw2::EncodeCounters gw2_enc_; // gw2 (#4): the encode thread's ENCODE counters
 
   CommandQueue& queue_;
 };

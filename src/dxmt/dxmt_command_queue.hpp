@@ -243,6 +243,10 @@ public:
   WMT::Reference<WMT::SharedEvent> event;
   std::uint64_t current_event_seq_id = 0;
   FrameStatisticsContainer statistics;
+  // gw2 (#4): why the next CommitCurrentChunk happens, for CMDS' cbwhy. Set through
+  // gw2::CommitWhyScope by the commit's caller (the immediate context, the swapchain); same thread
+  // rules as CommitCurrentChunk.
+  gw2::CommitWhy gw2_commit_why = gw2::CommitWhy::None;
   ResourceInitializer initializer;
   CounterPool counter_pool;
 

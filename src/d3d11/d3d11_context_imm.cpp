@@ -8,6 +8,10 @@
 #include "d3d11_context_impl.cpp"
 #include "dxmt_context.hpp"
 #include "dxmt_staging.hpp"
+#include "log/log.hpp"
+#include "util_env.hpp"
+#include <atomic>
+#include <cstdlib>
 
 namespace dxmt {
 struct ContextInternalState {
@@ -80,7 +84,17 @@ public:
       ctx_state({cmd_queue}),
       d3dmt_(this, mutex) {
         ignore_map_flag_no_wait_ = Config::getInstance().getOption<bool>("d3d11.ignoreMapFlagNoWait", false);
+        InitPromoteFlush();
       }
+
+  ~MTLD3D11ImmediateContext() {
+    if (watchdog_started_) {
+      watchdog_stop_.store(true);
+      watchdog_armed_.store(~0ull, std::memory_order_release);
+      watchdog_armed_.notify_one();
+      watchdog_.join();
+    }
+  }
 
   HRESULT
   STDMETHODCALLTYPE
@@ -273,11 +287,15 @@ public:
           return S_OK;
         }
         if (MapFlags & D3D11_MAP_FLAG_DO_NOT_WAIT) {
+          // gw2 (#4): DXMT_PROMOTE_FLUSH_MIN never leaves a poll waiting on a commit it deferred
+          if (deferred_since_ && coherent_seq_id + uint64_t(result) >= cmd_queue.CurrentSeqId())
+            CommitDeferred(gw2::CommitWhy::Poll);
           return DXGI_ERROR_WAS_STILL_DRAWING;
         }
         // even it's in a while loop
         // only the first flush will have effect
         // and the following calls are essentially no-op
+        gw2::CommitWhyScope gw2_why(cmd_queue.gw2_commit_why, gw2::CommitWhy::Map); // gw2 (#4)
         Flush();
         TRACE("staging map block");
         auto& statistics = cmd_queue.CurrentFrameStatistics();
@@ -370,11 +388,12 @@ public:
       if (ctx_state.has_dirty_op_since_last_event) {
         auto event_id = cmd_queue.GetNextEventSeqId();
         static_cast<MTLD3D11EventQuery *>(pAsync)->Issue(event_id);
-        InvalidateCurrentPass(true);
+        InvalidateCurrentPass(true, gw2::PassClose::Query);
         EmitOP([event_id](ArgumentEncodingContext &enc) mutable {
           enc.signalEvent(event_id);
         });
-        promote_flush = true;
+        // gw2 (#4): a timestamp-disjoint query takes the event path; it counts with the timestamps
+        PromoteFlush(desc.Query == D3D11_QUERY_EVENT ? gw2::CommitWhy::Event : gw2::CommitWhy::Timestamp);
         ctx_state.has_dirty_op_since_last_event = false;
       } else {
         static_cast<MTLD3D11EventQuery *>(pAsync)->Issue(cmd_queue.GetCurrentEventSeqId());
@@ -383,11 +402,11 @@ public:
     }
     case D3D11_QUERY_TIMESTAMP: {
       if (auto query = static_cast<MTLD3D11TimestampQuery *>(pAsync)->End()) {
-        InvalidateCurrentPass(true);
+        InvalidateCurrentPass(true, gw2::PassClose::Query);
         EmitOP([query = Rc(query)](ArgumentEncodingContext &enc) mutable {
           enc.sampleTimestamp(std::move(query));
         });
-        promote_flush = true;
+        PromoteFlush(gw2::CommitWhy::Timestamp);
       }
       break;
     }
@@ -397,7 +416,7 @@ public:
         EmitST([query = Rc(query)](ArgumentEncodingContext &enc) mutable {
           enc.endVisibilityResultQuery(std::move(query));
         });
-      promote_flush = true;
+      PromoteFlush(gw2::CommitWhy::Occlusion);
       break;
     }
     case D3D11_QUERY_PIPELINE_STATISTICS: {
@@ -486,7 +505,15 @@ public:
     }
     if (hr == S_FALSE && (GetDataFlags & D3D11_ASYNC_GETDATA_DONOTFLUSH) == 0) {
       cmd_queue.CurrentFrameStatistics().event_stall++;
+      // gw2 (#4): the reason is set under the lock Flush takes anyway
+      std::lock_guard<d3d11_device_mutex> lock(mutex);
+      gw2::CommitWhyScope gw2_why(cmd_queue.gw2_commit_why, gw2::CommitWhy::GetData);
       Flush();
+    } else if (hr == S_FALSE && promote_min_) {
+      // gw2 (#4): a DONOTFLUSH poll that isn't ready commits what DXMT_PROMOTE_FLUSH_MIN deferred,
+      // as upstream's speculative commit would already have done (GetData doesn't lock otherwise)
+      std::lock_guard<d3d11_device_mutex> lock(mutex);
+      CommitDeferred(gw2::CommitWhy::Poll);
     }
     return hr;
   }
@@ -504,7 +531,8 @@ public:
     std::lock_guard<d3d11_device_mutex> lock(mutex);
 
     if (ctx_state.has_dirty_op_since_last_event || promote_flush) {
-      InvalidateCurrentPass(true);
+      gw2::CommitWhyScope gw2_why(cmd_queue.gw2_commit_why, gw2::CommitWhy::Flush); // gw2 (#4)
+      InvalidateCurrentPass(true, gw2::PassClose::Flush);
       Commit();
     }
     if (hEvent) {
@@ -516,7 +544,7 @@ public:
   }
 
   void PrepareFlush() override {
-    InvalidateCurrentPass(true);
+    InvalidateCurrentPass(true, gw2::PassClose::Present);
   }
 
   void
@@ -529,7 +557,15 @@ public:
     Com<MTLD3D11CommandList, false> cmdlist = static_cast<MTLD3D11CommandList *>(pCommandList);
     auto seq_id = ctx_state.cmd_queue.CurrentSeqId();
 
-    promote_flush = cmdlist->promote_flush;
+    // gw2 (#4): upstream replaces a pending promote_flush with the command list's; a commit that
+    // DXMT_PROMOTE_FLUSH_MIN deferred stays pending
+    if (!deferred_since_) {
+      promote_flush = false;
+      promote_requests_ = 0;
+      promote_nodefer_ = false;
+    }
+    if (cmdlist->promote_flush)
+      PromoteFlush(gw2::CommitWhy::CmdList);
 
     auto query_list = AllocateCommandData<Rc<VisibilityResultQuery>>(cmdlist->visibility_query_count);
     for (const auto &[query, index] : cmdlist->issued_visibility_query) {
@@ -596,27 +632,45 @@ public:
   WaitUntilGPUIdle() override {
     std::lock_guard<d3d11_device_mutex> lock(mutex);
     uint64_t seq = cmd_queue.CurrentSeqId();
-    if(!InvalidateCurrentPass())
+    gw2::CommitWhyScope gw2_why(cmd_queue.gw2_commit_why, gw2::CommitWhy::Idle); // gw2 (#4)
+    if(!InvalidateCurrentPass(false, gw2::PassClose::Flush))
       Commit();
     cmd_queue.WaitCPUFence(seq);
   };
 
   void
   Commit() override {
+    // gw2 (#4): cbwhy: the caller's scope, else what forced a deferred commit (timer), else the
+    // request behind promote_flush; "other" should stay 0
+    gw2::CommitWhy scope = cmd_queue.gw2_commit_why;
+    gw2::CommitWhy why = scope != gw2::CommitWhy::None   ? scope
+                         : promote_forced_ != gw2::CommitWhy::None ? promote_forced_
+                         : promote_flush                  ? promote_why_
+                                                          : gw2::CommitWhy::Other;
+    if (gw2_front_.on)
+      gw2_front_.commit[(unsigned)why]++;
+    if (deferred_since_)
+      EndDeferral(scope);
+    promote_requests_ = 0;
+    promote_nodefer_ = false;
+    promote_forced_ = gw2::CommitWhy::None;
+
     promote_flush = false;
     D3D11_ASSERT(cmdbuf_state == CommandBufferState::Idle);
     ctx_state.cmd_queue.CommitCurrentChunk();
     ctx_state.has_dirty_op_since_last_event = false;
+    gw2_front_.publish(); // gw2 (#4): once per chunk
   };
 
   HRESULT STDMETHODCALLTYPE Signal(ID3D11Fence *pFence, UINT64 Value) override {
     std::lock_guard<d3d11_device_mutex> lock(mutex);
     auto fence = static_cast<MTLD3D11Fence *>(pFence);
 
-    InvalidateCurrentPass();
+    InvalidateCurrentPass(false, gw2::PassClose::Flush);
     EmitOP([event = fence->event, Value](ArgumentEncodingContext &enc) mutable {
       enc.signalEvent(std::move(event), Value);
     });
+    gw2::CommitWhyScope gw2_why(cmd_queue.gw2_commit_why, gw2::CommitWhy::Fence); // gw2 (#4)
     Flush();
 
     return S_OK;
@@ -626,7 +680,10 @@ public:
     std::lock_guard<d3d11_device_mutex> lock(mutex);
     auto fence = static_cast<MTLD3D11Fence *>(pFence);
 
-    Flush();
+    {
+      gw2::CommitWhyScope gw2_why(cmd_queue.gw2_commit_why, gw2::CommitWhy::Fence); // gw2 (#4)
+      Flush();
+    }
     EmitOP([event = fence->event, Value](ArgumentEncodingContext &enc) mutable {
       enc.waitEvent(std::move(event), Value);
     });
@@ -674,7 +731,8 @@ public:
       return DXGI_ERROR_INVALID_CALL;
     return resource->keyedMutex()->acquire(
         [&](uint64_t fence) {
-          InvalidateCurrentPass(true);
+          gw2::CommitWhyScope gw2_why(cmd_queue.gw2_commit_why, gw2::CommitWhy::KeyedMutex); // gw2 (#4)
+          InvalidateCurrentPass(true, gw2::PassClose::Flush);
           EmitOP([event = resource->keyedMutex()->sharedEvent(), fence](ArgumentEncodingContext &enc) mutable {
             enc.waitEvent(std::move(event), fence);
           });
@@ -691,7 +749,8 @@ public:
       return DXGI_ERROR_INVALID_CALL;
     return resource->keyedMutex()->release(
         [&](uint64_t fence) {
-          InvalidateCurrentPass(true);
+          gw2::CommitWhyScope gw2_why(cmd_queue.gw2_commit_why, gw2::CommitWhy::KeyedMutex); // gw2 (#4)
+          InvalidateCurrentPass(true, gw2::PassClose::Flush);
           EmitOP([event = resource->keyedMutex()->sharedEvent(), fence](ArgumentEncodingContext &enc) mutable {
             enc.signalEvent(std::move(event), fence);
           });
@@ -700,6 +759,150 @@ public:
         Key
     );
   }
+
+  // gw2 (#4): DXMT_PROMOTE_FLUSH_MIN=<n> (0, the default: upstream). A speculative commit (the
+  // promote_flush of an occlusion or timestamp query End) is held back at the pass change where
+  // upstream commits it, until n requests have accumulated. It commits at once when a request that is
+  // never deferred joins (event, staging copy, readback, command list), or when no earlier chunk is
+  // still on the GPU (no starvation). The progress guarantee, for a commit it held back:
+  // - every way the game can see a result commits it first: Present; explicit Flush, fences, keyed
+  //   mutex, Map/GetData waits (untouched, they commit); a GetData(DONOTFLUSH) that isn't ready, and
+  //   a Map(DO_NOT_WAIT) that would wait for the held chunk (upstream had already committed);
+  // - the timer: the next pass change at least DXMT_PROMOTE_FLUSH_MS (default 2) after the first
+  //   deferral commits;
+  // - the watchdog: a thread commits it under the device lock, which every entry point takes,
+  //   DXMT_PROMOTE_FLUSH_MS after the deferral began if it is still pending, even if the game never
+  //   calls the context again. The switch forces that lock on (d3d11_device_mutex::force_locking),
+  //   so it excludes the game's threads whether or not the game asked for multithread protection,
+  //   and SetMultithreadProtected(FALSE) can't take it away. The cost: an uncontended lock per
+  //   context call when the switch is on. A chunk never spans frames.
+  void
+  InitPromoteFlush() {
+    auto min = env::getEnvVar("DXMT_PROMOTE_FLUSH_MIN");
+    promote_min_ = min.empty() ? 0 : (uint32_t)std::strtoul(min.c_str(), nullptr, 10);
+    auto ms = env::getEnvVar("DXMT_PROMOTE_FLUSH_MS");
+    promote_timer_ms_ = ms.empty() ? 2 : std::max(1ul, std::strtoul(ms.c_str(), nullptr, 10));
+    gw2::setPromoteFlush(promote_min_, promote_timer_ms_);
+    if (promote_min_) {
+      // the device isn't visible to the game yet (its constructor creates this context)
+      mutex.force_locking();
+      Logger::info(str::format(
+          "Promote flush: a speculative commit (occlusion/timestamp query End) waits for ", promote_min_,
+          " requests, at most ", promote_timer_ms_,
+          " ms (a watchdog thread under the device lock, now always on) or until Present, a poll that "
+          "isn't ready, a non-deferrable request or an idle GPU (DXMT_PROMOTE_FLUSH_MIN, DXMT_PROMOTE_FLUSH_MS)"
+      ));
+    }
+  }
+
+  bool
+  DeferPromotedCommit() override {
+    if (!promote_min_)
+      return false;
+    auto commit = [&](gw2::Promote what) {
+      CountPromote(what);
+      return false;
+    };
+    if (promote_nodefer_)
+      return commit(gw2::Promote::NoDefer);
+    if (promote_requests_ >= promote_min_)
+      return commit(gw2::Promote::Reached);
+    // every committed chunk has finished: the GPU would idle while we wait
+    if (cmd_queue.CoherentSeqId() + 1 >= cmd_queue.CurrentSeqId())
+      return commit(gw2::Promote::GpuIdle);
+    int64_t now = gw2::nowNs();
+    if (!deferred_since_) {
+      deferred_since_ = now;
+      ArmWatchdog();
+    } else if (now - deferred_since_ >= int64_t(promote_timer_ms_) * 1'000'000) {
+      promote_forced_ = gw2::CommitWhy::Timer;
+      return commit(gw2::Promote::Timer);
+    }
+    CountPromote(gw2::Promote::Skip);
+    return true;
+  }
+
+  // A commit ends a pending deferral; scope is the commit's caller (None: a pass change).
+  void
+  EndDeferral(gw2::CommitWhy scope) {
+    switch (scope) {
+    case gw2::CommitWhy::None:
+      break; // counted by DeferPromotedCommit
+    case gw2::CommitWhy::Present:
+      CountPromote(gw2::Promote::Present);
+      break;
+    case gw2::CommitWhy::Poll:
+      CountPromote(gw2::Promote::Poll);
+      break;
+    case gw2::CommitWhy::Watchdog:
+      CountPromote(gw2::Promote::Watchdog);
+      break;
+    default:
+      CountPromote(gw2::Promote::Explicit);
+      break;
+    }
+    deferred_since_ = 0;
+    if (watchdog_started_)
+      watchdog_armed_.store(0, std::memory_order_release);
+  }
+
+  void
+  CountPromote(gw2::Promote what) {
+    if (gw2_front_.on)
+      gw2_front_.promote[(unsigned)what]++;
+  }
+
+  // Commits a deferred speculative commit now (the caller holds the device lock).
+  void
+  CommitDeferred(gw2::CommitWhy why) {
+    if (!deferred_since_)
+      return;
+    gw2::CommitWhyScope gw2_why(cmd_queue.gw2_commit_why, why);
+    InvalidateCurrentPass(true, gw2::PassClose::Flush);
+    Commit();
+  }
+
+  void
+  ArmWatchdog() {
+    if (!watchdog_started_) {
+      watchdog_started_ = true;
+      watchdog_ = dxmt::thread([this] { WatchdogLoop(); });
+    }
+    watchdog_armed_.store(++watchdog_gen_, std::memory_order_release);
+    watchdog_armed_.notify_one();
+  }
+
+  void
+  WatchdogLoop() {
+    env::setThreadName("dxmt-promote-watchdog");
+    for (;;) {
+      watchdog_armed_.wait(0, std::memory_order_acquire);
+      if (watchdog_stop_.load())
+        break;
+      uint64_t gen = watchdog_armed_.load(std::memory_order_acquire);
+      if (!gen)
+        continue;
+      Sleep(promote_timer_ms_);
+      if (watchdog_stop_.load())
+        break;
+      if (watchdog_armed_.load(std::memory_order_acquire) != gen)
+        continue; // that deferral has ended (a newer one gets its own period)
+      std::lock_guard<d3d11_device_mutex> lock(mutex);
+      if (watchdog_armed_.load(std::memory_order_relaxed) != gen)
+        continue;
+      CommitDeferred(gw2::CommitWhy::Watchdog);
+    }
+  }
+
+  uint32_t promote_min_ = 0;
+  uint32_t promote_timer_ms_ = 2;
+  int64_t deferred_since_ = 0; // when the pending deferral began (gw2::nowNs), 0: none
+  gw2::CommitWhy promote_forced_ = gw2::CommitWhy::None;
+  bool watchdog_started_ = false;
+  uint64_t watchdog_gen_ = 0;
+  std::atomic<uint64_t> watchdog_armed_ = 0; // the pending deferral's generation, 0: none
+  std::atomic<bool> watchdog_stop_ = false;
+  dxmt::thread watchdog_;
 
 private:
   std::vector<Com<MTLD3D11OcclusionQuery>> pending_occlusion_queries;

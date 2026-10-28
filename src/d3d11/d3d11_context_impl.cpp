@@ -700,7 +700,7 @@ public:
   void
   STDMETHODCALLTYPE
   ClearUnorderedAccessViewUint(D3D11UnorderedAccessView *pUAV, const UINT Values[4]) {
-    InvalidateCurrentPass(true);
+    InvalidateCurrentPass(true, gw2::PassClose::Clear);
     SwitchToComputeEncoder();
     D3D11_UNORDERED_ACCESS_VIEW_DESC desc;
     pUAV->GetDesc(&desc);
@@ -756,7 +756,7 @@ public:
           break;
         }
       });
-    InvalidateCurrentPass();
+    InvalidateCurrentPass(false, gw2::PassClose::Clear);
   }
 
   void
@@ -770,7 +770,7 @@ public:
   void
   STDMETHODCALLTYPE
   ClearUnorderedAccessViewFloat(D3D11UnorderedAccessView *pUAV, const FLOAT Values[4])  {
-    InvalidateCurrentPass(true);
+    InvalidateCurrentPass(true, gw2::PassClose::Clear);
     SwitchToComputeEncoder();
     D3D11_UNORDERED_ACCESS_VIEW_DESC desc;
     pUAV->GetDesc(&desc);
@@ -812,7 +812,7 @@ public:
           break;
         }
       });
-    InvalidateCurrentPass();
+    InvalidateCurrentPass(false, gw2::PassClose::Clear);
   }
 
   void
@@ -855,7 +855,7 @@ public:
         }
         return ClearRenderTargetView(rtv, Color);
       }
-      InvalidateCurrentPass(true);
+      InvalidateCurrentPass(true, gw2::PassClose::Clear);
       EmitST([texture = rtv->texture(), view = rtv->viewId(), plane = rtv->description().DepthPlane](ArgumentEncodingContext &enc) {
         enc.clear_rt_cmd.begin(texture, view, plane);
       });
@@ -896,7 +896,7 @@ public:
         }
         return ClearDepthStencilView(dsv, D3D11_CLEAR_DEPTH, color[0], 0);
       }
-      InvalidateCurrentPass(true);
+      InvalidateCurrentPass(true, gw2::PassClose::Clear);
       EmitST([texture = dsv->texture(), view = dsv->viewId()](ArgumentEncodingContext &enc) {
         enc.clear_rt_cmd.begin(texture, view, 0, D3D11_CLEAR_DEPTH);
       });
@@ -919,7 +919,7 @@ public:
     }
 
     if (auto expected = com_cast<ID3D11UnorderedAccessView>(pView)) {
-      InvalidateCurrentPass(true);
+      InvalidateCurrentPass(true, gw2::PassClose::Clear);
       auto uav = static_cast<D3D11UnorderedAccessView *>(expected.ptr());
       D3D11_UNORDERED_ACCESS_VIEW_DESC1 desc;
       uav->GetDesc1(&desc);
@@ -1019,7 +1019,7 @@ public:
       ERR("ResolveSubresource: invalid format ", Format);
       return;
     }
-    InvalidateCurrentPass();
+    InvalidateCurrentPass(false, gw2::PassClose::Resolve);
     EmitOP([src = static_cast<D3D11ResourceCommon *>(pSrcResource)->texture(),
             dst = static_cast<D3D11ResourceCommon *>(pDstResource)->texture(),
             dst_level = DstSubresource % Dst.Texture2DDesc.MipLevels,
@@ -2943,7 +2943,7 @@ public:
     }
 
     if (should_invalidate_pass) {
-      InvalidateCurrentPass();
+      InvalidateCurrentPass(false, gw2::PassClose::Targets);
     }
   }
 
@@ -3857,7 +3857,7 @@ public:
           cmd.dst = dst->buffer();
           cmd.dst_offset = DstX + dst_offset;
         });
-        promote_flush = true;
+        PromoteFlush(gw2::CommitWhy::Staging);
       } else if (auto src = GetResourceCommon(pSrcResource)) {
         // copy from device to staging
         SwitchToBlitEncoder(CommandBufferState::ReadbackBlitEncoderActive);
@@ -3873,7 +3873,7 @@ public:
           cmd.dst = dst->buffer();
           cmd.dst_offset = DstX + dst_offset;
         });
-        promote_flush = true;
+        PromoteFlush(gw2::CommitWhy::Readback);
       } else {
         UNREACHABLE
       }
@@ -3962,10 +3962,10 @@ public:
             }
           }
         });
-        promote_flush = true;
+        PromoteFlush(gw2::CommitWhy::Staging);
       } else if (auto src = GetTexture(cmd.pSrc)) {
         if (cmd.DstFormat.Flag & MTL_DXGI_FORMAT_EMULATED_LINEAR_DEPTH_STENCIL) {
-          InvalidateCurrentPass(true);
+          InvalidateCurrentPass(true, gw2::PassClose::Copy);
           UseCopyDestination(staging_dst);
           EmitOP([src_ = std::move(src), dst_ = std::move(staging_dst),
                   cmd = std::move(cmd)](ArgumentEncodingContext &enc) {
@@ -3974,7 +3974,7 @@ public:
                 dst_->bytesPerImage, cmd.DstFormat.Flag & MTL_DXGI_FORMAT_EMULATED_D24
             );
           });
-          promote_flush = true;
+          PromoteFlush(gw2::CommitWhy::Readback);
           return;
         }
         SwitchToBlitEncoder(CommandBufferState::ReadbackBlitEncoderActive);
@@ -3997,14 +3997,14 @@ public:
           cmd_cpbuf.bytes_per_row = dst_->bytesPerRow;
           cmd_cpbuf.bytes_per_image = dst_->bytesPerImage;
         });
-        promote_flush = true;
+        PromoteFlush(gw2::CommitWhy::Readback);
       } else {
         UNREACHABLE
       }
     } else if (auto dst = GetTexture(cmd.pDst)) {
       if (auto staging_src = GetStagingResource(cmd.pSrc, cmd.SrcSubresource)) {
         if (cmd.SrcFormat.Flag & MTL_DXGI_FORMAT_EMULATED_LINEAR_DEPTH_STENCIL) {
-          InvalidateCurrentPass(true);
+          InvalidateCurrentPass(true, gw2::PassClose::Copy);
           UseCopySource(staging_src);
           EmitOP([dst_ = std::move(dst), src_ = std::move(staging_src),
                   cmd = std::move(cmd)](ArgumentEncodingContext &enc) {
@@ -4302,6 +4302,33 @@ public:
 
   bool promote_flush = false;
 
+  // gw2 (#4): the speculative commit's bookkeeping, for CMDS and DXMT_PROMOTE_FLUSH_MIN. The
+  // immediate context publishes gw2_front_ at each commit; a deferred context's never is.
+  gw2::FrontCounters gw2_front_;
+  gw2::CommitWhy promote_why_ = gw2::CommitWhy::Other; // the request behind promote_flush
+  uint32_t promote_requests_ = 0;                       // requests since the last commit
+  bool promote_nodefer_ = false;                        // one of them is never deferred
+
+  // gw2 (#4): every site that sets promote_flush goes through here. Only occlusion and timestamp
+  // queries may be deferred (DXMT_PROMOTE_FLUSH_MIN); events, staging copies, readbacks and command
+  // lists never are, and the first of those names the commit.
+  void
+  PromoteFlush(gw2::CommitWhy why) {
+    bool deferrable = why == gw2::CommitWhy::Occlusion || why == gw2::CommitWhy::Timestamp;
+    if (!promote_flush || (!deferrable && !promote_nodefer_))
+      promote_why_ = why;
+    promote_flush = true;
+    promote_requests_++;
+    promote_nodefer_ = promote_nodefer_ || !deferrable;
+  }
+
+  // gw2 (#4): DXMT_PROMOTE_FLUSH_MIN; true holds the speculative commit back. Only the immediate
+  // context overrides it.
+  virtual bool
+  DeferPromotedCommit() {
+    return false;
+  }
+
   /**
   Render pass can be invalidated by reasons:
   - render target changes (including depth stencil)
@@ -4311,7 +4338,9 @@ public:
   Return value indicates if a commit happens
   */
   bool
-  InvalidateCurrentPass(bool defer_commit = false) {
+  InvalidateCurrentPass(bool defer_commit = false, gw2::PassClose why = gw2::PassClose::Other) {
+    if (gw2_front_.on && cmdbuf_state != CommandBufferState::Idle)
+      gw2_front_.pass_close[(unsigned)why]++; // gw2 (#4)
     switch (cmdbuf_state) {
     case CommandBufferState::Idle:
       break;
@@ -4349,6 +4378,9 @@ public:
 
     cmdbuf_state = CommandBufferState::Idle;
     if (promote_flush && !defer_commit) {
+      // gw2 (#4): DXMT_PROMOTE_FLUSH_MIN may hold this speculative commit back
+      if (DeferPromotedCommit())
+        return false;
       Commit();
       return true;
     }
@@ -4440,7 +4472,7 @@ public:
 
   void
   ClearRenderTargetView(D3D11RenderTargetView *pRenderTargetView, const FLOAT ColorRGBA[4]) {
-    InvalidateCurrentPass();
+    InvalidateCurrentPass(false, gw2::PassClose::Clear);
     auto clear_color = WMTClearColor{ColorRGBA[0], ColorRGBA[1], ColorRGBA[2], ColorRGBA[3]};
     auto &props = pRenderTargetView->description();
 
@@ -4454,7 +4486,7 @@ public:
   ClearDepthStencilView(D3D11DepthStencilView *pDepthStencilView, UINT ClearFlags, FLOAT Depth, UINT8 Stencil) {
     if (ClearFlags == 0)
       return;
-    InvalidateCurrentPass();
+    InvalidateCurrentPass(false, gw2::PassClose::Clear);
     auto &props = pDepthStencilView->description();
 
     EmitOP([texture = pDepthStencilView->texture(), view = pDepthStencilView->viewId(),
@@ -4480,7 +4512,7 @@ public:
       return true;
     if (cmdbuf_state == CommandBufferState::RenderEncoderActive)
       return true;
-    InvalidateCurrentPass();
+    InvalidateCurrentPass(false, gw2::PassClose::Render);
 
     // set dirty state
     state_.ShaderStages[PipelineStage::Vertex].ConstantBuffers.set_dirty();
@@ -4641,7 +4673,7 @@ public:
     /**
     Don't flush if it's a readback/upload blit pass
      */
-    InvalidateCurrentPass(BlitKind != CommandBufferState::BlitEncoderActive);
+    InvalidateCurrentPass(BlitKind != CommandBufferState::BlitEncoderActive, gw2::PassClose::Blit);
 
     EmitST([](ArgumentEncodingContext &enc) { enc.startBlitPass(); });
 
@@ -4657,7 +4689,7 @@ public:
       return;
     if (cmdbuf_state == CommandBufferState::ComputeEncoderActive)
       return;
-    InvalidateCurrentPass();
+    InvalidateCurrentPass(false, gw2::PassClose::Compute);
 
     // set dirty state
     state_.ShaderStages[PipelineStage::Compute].ConstantBuffers.set_dirty();
@@ -5188,7 +5220,7 @@ public:
   }
 
   void ResetEncodingContextState() {
-    InvalidateCurrentPass(true);
+    InvalidateCurrentPass(true, gw2::PassClose::State);
     // TODO: optimize by clearing only bound resource
     EmitST([](ArgumentEncodingContext& enc) {
       enc.clearState();
@@ -5406,7 +5438,7 @@ public:
       // as they are not expected to be created frequently
     }
 
-    ctx_->InvalidateCurrentPass();
+    ctx_->InvalidateCurrentPass(false, gw2::PassClose::Upscale);
     ctx_->EmitOP([input = std::move(input), output = std::move(output),
                   depth = std::move(depth),
                   motion_vector = std::move(motion_vector),

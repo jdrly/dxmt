@@ -888,6 +888,7 @@ public:
     device_context_->PrepareFlush();
     if (hr == DXGI_STATUS_OCCLUDED) {
       // flush commands without presenting
+      gw2::CommitWhyScope gw2_why(device_->GetDXMTDevice().queue().gw2_commit_why, gw2::CommitWhy::Present); // gw2 (#4)
       device_context_->Commit();
       PresentEnd(gw2_present_t0, 0);
       return hr;
@@ -946,7 +947,10 @@ public:
         this->UpdateStatistics(ctx.queue().statistics, ctx.currentFrameId());
       });
     }
-    device_context_->Commit();
+    {
+      gw2::CommitWhyScope gw2_why(cmd_queue.gw2_commit_why, gw2::CommitWhy::Present); // gw2 (#4): CMDS cbwhy
+      device_context_->Commit();
+    }
 
     lock.unlock(); // since PresentBoundary() will and should only stall current thread
 
@@ -1040,7 +1044,8 @@ public:
         "DXMT_CAP_LIMITER={} DXMT_STENCIL_PFV={} DXMT_DEPTH_PFV={} DXMT_BG_FPS={} DXMT_BG_FPS_MINIMIZED={} "
         "DXMT_BG_POLICY={} DXMT_RENDER_THREAD_PRIORITY={} DXMT_PSO_BLEND_HASH={} DXMT_PSO_MRU={} "
         "DXMT_PSO_TOPOLOGY_KEEP={} DXMT_CHUNKS={} DXMT_MAX_FRAME_LATENCY={} DXMT_COMPILE_WAIT_MS={} "
-        "DXMT_PSO_ARCHIVE={} DXMT_PSO_ARCHIVE_DIR={} DXMT_PSO_FLUSH_EVERY={} cpus={} refresh={}",
+        "DXMT_PSO_ARCHIVE={} DXMT_PSO_ARCHIVE_DIR={} DXMT_PSO_FLUSH_EVERY={} DXMT_PROMOTE_FLUSH_MIN={} "
+        "DXMT_PROMOTE_FLUSH_MS={} cpus={} refresh={}",
         gw2::hitchMs(), int(queue.argument_encoding_ctx.presentSplit()), int(display_sync_vsync_), deadline,
         int(cap_limiter_),
         // read as d3d11_resource_helper.cpp and RaiseRenderThreadPriority read them
@@ -1049,6 +1054,7 @@ public:
         std::strtoul(env::getEnvVar("DXMT_RENDER_THREAD_PRIORITY").c_str(), nullptr, 10), int(pso.blend_hash),
         int(pso.mru), int(pso.topology_keep), queue.ChunkCount(), max_latency, compile.wait_ms, archive,
         compile.archive_dir.empty() ? std::string("default") : compile.archive_dir, compile.flush_every,
+        gw2::promoteFlushMin(), gw2::promoteFlushMs(), // gw2 (#4): as the immediate context parsed them
         GetActiveProcessorCount(ALL_PROCESSOR_GROUPS), refresh
     ));
   }
