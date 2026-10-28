@@ -26,6 +26,7 @@
 #include <atomic>
 #include <cfloat>
 #include <format>
+#include <thread>
 
 /**
 Ref: https://learn.microsoft.com/en-us/windows/win32/api/dxgi1_3/nf-dxgi1_3-idxgiswapchain2-setmaximumframelatency
@@ -754,6 +755,8 @@ public:
     if (PresentFlags & DXGI_PRESENT_TEST)
       return hr;
 
+    ThrottleBackground();
+
     if (should_exit_fs)
       SetFullscreenState(FALSE, nullptr);
 
@@ -845,6 +848,53 @@ public:
 
     return hr;
   };
+
+  // gw2: the background throttle (d9mt 42b0c47). When the window isn't visible, macOS doesn't make
+  // presents wait for vsync, so after a Cmd+Tab the game rendered uncapped in the background and
+  // the Mac ran hot. Present sleeps to DXMT_BG_FPS (default 30) while the window is not the
+  // foreground window and to DXMT_BG_FPS_MINIMIZED (default 10) while it is minimized; 0 turns
+  // either off. Fixed cadence from the previous deadline; a frame that overran restarts it.
+  uint32_t bg_fps_ = 0;
+  const char *bg_reason_ = nullptr;
+  clock::time_point bg_deadline_{};
+
+  void ThrottleBackground() {
+    static const uint32_t s_bg = [] {
+      auto v = env::getEnvVar("DXMT_BG_FPS");
+      return v.empty() ? 30u : uint32_t(std::strtoul(v.c_str(), nullptr, 10));
+    }();
+    static const uint32_t s_min = [] {
+      auto v = env::getEnvVar("DXMT_BG_FPS_MINIMIZED");
+      return v.empty() ? 10u : uint32_t(std::strtoul(v.c_str(), nullptr, 10));
+    }();
+    uint32_t fps = 0;
+    const char *reason = nullptr;
+    if (wsi::isMinimized(hWnd)) {
+      fps = s_min;
+      reason = "window minimized";
+    } else if (!wsi::isForeground(hWnd)) {
+      fps = s_bg;
+      reason = "window not in the foreground";
+    }
+    auto now = clock::now();
+    if (fps != bg_fps_ || reason != bg_reason_) {
+      if (fps)
+        Logger::info(str::format("Present: ", reason, ", throttling to ", fps, " fps"));
+      else
+        Logger::info(str::format("Present: presenting normally again (was: ", bg_reason_ ? bg_reason_ : "-", ")"));
+      bg_fps_ = fps;
+      bg_reason_ = reason;
+      bg_deadline_ = now;
+    }
+    if (!fps)
+      return;
+    bg_deadline_ += std::chrono::duration_cast<clock::duration>(std::chrono::nanoseconds(1000000000ull / fps));
+    if (bg_deadline_ <= now) {
+      bg_deadline_ = now;
+      return;
+    }
+    std::this_thread::sleep_until(bg_deadline_);
+  }
 
   // gw2: one STATS line every 2 s from the frame statistics the HUD shows (DXMT_STATS=0 turns it
   // off). Times are ms per frame as avg/max over the window; fps and ms from the encode thread's
