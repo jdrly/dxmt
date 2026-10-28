@@ -18,6 +18,7 @@
  */
 
 #include "dxmt_command_queue.hpp"
+#include "dxmt_gw2_present.hpp"
 #include "dxmt_gw2_stats.hpp"
 #include "Metal.hpp"
 #include "dxmt_statistics.hpp"
@@ -334,8 +335,11 @@ CommandQueue::WaitForFinishThread() {
     }
 
     // gw2: the chunk's GPU execution span for STATS' gpuspan/gpugap (#3)
-    if (gw2::statsEnabled())
-      gw2::gpuSpanAdd(chunk.frame_, chunk.attached_cmdbuf.gpuStartTime(), chunk.attached_cmdbuf.gpuEndTime());
+    if (gw2::statsEnabled()) {
+      uint64_t gpu_end = chunk.attached_cmdbuf.gpuEndTime();
+      gw2::gpuSpanAdd(chunk.frame_, chunk.attached_cmdbuf.gpuStartTime(), gpu_end);
+      gw2::presentGpuEnd(chunk.frame_, gpu_end); // gw2 (#7): PRESENT's aftergpu
+    }
 
     if (chunk.signal_frame_latency_fence_ != ~0ull)
       frame_latency_fence_.signal(chunk.signal_frame_latency_fence_);

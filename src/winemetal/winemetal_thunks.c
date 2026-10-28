@@ -501,6 +501,26 @@ MTLCommandBuffer_presentDrawableWithDeadline(obj_handle_t cmdbuf, obj_handle_t d
   UNIX_CALL(146, &params);
 };
 
+// gw2 (#7): unix call 148 (147 is #1's)
+WINEMETAL_API uint32_t
+MTLDrawable_trackPresented(
+    obj_handle_t drawable, uint64_t frame, struct WMTPresentedRecord *out, uint32_t capacity, uint32_t *lost
+) {
+  struct unixcall_mtldrawable_trackpresented params;
+  params.drawable = drawable;
+  params.frame = frame;
+  params.capacity = capacity < WMT_PRESENTED_BATCH ? capacity : WMT_PRESENTED_BATCH;
+  params.count = 0;
+  params.lost = 0;
+  UNIX_CALL(148, &params);
+  uint32_t count = (uint32_t)params.count;
+  for (uint32_t i = 0; i < count; i++)
+    out[i] = params.records[i];
+  if (lost)
+    *lost = (uint32_t)params.lost;
+  return count;
+}
+
 WINEMETAL_API bool
 MTLDevice_supportsFamily(obj_handle_t device, enum WMTGPUFamily gpu_family) {
   struct unixcall_generic_obj_uint64_uint64_ret params;

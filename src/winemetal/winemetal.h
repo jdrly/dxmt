@@ -1654,6 +1654,24 @@ MTLCommandBuffer_presentDrawableAfterMinimumDuration(obj_handle_t cmdbuf, obj_ha
 WINEMETAL_API void
 MTLCommandBuffer_presentDrawableWithDeadline(obj_handle_t cmdbuf, obj_handle_t drawable, double interval);
 
+/* gw2 (#7): one drawable's presentation, for the PRESENT statistics section. Times are ns on
+   CACurrentMediaTime's clock (the one GPUStartTime/GPUEndTime use); presented_ns 0 = dropped. */
+struct WMTPresentedRecord {
+  uint64_t frame;
+  uint64_t encode_ns;
+  uint64_t presented_ns;
+};
+#define WMT_PRESENTED_BATCH 8
+
+/* gw2 (#7): unless drawable is 0, adds a presented handler to it that records frame, the time of
+   this call (the encode time) and the drawable's presentedTime in a bounded ring on the unix side;
+   call it right before the drawable's present. Then moves up to min(capacity, WMT_PRESENTED_BATCH)
+   finished records into out and returns how many; *lost gets the records the full ring dropped
+   since the last drain. Never waits: while a handler holds the ring, nothing is drained. */
+WINEMETAL_API uint32_t MTLDrawable_trackPresented(
+    obj_handle_t drawable, uint64_t frame, struct WMTPresentedRecord *out, uint32_t capacity, uint32_t *lost
+);
+
 enum WMTGPUFamily {
   WMTGPUFamilyApple1 = 1001,
   WMTGPUFamilyApple2 = 1002,

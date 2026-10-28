@@ -186,6 +186,16 @@ struct unixcall_generic_obj_obj_double_noret {
   double arg1;
 };
 
+/* gw2 (#7): MTLDrawable_trackPresented; 64-bit fields only, so the wow64 side shares it */
+struct unixcall_mtldrawable_trackpresented {
+  obj_handle_t drawable; /* 0: drain only */
+  uint64_t frame;
+  uint64_t capacity;
+  uint64_t count; /* out */
+  uint64_t lost;  /* out */
+  struct WMTPresentedRecord records[WMT_PRESENTED_BATCH]; /* out */
+};
+
 struct unixcall_mtlcapturemanager_startcapture {
   obj_handle_t capture_manager;
   struct WMTMemoryPointer info;
