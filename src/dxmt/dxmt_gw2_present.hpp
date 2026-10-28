@@ -18,7 +18,8 @@ void presentGpuEnd(uint64_t frame, uint64_t gpu_end_ns);
 
 // Render thread, at each Present: the refresh period and how many refreshes a frame is meant to
 // stay on screen (1 = every vsync, 2 = a 30 fps cap on 60 Hz); 0 = no vsync grid (display sync
-// off), so missed vsyncs aren't counted.
-void presentSetPacing(double refresh_ms, uint32_t vsyncs);
+// off), so missed vsyncs aren't counted. limiter_ms > 0: the frame limiter's interval (a cap that
+// isn't a whole number of refreshes), which missed vsyncs are counted against instead of vsyncs.
+void presentSetPacing(double refresh_ms, uint32_t vsyncs, double limiter_ms);
 
 } // namespace dxmt::gw2

@@ -216,7 +216,7 @@ holds, not STATS' `frames`. No line in a window without commits.
 
 ### PRESENT
 
-`PRESENT presented=avg/p95/max aftergpu=avg/max missed= starved= target=NxR n= dropped= lost=`
+`PRESENT presented=avg/p95/max aftergpu=avg/max nogpu= missed= starved= target=NxR n= dropped= lost=`
 
 When the drawables reached the screen (#7). Just before each present the encode thread adds a
 presented handler to the drawable (unix call 148, `MTLDrawable_trackPresented`); the handler
@@ -229,13 +229,21 @@ window, so it trails the frames by a present or two. Off with `DXMT_STATS=0` (no
 | Field | Meaning |
 |---|---|
 | `presented` | `presentedTime` minus the present's encode time, avg/p95/max ms over the shown frames: the queue to the screen. With `vsync+after` it includes the minimum duration |
-| `aftergpu` | `presentedTime` minus the frame's last GPU end that DXMT records (its frame command buffers; the split present buffer's copy isn't among them), avg/max ms: the wait for the vsync and the compositor after the GPU finished |
+| `aftergpu` | `presentedTime` minus the frame's last GPU end that DXMT records (its frame command buffers; the split present buffer's copy isn't among them), avg/max ms: the wait for the vsync and the compositor after the GPU finished. The GPU ends are kept per frame until the frame's record is joined (up to 2048 frames). A record whose frame the finish thread hasn't finished yet is joined in the next window, so a few frames can count in the window after the one they were shown in |
+| `nogpu` | Shown frames left out of `aftergpu`: no GPU end recorded for the frame, still unfinished a window later, or a GPU end that isn't before `presentedTime` (should stay near 0) |
 | `missed` | Refreshes skipped between two consecutive shown frames beyond the `target`, when the later frame had been encoded **before** the earlier one reached the screen: it was queued and still missed the vsync (the GPU or the compositor was late) |
 | `starved` | The same skipped refreshes when the later frame was encoded **after** the earlier one reached the screen: the game or the encode thread delivered it late, or its deadline (encode time + `DXMT_PRESENT_DEADLINE`) lay past the next vsync |
-| `target` | `N`x`R`: the refreshes a frame is meant to stay on screen (1 at a plain vsync, 2 for a 30 fps cap or a 50 fps cap on 60 Hz, whose frames alternate between 1 and 2) times the refresh period in ms. `missed=- starved=- target=-` with display sync off, where there is no vsync grid |
+| `target` | `N`x`R`: the refreshes a frame is meant to stay on screen times the refresh period in ms. `N` is 1 at a plain vsync and 2 or 3 for a 30 or 20 fps cap on 60 Hz. With the frame limiter (`vsync+limiter`) it is the limiter interval in refreshes, such as `1.20` for a 50 fps cap on 60 Hz, whose frames alternate between one and two refreshes. `missed=- starved=- target=-` with display sync off, where there is no vsync grid |
 | `n`, `dropped` | Records collected, and drawables with `presentedTime` 0 (never shown). A dropped frame isn't paired with its neighbours |
 | `lost` | Records the ring or the collector dropped because they weren't collected in time (should stay 0) |
 
-Gaps are counted in whole refreshes (rounded). Deadlines aren't anchored to the vsync grid yet;
+With a whole `N`, each gap is rounded to whole refreshes and whatever lies beyond `N` counts. With the
+frame limiter, the gaps are counted against its cadence instead: each gap's lateness against the
+limiter interval adds up (never below 0), and each time the sum reaches a refresh (less 0.25 ms
+for `presentedTime` jitter), that is one skipped refresh. A steady 30 fps under a 50 fps cap on
+60 Hz therefore counts about 4 skipped refreshes in 5 frames, and a steady 50 counts none. On a
+120 Hz display some caps, such as 103 fps, put a frame's legitimate wait within 0.25 ms of a
+refresh, and those can now and then count one skipped refresh too many.
+Deadlines aren't anchored to the vsync grid yet;
 that comes after the deadline A/B (`DXMT_PRESENT_DEADLINE` default, `=8`, `=12`) is measured with
 this line.

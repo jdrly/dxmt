@@ -1135,7 +1135,7 @@ public:
   void LogPacing(const Pacing &p, UINT SyncInterval, double deadline) {
     double refresh = init_refresh_rate_ != DBL_MAX ? init_refresh_rate_ : 60.0;
     if (gw2::statsEnabled())
-      gw2::presentSetPacing(1000.0 / refresh, p.vsyncs);
+      gw2::presentSetPacing(1000.0 / refresh, p.vsyncs, p.limiter * 1000);
     auto &l = pacing_logged_;
     if (l.mode == p.mode && l.interval == SyncInterval && l.cap == preferred_max_frame_rate && l.refresh == refresh &&
         l.duration == p.vsync_duration && l.limiter == p.limiter && l.deadline == deadline)
