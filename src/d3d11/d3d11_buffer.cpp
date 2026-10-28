@@ -22,6 +22,7 @@
 #include "dxmt_dynamic.hpp"
 #include "dxmt_format.hpp"
 #include "d3d11_resource.hpp"
+#include "dxmt_gw2_map.hpp"
 
 namespace dxmt {
 
@@ -114,8 +115,25 @@ public:
     structured = pDesc->MiscFlags & D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
     allow_raw_view = pDesc->MiscFlags & D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
     if (!(desc.BindFlags & kD3D11OutputBindFlags)) {
-      dynamic_ = new DynamicBuffer(buffer_.ptr(), flags);
+      // gw2 (#25): with DXMT_MAP_FAST, a default-usage buffer's renames (UpdateSubresource of the
+      // whole buffer, which maps it with WRITE_DISCARD) come from CPU-visible, suballocated pages as a
+      // dynamic buffer's do: an update is a memcpy and mostly a suballocation step, not a Metal
+      // buffer per update written through a unix call. Its first allocation is dropped once free.
+      Flags<BufferAllocationFlag> rename_flags = flags;
+      if (pDesc->Usage == D3D11_USAGE_DEFAULT && gw2::mapFast()) {
+        rename_flags = {};
+        rename_flags.set(BufferAllocationFlag::SuballocateFromOnePage);
+#ifdef __i386__
+        rename_flags.set(BufferAllocationFlag::CpuPlaced);
+#endif
+      }
+      dynamic_ = new DynamicBuffer(buffer_.ptr(), rename_flags);
+      if (gw2::mapFast() && rename_flags.test(BufferAllocationFlag::SuballocateFromOnePage))
+        dynamic_->enableGrowth(pDesc->ByteWidth);
+      gw2_dynamic_ = dynamic_.ptr();
     }
+    gw2_byte_width_ = pDesc->ByteWidth;
+    gw2_map_kind_ = (uint8_t)(dynamic_ ? gw2::bufferMapKind(pDesc->Usage, pDesc->BindFlags) : gw2::MapKind::Other);
   }
 
   HRESULT

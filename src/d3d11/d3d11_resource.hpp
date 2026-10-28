@@ -142,6 +142,13 @@ struct D3D11ResourceCommon : ID3D11Resource {
   uint32_t bind_flags_{};
   Rc<KeyedMutex> keyed_mutex_{};
 
+  // gw2 (#25): for Map, set by the resource's constructor: a D3D11Buffer's dynamicBuffer() and its
+  // ByteWidth, without a virtual call or a reference count (the buffer owns it for its lifetime),
+  // and the resource's gw2::MapKind for the MAP section
+  DynamicBuffer *gw2_dynamic_ = nullptr;
+  uint32_t gw2_byte_width_ = 0;
+  uint8_t gw2_map_kind_ = 0;
+
   const Rc<Buffer> &buffer() const {
     return buffer_;
   }

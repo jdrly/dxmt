@@ -3,6 +3,7 @@
 #include "dxmt_dynamic.hpp"
 #include "dxmt_staging.hpp"
 #include "d3d11_resource.hpp"
+#include "dxmt_gw2_map.hpp"
 namespace dxmt {
 
 #pragma region StagingBuffer
@@ -15,7 +16,9 @@ public:
   StagingBuffer(const tag_buffer::DESC1 *pDesc, MTLD3D11Device *device,
                 Rc<StagingResource> &&internal)
       : TResourceBase<tag_buffer>(*pDesc, device),
-        internal(std::move(internal)) {}
+        internal(std::move(internal)) {
+    this->gw2_map_kind_ = (uint8_t)gw2::MapKind::Staging; // gw2 (#25)
+  }
 
   void OnSetDebugObjectName(LPCSTR Name) override {
   }
@@ -75,7 +78,9 @@ public:
                  std::vector<Rc<StagingResource>> &&subresources)
       : TResourceBase<tag_texture>(*pDesc, pDevice),
         subresources(std::move(subresources)),
-        subresource_count(this->subresources.size()) {}
+        subresource_count(this->subresources.size()) {
+    this->gw2_map_kind_ = (uint8_t)gw2::MapKind::Staging; // gw2 (#25)
+  }
 
   void OnSetDebugObjectName(LPCSTR Name) override {
     if (!Name) {
