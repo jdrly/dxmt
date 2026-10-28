@@ -166,7 +166,9 @@ Presenter::encodeCommands(
     std::function<void(WMT::RenderCommandEncoder)> &&wait_fences,
     std::function<void(WMT::RenderCommandEncoder)> &&update_fences
 ) {
+  auto t0 = std::chrono::high_resolution_clock::now();
   auto drawable = layer_.nextDrawable();
+  last_next_drawable_ = std::chrono::high_resolution_clock::now() - t0;
 
   WMTRenderPassInfo info;
   WMT::InitializeRenderPassInfo(info);

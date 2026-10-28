@@ -1,4 +1,5 @@
 #include "config/config.hpp"
+#include "dxmt_gw2_stats.hpp"
 #include "d3d11_context_state.hpp"
 #include "d3d11_fence.hpp"
 #include "d3d11_private.h"
@@ -138,6 +139,7 @@ public:
   STDMETHODCALLTYPE
   Map(ID3D11Resource *pResource, UINT Subresource, D3D11_MAP MapType, UINT MapFlags,
       D3D11_MAPPED_SUBRESOURCE *pMappedResource) override {
+    GW2_API_SCOPE(Map);
     std::lock_guard<d3d11_device_mutex> lock(mutex);
 
     if (unlikely(!pResource))
@@ -297,6 +299,7 @@ public:
   void
   STDMETHODCALLTYPE
   Unmap(ID3D11Resource *pResource, UINT Subresource) override {
+    GW2_API_SCOPE(Map);
     std::lock_guard<d3d11_device_mutex> lock(mutex);
 
     if (unlikely(!pResource))
@@ -495,6 +498,7 @@ public:
   void
   STDMETHODCALLTYPE
   Flush1(D3D11_CONTEXT_TYPE Type, HANDLE hEvent) override {
+    GW2_API_SCOPE(Flush);
     std::lock_guard<d3d11_device_mutex> lock(mutex);
 
     if (ctx_state.has_dirty_op_since_last_event || promote_flush) {
