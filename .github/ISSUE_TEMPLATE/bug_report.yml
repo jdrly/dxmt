@@ -1,0 +1,88 @@
+name: Bug report
+description: Something in GW2 runs wrong or looks wrong with the fork (or with one of its changes)
+title: ""
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Write the title as `Context: What goes wrong`, for example
+        `Background throttle: The game runs at 30 fps while it is in front`.
+        Attach the DXMT log (`work/logs/Gw2-64_d3d11.log` in the GW2 on Mac workspace) and
+        `work/logs/session.env`. Never attach account data.
+
+  - type: textarea
+    id: observed
+    attributes:
+      label: What happened?
+      description: What you saw, where in GW2, and when (a screenshot helps). Quote the log or STATS lines that show it.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: impact
+    attributes:
+      label: How bad is it?
+      options:
+        - GW2 doesn't start, hangs or crashes
+        - Wrong graphics
+        - Runs badly (frame rate, stutter, pacing, heat)
+        - A switch or log line doesn't work as documented
+        - Cosmetic
+    validations:
+      required: true
+
+  - type: input
+    id: build
+    attributes:
+      label: Fork build
+      description: The commit installed (`scripts/gw2.zsh status`, the DXMT line).
+      placeholder: "v0.80-370-ge8c1d62"
+    validations:
+      required: true
+
+  - type: textarea
+    id: settings
+    attributes:
+      label: Settings
+      description: BACKEND, NCPU, any DXMT_* switches, the GW2 graphics options that matter.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: regression
+    attributes:
+      label: Does it happen with a switch off, or on D3DMetal?
+      options:
+        - I haven't tried
+        - "No: only with the fork's change on"
+        - "Yes: also with the switch off"
+        - "Yes: also on D3DMetal"
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Drag the DXMT log and session.env here.
+    validations:
+      required: true
