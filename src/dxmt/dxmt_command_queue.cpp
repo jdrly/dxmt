@@ -23,9 +23,12 @@
 #include "dxmt_statistics.hpp"
 #include "util_env.hpp"
 #include "util_win32_compat.h"
+#include <algorithm>
 #include <atomic>
 #include <cstdlib>
 #include <format>
+#include <mutex>
+#include <utility>
 
 #define ASYNC_ENCODING 1
 
@@ -69,41 +72,51 @@ MaxLatencyOverrideFromEnv() {
   return 0;
 }
 
-// gw2 (#8): the RING section. The render thread adds, the 2 s window drains.
-struct RingStats {
-  std::atomic<uint32_t> chunks{kCommandChunkCount};
-  std::atomic<uint64_t> commits{0};
-  std::atomic<uint64_t> occupancy_sum{0}; // chunks in flight after each commit
-  std::atomic<uint64_t> peak{0};
-  std::atomic<uint64_t> stalls{0};
-  std::atomic<uint64_t> stalled_frames{0};
-  std::atomic<uint64_t> stall_ns{0};
-  std::atomic<uint64_t> frame_stall_max_ns{0};
+// gw2 (#8): the RING section. The render thread publishes each completed frame's totals (at the
+// next frame's first commit) under the mutex, and the 2 s window drains them under it, so a line
+// only ever holds whole frames and its averages divide by the frames it holds.
+struct RingWindow {
+  uint64_t frames = 0;
+  uint64_t commits = 0;
+  uint64_t occupancy_sum = 0; // chunks in flight after each commit
+  uint64_t peak = 0;
+  uint64_t stalls = 0;
+  uint64_t stalled_frames = 0;
+  uint64_t stall_ns = 0;
+  uint64_t frame_stall_max_ns = 0;
 };
-RingStats g_ring;
+std::mutex g_ring_mutex;
+RingWindow g_ring_window;
+std::atomic<uint32_t> g_ring_chunks{kCommandChunkCount};
 
 void
-atomicMax(std::atomic<uint64_t> &a, uint64_t v) {
-  auto cur = a.load(std::memory_order_relaxed);
-  while (cur < v && !a.compare_exchange_weak(cur, v, std::memory_order_relaxed))
-    ;
+PublishRingFrame(const CommandQueue::RingFrame &f) {
+  std::lock_guard lock(g_ring_mutex);
+  auto &w = g_ring_window;
+  w.frames++;
+  w.commits += f.commits;
+  w.occupancy_sum += f.occupancy_sum;
+  w.peak = std::max(w.peak, f.peak);
+  w.stalls += f.stalls;
+  w.stalled_frames += f.stalls ? 1 : 0;
+  w.stall_ns += f.stall_ns;
+  w.frame_stall_max_ns = std::max(w.frame_stall_max_ns, f.stall_ns);
 }
 
 std::string
-RingSection(double, uint32_t frames) {
-  auto commits = g_ring.commits.exchange(0, std::memory_order_relaxed);
-  auto occupancy = g_ring.occupancy_sum.exchange(0, std::memory_order_relaxed);
-  auto peak = g_ring.peak.exchange(0, std::memory_order_relaxed);
-  auto stalls = g_ring.stalls.exchange(0, std::memory_order_relaxed);
-  auto stalled = g_ring.stalled_frames.exchange(0, std::memory_order_relaxed);
-  auto stall_ns = g_ring.stall_ns.exchange(0, std::memory_order_relaxed);
-  auto frame_max_ns = g_ring.frame_stall_max_ns.exchange(0, std::memory_order_relaxed);
-  if (!commits)
+RingSection(double, uint32_t) {
+  RingWindow w;
+  {
+    std::lock_guard lock(g_ring_mutex);
+    w = std::exchange(g_ring_window, {});
+  }
+  if (!w.commits)
     return {};
-  double n = frames ? frames : 1;
+  double n = w.frames;
   return std::format(
-      "chunks={} occupancy={:.1f}/{} stalls={:.2f} stalled={} ms={:.2f}/{:.1f}", g_ring.chunks.load(),
-      double(occupancy) / commits, peak, stalls / n, stalled, stall_ns / 1e6 / n, frame_max_ns / 1e6
+      "chunks={} occupancy={:.1f}/{} stalls={:.2f} stalled={} ms={:.2f}/{:.1f}", g_ring_chunks.load(),
+      double(w.occupancy_sum) / w.commits, w.peak, w.stalls / n, w.stalled_frames, w.stall_ns / 1e6 / n,
+      w.frame_stall_max_ns / 1e6
   );
 }
 
@@ -149,7 +162,7 @@ CommandQueue::CommandQueue(WMT::Device device) :
   event = device.newSharedEvent();
 
   // gw2 (#8): the ring and the frame latency in effect, once per device
-  g_ring.chunks.store(chunk_count_, std::memory_order_relaxed);
+  g_ring_chunks.store(chunk_count_, std::memory_order_relaxed);
   Logger::info(str::format(
       "CommandQueue: chunks=", chunk_count_, env::getEnvVar("DXMT_CHUNKS").empty() ? " (default)" : " (DXMT_CHUNKS)",
       " metalbuffers=", metal_buffer_count_, " maxlatency=", max_latency_,
@@ -209,20 +222,18 @@ CommandQueue::CommitCurrentChunk() {
   statistics.commit_interval += (t1 - t0);
 
   if (gw2::statsEnabled()) {
-    g_ring.commits.fetch_add(1, std::memory_order_relaxed);
-    g_ring.occupancy_sum.fetch_add(in_flight, std::memory_order_relaxed);
-    atomicMax(g_ring.peak, in_flight);
+    // gw2 (#8): the first commit of a new frame publishes the previous frame's totals
+    if (ring_frame_.frame != frame_count) {
+      if (ring_frame_.commits)
+        PublishRingFrame(ring_frame_);
+      ring_frame_ = {.frame = frame_count};
+    }
+    ring_frame_.commits++;
+    ring_frame_.occupancy_sum += in_flight;
+    ring_frame_.peak = std::max(ring_frame_.peak, in_flight);
     if (ring_full) {
-      uint64_t ns = std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
-      if (ring_stall_frame_ != frame_count) {
-        ring_stall_frame_ = frame_count;
-        ring_frame_stall_ns_ = 0;
-        g_ring.stalled_frames.fetch_add(1, std::memory_order_relaxed);
-      }
-      ring_frame_stall_ns_ += ns;
-      g_ring.stalls.fetch_add(1, std::memory_order_relaxed);
-      g_ring.stall_ns.fetch_add(ns, std::memory_order_relaxed);
-      atomicMax(g_ring.frame_stall_max_ns, ring_frame_stall_ns_);
+      ring_frame_.stalls++;
+      ring_frame_.stall_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
     }
   }
 

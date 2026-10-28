@@ -199,7 +199,9 @@ With all three switches off the numbers measure the upstream lookup: `mru=0`, `t
 `RING chunks= occupancy=avg/peak stalls= stalled= ms=avg/max` (#8): the chunk ring the render
 thread commits into. A chunk is in flight from `CommitCurrentChunk` until the finish thread has
 seen its command buffer complete (waiting to encode, encoding, on the GPU, or done but not yet
-retired). No line in a window without commits.
+retired). A line holds whole frames only: a frame's totals join the window at the next frame's
+first commit, so it can land one window late, and "per frame" divides by the frames the line
+holds, not STATS' `frames`. No line in a window without commits.
 
 | Field | Meaning |
 |---|---|

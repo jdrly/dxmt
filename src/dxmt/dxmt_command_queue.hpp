@@ -176,8 +176,20 @@ private:
   const uint32_t chunk_count_;
   const uint32_t metal_buffer_count_;
   const uint32_t max_latency_override_;
-  uint64_t ring_stall_frame_ = ~0ull; // render thread: the frame of the last ring stall
-  uint64_t ring_frame_stall_ns_ = 0;  // render thread: that frame's stall time so far
+
+public:
+  // gw2 (#8): one frame's RING totals, kept by CommitCurrentChunk until the next frame's first commit
+  struct RingFrame {
+    uint64_t frame = ~0ull;
+    uint64_t commits = 0;
+    uint64_t occupancy_sum = 0;
+    uint64_t peak = 0;
+    uint64_t stalls = 0;
+    uint64_t stall_ns = 0;
+  };
+
+private:
+  RingFrame ring_frame_;
 
   std::array<CommandChunk, kCommandChunkCountMax> chunks;
   uint64_t encoder_seq = 1;
