@@ -87,6 +87,9 @@ public:
         InitPromoteFlush();
       }
 
+  gw2::TimestampMode timestamp_mode_ = gw2::timestampMode(); // gw2 (#24)
+  bool gw2_ts_uncommitted_ = false; // gw2 (#24): a timestamp or disjoint query waits for the current chunk
+
   ~MTLD3D11ImmediateContext() {
     if (watchdog_started_) {
       watchdog_stop_.store(true);
@@ -385,6 +388,14 @@ public:
     switch (desc.Query) {
     case D3D11_QUERY_TIMESTAMP_DISJOINT:
     case D3D11_QUERY_EVENT: {
+      if (desc.Query == D3D11_QUERY_TIMESTAMP_DISJOINT) {
+        if (gw2_front_.on)
+          gw2::timestampCount(gw2::TsCount::Disjoint); // gw2 (#24)
+        if (timestamp_mode_ != gw2::TimestampMode::Exact) {
+          EndTimestampDisjointKeepingPass(static_cast<MTLD3D11EventQuery *>(pAsync));
+          break;
+        }
+      }
       if (ctx_state.has_dirty_op_since_last_event) {
         auto event_id = cmd_queue.GetNextEventSeqId();
         static_cast<MTLD3D11EventQuery *>(pAsync)->Issue(event_id);
@@ -401,6 +412,16 @@ public:
       break;
     }
     case D3D11_QUERY_TIMESTAMP: {
+      if (gw2_front_.on)
+        gw2::timestampCount(gw2::TsCount::End); // gw2 (#24)
+      if (timestamp_mode_ != gw2::TimestampMode::Exact) {
+        auto timestamp = static_cast<MTLD3D11TimestampQuery *>(pAsync);
+        if (auto query = timestamp->End()) {
+          timestamp->SetIssuedChunk(cmd_queue.CurrentSeqId());
+          EndTimestampKeepingPass(query);
+        }
+        break;
+      }
       if (auto query = static_cast<MTLD3D11TimestampQuery *>(pAsync)->End()) {
         InvalidateCurrentPass(true, gw2::PassClose::Query);
         EmitOP([query = Rc(query)](ArgumentEncodingContext &enc) mutable {
@@ -446,7 +467,11 @@ public:
     switch (desc.Query) {
     case D3D11_QUERY_EVENT:
     case D3D11_QUERY_TIMESTAMP_DISJOINT: {
-      switch (static_cast<MTLD3D11EventQuery *>(pAsync)->CheckEventState(cmd_queue.SignaledEventSeqId())) {
+      // gw2 (#24): estimate/boundary issue a disjoint query at a chunk, not at an event
+      uint64_t signaled = desc.Query == D3D11_QUERY_TIMESTAMP_DISJOINT && timestamp_mode_ != gw2::TimestampMode::Exact
+                              ? cmd_queue.CoherentSeqId()
+                              : cmd_queue.SignaledEventSeqId();
+      switch (static_cast<MTLD3D11EventQuery *>(pAsync)->CheckEventState(signaled)) {
       case EventState::Pending:
         break;
       case EventState::Stall:
@@ -485,6 +510,13 @@ public:
       uint64_t null_data;
       uint64_t *data_ptr = pData ? (uint64_t *)pData : &null_data;
       hr = static_cast<MTLD3D11TimestampQuery *>(pAsync)->GetData(data_ptr);
+      // gw2 (#24): estimate/boundary leave the pass open, so a game that only polls with DONOTFLUSH
+      // might never see its chunk committed (exact commits it at the next draw's new pass). As an event
+      // query's stall: after 64 unresolved polls while the query's chunk is still being recorded,
+      // the poll flushes (Flush commits it: gw2_ts_uncommitted_)
+      if (hr == S_FALSE && timestamp_mode_ != gw2::TimestampMode::Exact &&
+          static_cast<MTLD3D11TimestampQuery *>(pAsync)->PollStalled(cmd_queue.CurrentSeqId()))
+        GetDataFlags &= ~D3D11_ASYNC_GETDATA_DONOTFLUSH;
       break;
     }
     case D3D11_QUERY_TIMESTAMP_DISJOINT: {
@@ -530,7 +562,7 @@ public:
     GW2_API_SCOPE(Flush);
     std::lock_guard<d3d11_device_mutex> lock(mutex);
 
-    if (ctx_state.has_dirty_op_since_last_event || promote_flush) {
+    if (ctx_state.has_dirty_op_since_last_event || promote_flush || gw2_ts_uncommitted_) { // gw2 (#24)
       gw2::CommitWhyScope gw2_why(cmd_queue.gw2_commit_why, gw2::CommitWhy::Flush); // gw2 (#4)
       InvalidateCurrentPass(true, gw2::PassClose::Flush);
       Commit();
@@ -651,6 +683,8 @@ public:
       gw2_front_.commit[(unsigned)why]++;
     if (deferred_since_)
       EndDeferral(scope);
+    gw2_ts_commit_skipped_ = false; // gw2 (#24): this commit is the one exact mode would make
+    gw2_ts_uncommitted_ = false;
     promote_requests_ = 0;
     promote_nodefer_ = false;
     promote_forced_ = gw2::CommitWhy::None;
@@ -892,6 +926,57 @@ public:
         continue;
       CommitDeferred(gw2::CommitWhy::Watchdog);
     }
+  }
+
+  // gw2 (#24): DXMT_TIMESTAMP_MODE estimate/boundary. The query is marked where it is in the command
+  // stream, and the open pass stays open (exact closes it). estimate requests no commit; boundary
+  // requests the speculative commit at the next pass change, as exact does. A game that only polls
+  // gets the chunk committed by GetData's stall rule (PollStalled).
+  void
+  EndTimestampKeepingPass(TimestampQuery *query) {
+    gw2::timestampActed();
+    if (gw2_front_.on && cmdbuf_state != CommandBufferState::Idle)
+      gw2::timestampCount(gw2::TsCount::Kept);
+    EmitOP([query = Rc(query)](ArgumentEncodingContext &enc) mutable {
+      enc.markTimestamp(std::move(query));
+    });
+    gw2_ts_uncommitted_ = true; // a Flush commits the chunk (GetData's after a stalled poll)
+    if (timestamp_mode_ == gw2::TimestampMode::Boundary)
+      PromoteFlush(gw2::CommitWhy::Timestamp);
+    else if (gw2_front_.on)
+      gw2_ts_commit_skipped_ = true;
+  }
+
+  // gw2 (#24): a timestamp-disjoint query in estimate/boundary signals no event and closes no pass.
+  // It is ready once the chunk it ends in has finished on the finish thread (CoherentSeqId), which
+  // resolves that chunk's timestamps first, so the game never sees the disjoint data before the
+  // timestamps of the same frame. The chunk must be committed for that: gw2_ts_uncommitted_ makes Flush
+  // (and GetData's flush after a stall) commit it, as the event exact signals does. Exact's condition
+  // for a new event (dirty since the last one) decides what it counts as kept and saved.
+  void
+  EndTimestampDisjointKeepingPass(MTLD3D11EventQuery *query) {
+    gw2::timestampActed();
+    bool exact_would_signal = ctx_state.has_dirty_op_since_last_event;
+    if (gw2_front_.on && exact_would_signal && cmdbuf_state != CommandBufferState::Idle)
+      gw2::timestampCount(gw2::TsCount::Kept);
+    query->Issue(cmd_queue.CurrentSeqId());
+    gw2_ts_uncommitted_ = true;
+    if (!exact_would_signal)
+      return;
+    if (timestamp_mode_ == gw2::TimestampMode::Boundary)
+      PromoteFlush(gw2::CommitWhy::Timestamp);
+    else if (gw2_front_.on)
+      gw2_ts_commit_skipped_ = true;
+  }
+
+  // gw2 (#24): exact mode would have committed at this pass change. A pass change inside an explicit
+  // commit (Flush, Map, GetData, fence, WaitUntilGPUIdle: a reason in scope) is followed by that commit,
+  // so nothing is saved there.
+  void
+  TimestampCommitSkipped() override {
+    gw2_ts_commit_skipped_ = false;
+    if (cmd_queue.gw2_commit_why == gw2::CommitWhy::None)
+      gw2::timestampCount(gw2::TsCount::Saved);
   }
 
   uint32_t promote_min_ = 0;

@@ -12,6 +12,7 @@
 #include "dxmt_gw2_compile.hpp"
 #include "dxmt_gw2_present.hpp"
 #include "dxmt_gw2_stats.hpp"
+#include "dxmt_gw2_timestamp.hpp"
 #include "dxmt_presenter.hpp"
 #include "log/log.hpp"
 #include "d3d11_resource.hpp"
@@ -1045,7 +1046,7 @@ public:
         "DXMT_BG_POLICY={} DXMT_RENDER_THREAD_PRIORITY={} DXMT_PSO_BLEND_HASH={} DXMT_PSO_MRU={} "
         "DXMT_PSO_TOPOLOGY_KEEP={} DXMT_CHUNKS={} DXMT_MAX_FRAME_LATENCY={} DXMT_COMPILE_WAIT_MS={} "
         "DXMT_PSO_ARCHIVE={} DXMT_PSO_ARCHIVE_DIR={} DXMT_PSO_FLUSH_EVERY={} DXMT_PROMOTE_FLUSH_MIN={} "
-        "DXMT_PROMOTE_FLUSH_MS={} cpus={} refresh={}",
+        "DXMT_PROMOTE_FLUSH_MS={} DXMT_TIMESTAMP_MODE={} cpus={} refresh={}",
         gw2::hitchMs(), int(queue.argument_encoding_ctx.presentSplit()), int(display_sync_vsync_), deadline,
         int(cap_limiter_),
         // read as d3d11_resource_helper.cpp and RaiseRenderThreadPriority read them
@@ -1055,6 +1056,7 @@ public:
         int(pso.mru), int(pso.topology_keep), queue.ChunkCount(), max_latency, compile.wait_ms, archive,
         compile.archive_dir.empty() ? std::string("default") : compile.archive_dir, compile.flush_every,
         gw2::promoteFlushMin(), gw2::promoteFlushMs(), // gw2 (#4): as the immediate context parsed them
+        gw2::timestampModeName(gw2::timestampMode()), // gw2 (#24)
         GetActiveProcessorCount(ALL_PROCESSOR_GROUPS), refresh
     ));
   }
