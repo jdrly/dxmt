@@ -21,6 +21,9 @@ GW2 on Mac sets `DXMT_LOG_PATH` to its `work/logs`, so the lines below land in
 | `DXMT_RENDER_THREAD_PRIORITY` | off | On the first Present of each thread that presents (GW2's render thread): `=1` sets the macOS QoS class user-interactive (`pthread_set_qos_class_self_np` through the bridge), `=2` calls `SetThreadPriority(THREAD_PRIORITY_HIGHEST)`, `=3` both; see [Render thread priority](#render-thread-priority) | unset or `=0`: the thread keeps the priority and QoS it had |
 | `DXMT_DEPTH_PFV` | off | `=1` keeps `PixelFormatView` (no lossless compression) on typeless single-plane depth targets (`R32_TYPELESS`, `R16_TYPELESS` bound as depth), the part `DXMT_STENCIL_PFV` doesn't cover (#2) | — |
 | `DXMT_BG_POLICY` | `focus` | What "in the background" means for `DXMT_BG_FPS`. `focus`: another process's window is in the foreground, or none is (pid 0, counted as another process). `occlusion`: GW2's window isn't visible on screen (`NSWindow.occlusionState` without `Visible`, read through the bridge at most 10 times a second) or is miniaturized (`DXMT_BG_FPS_MINIMIZED`), whoever has the focus, as d9mt does. A minimized window (`IsIconic`) throttles under both | `focus` |
+| `DXMT_PSO_BLEND_HASH` | on | The pipeline key's hash includes a fingerprint of the blend state (exactly what the key's equality compares: disabled fields left out, one render target without independent blend, else one per color attachment) and `RasterizationEnabled`; computed once per blend state object. The equality rejects keys whose fingerprints differ without reading both blend descriptions | `=0`: the upstream hash (no blend, no `RasterizationEnabled`) and equality |
+| `DXMT_PSO_MRU` | on | Each context keeps its last 4 plain (VS/PS) pipelines with their keys and checks them, with the cache's own equality, before the device's pipeline cache (its lock, hash and bucket) | `=0`: every pipeline change looks up the cache |
+| `DXMT_PSO_TOPOLOGY_KEEP` | on | `IASetPrimitiveTopology` keeps the current pipeline when the new topology has the same class (point, line, triangle) and the pipeline is a plain one (no GS, HS or DS bound); adjacency and patch lists always invalidate | `=0`: every topology change invalidates the pipeline |
 
 Not switchable: `SetMaximumFrameLatency(0)` means the default, 3 (DXGI's definition). Typeless
 depth targets without stencil (`R32_TYPELESS`, `R16_TYPELESS` as depth) get `PixelFormatView` only
@@ -87,6 +90,7 @@ Sections: a feature registers a function with `gw2::SectionRegistrar` (`src/dxmt
 | `DXMT_DEPTH_PFV=1: keeping PixelFormatView on typeless single-plane depth targets (first: format F bind B WxH)` | Once, the first time `DXMT_DEPTH_PFV` keeps the flag (the `PixelFormatView` line above then follows per format and bind flags) |
 | `DEPTHVIEW base=… view=… swizzle=… type=… size=… usage=… pfv=… aspect=… nil=…` | Once per distinct view of a depth/stencil texture, and for any view that came back nil (a warning then); at most 64, then `DEPTHVIEW: more than 64 distinct views, the rest are suppressed`. Replaces the old stencil-only `TextureView` warning. Fields below |
 | `DEPTHSRV format=… size=… pfv=… readonly=… stage=… slot=… view=… swizzled=… aspect=…` | Once per texture (with `DXMT_STATS` on) that is a render pass's depth-stencil attachment and is read by a shader of the same pass as a shader resource; at most 64, then `DEPTHSRV: more than 64 textures, the rest are suppressed`. Fields below |
+| `PSO: blend hash on/off (DXMT_PSO_BLEND_HASH), MRU on, 4 entries/off (DXMT_PSO_MRU), topology keep on/off (DXMT_PSO_TOPOLOGY_KEEP)` | Once per device: the effective pipeline lookup settings |
 
 ### Render thread priority
 
@@ -163,3 +167,24 @@ swapchain's throttle on the game's render thread.
 | `fps` | The throttle's rate at the window's last Present; `0`: it had let go |
 | `reason` | Why it last engaged: `minimized`, `foreground` (another process), `noforeground` (no foreground window, pid 0), `occluded`, `miniaturized` |
 | `policy` | `DXMT_BG_POLICY` |
+
+### PSO
+
+`PSO builds= mru= lookups= equal= depth=avg/max new= topokept= lock=wait/held` (jdrly/dxmt #6):
+the pipeline lookup on the render thread. Counts are per frame (encode-thread frames of the
+window) unless noted; all contexts and all three pipeline caches (plain, geometry,
+tessellation) together. Omitted when nothing was looked up.
+
+| Field | Meaning |
+|---|---|
+| `builds` | Pipeline keys built (`InitializeGraphicsPipelineDesc`): one per pipeline change that reached a draw |
+| `mru` | Of those, hits in the context's MRU (`DXMT_PSO_MRU`): no cache lookup |
+| `lookups` | Lookups in the device's pipeline caches |
+| `equal` | Key equality calls inside the caches (libc++ compares a node only when its full hash matches, so with the upstream hash every blend variant of a key costs one). The MRU's own compares are not counted |
+| `depth` | Nodes in the looked-up key's bucket, average/max, over one lookup in 16 per thread |
+| `new` | Pipelines created in the window (a total, not per frame) |
+| `topokept` | Topology changes that kept the pipeline (`DXMT_PSO_TOPOLOGY_KEEP`) |
+| `lock` | The caches' lock: time waiting for it / holding it (unlock included), ms per frame, one lookup in 16 timed and scaled |
+
+With all three switches off the numbers measure the upstream lookup: `mru=0`, `topokept=0`,
+`lookups` = `builds`.

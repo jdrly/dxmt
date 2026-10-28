@@ -6,6 +6,8 @@
 #include "d3d11_shader.hpp"
 #include "d3d11_state_object.hpp"
 #include "util_hash.hpp"
+#include "dxmt_gw2_stats.hpp"
+#include <atomic>
 
 struct MTL_GRAPHICS_PIPELINE_DESC {
   ManagedShader VertexShader;
@@ -27,6 +29,24 @@ struct MTL_GRAPHICS_PIPELINE_DESC {
   uint32_t SampleMask;
   uint32_t GSPassthrough;
 };
+
+namespace dxmt::gw2 {
+// gw2 (#6): pipeline lookup switches (read once) and the counters of the PSO section.
+struct PsoSettings {
+  bool blend_hash;    // DXMT_PSO_BLEND_HASH: the blend state's fingerprint in the key's hash
+  bool mru;           // DXMT_PSO_MRU: a per-context MRU in front of the pipeline cache
+  bool topology_keep; // DXMT_PSO_TOPOLOGY_KEEP: keep the pipeline across topologies of one class
+};
+const PsoSettings &psoSettings();
+
+enum class PsoCounter : unsigned { Build, MruHit, TopologyKept, Lookup, New, Equal, Count };
+extern std::atomic<uint64_t> g_pso_counters[(unsigned)PsoCounter::Count];
+inline void
+psoCount(PsoCounter c) {
+  if (statsEnabled())
+    g_pso_counters[(unsigned)c].fetch_add(1, std::memory_order_relaxed);
+}
+} // namespace dxmt::gw2
 
 struct MTL_COMPUTE_PIPELINE_DESC {
   ManagedShader ComputeShader;
@@ -58,6 +78,13 @@ template <> struct hash<MTL_GRAPHICS_PIPELINE_DESC> {
     state.add((size_t)v.InputLayout);
     /* don't add blend */
     // state.add((size_t)v.BlendState);
+    // gw2 (#6): not the pointer (equal_to compares blend states by content), but the blend
+    // state's fingerprint of what equal_to compares, plus RasterizationEnabled, which it also
+    // compares. Without them, pipelines that differ only there share a bucket and a full hash.
+    if (dxmt::gw2::psoSettings().blend_hash) {
+      state.add(v.BlendState->PipelineBlendHash(v.NumColorAttachments));
+      state.add((size_t)v.RasterizationEnabled);
+    }
     state.add((size_t)v.DepthStencilFormat);
     state.add((size_t)v.TopologyClass);
     state.add((size_t)v.IndexBufferFormat);
@@ -82,6 +109,11 @@ template <> struct equal_to<MTL_GRAPHICS_PIPELINE_DESC> {
         return false;
     }
     if (x.BlendState != y.BlendState) {
+      // gw2 (#6): different fingerprints mean a field below differs; skip the two GetDesc1.
+      if (dxmt::gw2::psoSettings().blend_hash &&
+          x.BlendState->PipelineBlendHash(x.NumColorAttachments) !=
+              y.BlendState->PipelineBlendHash(y.NumColorAttachments))
+        return false;
       D3D11_BLEND_DESC1 x_, y_;
       x.BlendState->GetDesc1(&x_);
       y.BlendState->GetDesc1(&y_);

@@ -28,6 +28,10 @@ DEFINE_COM_INTERFACE("279a1d66-2fc1-460c-a0a7-a7a5f2b7a48f",
     : public ID3D11BlendState1 {
   virtual bool IsDualSourceBlending() = 0;
   virtual void SetupMetalPipelineDescriptor(WMTRenderPipelineBlendInfo* blend_info, uint32_t num_rt, uint32_t valid_rt) = 0;
+  // gw2 (#6): the blend part of the pipeline key's hash, with the semantics of
+  // equal_to<MTL_GRAPHICS_PIPELINE_DESC>: the fields it compares for this many color attachments,
+  // and nothing else. Computed once, at creation.
+  virtual size_t PipelineBlendHash(uint32_t num_color_attachments) = 0;
 };
 
 namespace std {
