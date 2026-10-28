@@ -888,6 +888,7 @@ public:
     device_context_->PrepareFlush();
     if (hr == DXGI_STATUS_OCCLUDED) {
       // flush commands without presenting
+      gw2::CommitWhyScope gw2_why(device_->GetDXMTDevice().queue().gw2_commit_why, gw2::CommitWhy::Present); // gw2 (#4)
       device_context_->Commit();
       PresentEnd(gw2_present_t0, 0);
       return hr;
@@ -946,7 +947,10 @@ public:
         this->UpdateStatistics(ctx.queue().statistics, ctx.currentFrameId());
       });
     }
-    device_context_->Commit();
+    {
+      gw2::CommitWhyScope gw2_why(cmd_queue.gw2_commit_why, gw2::CommitWhy::Present); // gw2 (#4): CMDS cbwhy
+      device_context_->Commit();
+    }
 
     lock.unlock(); // since PresentBoundary() will and should only stall current thread
 

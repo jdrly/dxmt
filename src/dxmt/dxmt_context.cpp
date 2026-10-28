@@ -929,6 +929,54 @@ ArgumentEncodingContext::$$setEncodingContext(uint64_t seq_id, uint64_t frame_id
   frame_id_ = frame_id;
 }
 
+// gw2 (#4): an attachment's bytes per pixel in one aspect, samples included. Uncompressed: an upper
+// bound, since lossless compression and memoryless targets move less.
+static uint64_t
+gw2PixelBytes(TextureView *view, gw2::Aspect aspect) {
+  auto texture = view->allocation->descriptor;
+  uint32_t texel;
+  switch (aspect) {
+  case gw2::Aspect::Color:
+    texel = MTLGetTexelSize(texture->pixelFormat());
+    break;
+  case gw2::Aspect::Depth:
+    texel = texture->pixelFormat() == WMTPixelFormatDepth16Unorm ? 2 : 4;
+    break;
+  default:
+    texel = 1;
+    break;
+  }
+  return uint64_t(texel) * std::max(texture->sampleCount(), 1u);
+}
+
+// gw2 (#4): ENCODE's loadMB/storeMB for one render pass: the render area times each attachment's
+// pixel size, for a Load action and for a store (a resolve adds the resolved target).
+void
+ArgumentEncodingContext::gw2CountAttachments(RenderEncoderData *data) {
+  uint64_t area = uint64_t(data->render_target_width) * data->render_target_height *
+                  std::max<uint32_t>(data->render_target_array_length, 1);
+  auto count = [&](TextureView *view, WMTLoadAction load, WMTStoreAction store, gw2::Aspect aspect) {
+    uint64_t bytes = area * gw2PixelBytes(view, aspect);
+    if (load == WMTLoadActionLoad)
+      gw2_enc_.load_bytes[(unsigned)aspect] += bytes;
+    if (store == WMTStoreActionStore || store == WMTStoreActionStoreAndMultisampleResolve)
+      gw2_enc_.store_bytes[(unsigned)aspect] += bytes;
+  };
+  for (auto &color : data->colors) {
+    if (!color.attachment)
+      continue;
+    count(color.attachment.ptr(), color.load_action, color.store_action, gw2::Aspect::Color);
+    if (color.resolve_attachment && (color.store_action == WMTStoreActionMultisampleResolve ||
+                                     color.store_action == WMTStoreActionStoreAndMultisampleResolve))
+      gw2_enc_.store_bytes[(unsigned)gw2::Aspect::Color] +=
+          area * gw2PixelBytes(color.resolve_attachment.ptr(), gw2::Aspect::Color);
+  }
+  if (data->depth.attachment)
+    count(data->depth.attachment.ptr(), data->depth.load_action, data->depth.store_action, gw2::Aspect::Depth);
+  if (data->stencil.attachment)
+    count(data->stencil.attachment.ptr(), data->stencil.load_action, data->stencil.store_action, gw2::Aspect::Stencil);
+}
+
 constexpr unsigned kEncoderOptimizerThreshold = 64;
 
 QueryReadbacks
@@ -976,8 +1024,47 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer &cmdbuf, uint64_t seqI
 
   readbacks.timestamp = timestamp_state_.flush(cmdbuf);
 
+  // gw2 (#4): ENCODE's attachment bytes; the cheap counters always run, they're published only with stats
+  bool gw2_stats = gw2::statsEnabled();
+
   while (encoder_index) {
     auto current = encoders[encoder_count - encoder_index];
+    // gw2 (#4): the Metal encoders as they are encoded, after the optimizer's merges
+    switch (current->type) {
+    case EncoderType::Null:
+      break;
+    case EncoderType::Render:
+      gw2_enc_.encoders[(unsigned)gw2::Enc::Render]++;
+      break;
+    case EncoderType::Compute:
+      gw2_enc_.encoders[(unsigned)gw2::Enc::Compute]++;
+      break;
+    case EncoderType::Blit:
+      gw2_enc_.encoders[(unsigned)gw2::Enc::Blit]++;
+      break;
+    case EncoderType::Clear:
+      gw2_enc_.encoders[(unsigned)gw2::Enc::Clear]++;
+      break;
+    case EncoderType::Resolve:
+      gw2_enc_.encoders[(unsigned)gw2::Enc::Resolve]++;
+      break;
+    case EncoderType::Present:
+      gw2_enc_.encoders[(unsigned)gw2::Enc::Present]++;
+      break;
+    case EncoderType::SpatialUpscale:
+    case EncoderType::TemporalUpscale:
+      gw2_enc_.encoders[(unsigned)gw2::Enc::Upscale]++;
+      break;
+    case EncoderType::SignalEvent:
+    case EncoderType::WaitForEvent:
+      gw2_enc_.encoders[(unsigned)gw2::Enc::Event]++;
+      break;
+    case EncoderType::SampleTimestamp:
+      gw2_enc_.encoders[(unsigned)gw2::Enc::Timestamp]++;
+      break;
+    }
+    if (current->type != EncoderType::Null)
+      gw2_enc_.chunk_encoders++;
     switch (current->type) {
     case EncoderType::Render: {
       auto data = static_cast<RenderEncoderData *>(current);
@@ -1032,6 +1119,8 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer &cmdbuf, uint64_t seqI
         assert(readbacks.visibility);
         render_pass_info.visibility_buffer = readbacks.visibility->visibility_result_heap;
       }
+      if (gw2_stats)
+        gw2CountAttachments(data);
       auto gpu_buffer_ = data->allocated_argbuf;
       auto encoder = cmdbuf.renderCommandEncoder(render_pass_info);
       data->fence_wait.forEach(
@@ -1080,6 +1169,7 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer &cmdbuf, uint64_t seqI
           encoder.useResource(task.draw_arguments, WMTResourceUsageRead, WMTRenderStageVertex);
           encoder.useResource(task.dispatch_arguments_buffer, WMTResourceUsageWrite, WMTRenderStageVertex);
         }
+        gw2_enc_.use_resource += 2 * task_count; // gw2 (#4)
         tasks_data[task_count - 1].end_of_command = 1;
         emulated_cmd.MarshalGSDispatchArguments(encoder, task_data_buffer, task_data_buffer_offset);
       }
@@ -1107,6 +1197,7 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer &cmdbuf, uint64_t seqI
           encoder.useResource(task.draw_arguments, WMTResourceUsageRead, WMTRenderStageVertex);
           encoder.useResource(task.dispatch_arguments_buffer, WMTResourceUsageWrite, WMTRenderStageVertex);
         }
+        gw2_enc_.use_resource += 2 * task_count; // gw2 (#4)
         tasks_data[task_count - 1].end_of_command = 1;
         emulated_cmd.MarshalTSDispatchArguments(encoder, task_data_buffer, task_data_buffer_offset);
       }
@@ -1229,6 +1320,19 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer &cmdbuf, uint64_t seqI
           info.colors[0].store_action = WMTStoreActionStore;
         }
         info.render_target_array_length = data->array_length;
+        if (gw2_stats && data->attachment) {
+          // gw2 (#4): a clear pass loads nothing and stores the whole view
+          uint64_t area = uint64_t(data->width) * data->height * std::max(data->array_length, 1u);
+          if (data->clear_dsv & 1)
+            gw2_enc_.store_bytes[(unsigned)gw2::Aspect::Depth] +=
+                area * gw2PixelBytes(data->attachment.ptr(), gw2::Aspect::Depth);
+          if (data->clear_dsv & 2)
+            gw2_enc_.store_bytes[(unsigned)gw2::Aspect::Stencil] +=
+                area * gw2PixelBytes(data->attachment.ptr(), gw2::Aspect::Stencil);
+          if (!data->clear_dsv)
+            gw2_enc_.store_bytes[(unsigned)gw2::Aspect::Color] +=
+                area * gw2PixelBytes(data->attachment.ptr(), gw2::Aspect::Color);
+        }
         auto encoder = cmdbuf.renderCommandEncoder(info);
         encoder.setLabel(WMT::String::string("ClearPass", WMTUTF8StringEncoding));
         data->fence_wait.forEach([&](auto id) { encoder.waitForFence(fence_pool_[id], WMTRenderStageFragment); });
@@ -1247,6 +1351,17 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer &cmdbuf, uint64_t seqI
         info.colors[0].load_action = WMTLoadActionLoad;
         info.colors[0].store_action = WMTStoreActionStoreAndMultisampleResolve;
         info.colors[0].resolve_texture = data->dst.texture();
+        if (gw2_stats && data->src && data->dst) {
+          // gw2 (#4): loads the multisampled source, stores it and the resolved target
+          auto src = data->src->allocation->descriptor;
+          auto dst = data->dst->allocation->descriptor;
+          uint64_t src_bytes = uint64_t(src->width(data->src->key)) * src->height(data->src->key) *
+                               gw2PixelBytes(data->src.ptr(), gw2::Aspect::Color);
+          gw2_enc_.load_bytes[(unsigned)gw2::Aspect::Color] += src_bytes;
+          gw2_enc_.store_bytes[(unsigned)gw2::Aspect::Color] +=
+              src_bytes + uint64_t(dst->width(data->dst->key)) * dst->height(data->dst->key) *
+                              gw2PixelBytes(data->dst.ptr(), gw2::Aspect::Color);
+        }
 
         auto encoder = cmdbuf.renderCommandEncoder(info);
         encoder.setLabel(WMT::String::string("ResolvePass", WMTUTF8StringEncoding));
@@ -1366,6 +1481,8 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer &cmdbuf, uint64_t seqI
     }
   }
 
+  gw2_enc_.publishChunk(); // gw2 (#4): once per chunk
+
   return readbacks;
 }
 
@@ -1376,18 +1493,13 @@ ArgumentEncodingContext::checkEncoderRelation(EncoderData *former, EncoderData *
     return DXMT_ENCODER_LIST_OP_SWAP;
   if (latter->type == EncoderType::Null)
     return DXMT_ENCODER_LIST_OP_SWAP;
-  if (former->type == EncoderType::SignalEvent)
+  // gw2 (#4): an event or timestamp encoder ends the search for a merge partner (refuse=sync)
+  if (former->type == EncoderType::SignalEvent || latter->type == EncoderType::SignalEvent ||
+      former->type == EncoderType::WaitForEvent || latter->type == EncoderType::WaitForEvent ||
+      former->type == EncoderType::SampleTimestamp || latter->type == EncoderType::SampleTimestamp) {
+    gw2_enc_.refuse[(unsigned)gw2::Refuse::Sync]++;
     return DXMT_ENCODER_LIST_OP_SYNCHRONIZE;
-  if (latter->type == EncoderType::SignalEvent)
-    return DXMT_ENCODER_LIST_OP_SYNCHRONIZE;
-  if (former->type == EncoderType::WaitForEvent)
-    return DXMT_ENCODER_LIST_OP_SYNCHRONIZE;
-  if (latter->type == EncoderType::WaitForEvent)
-    return DXMT_ENCODER_LIST_OP_SYNCHRONIZE;
-  if (former->type == EncoderType::SampleTimestamp)
-    return DXMT_ENCODER_LIST_OP_SYNCHRONIZE;
-  if (latter->type == EncoderType::SampleTimestamp)
-    return DXMT_ENCODER_LIST_OP_SYNCHRONIZE;
+  }
 
   while (former->type != latter->type) {
     if (former->type == EncoderType::Clear && latter->type == EncoderType::Render) {
@@ -1469,16 +1581,25 @@ ArgumentEncodingContext::checkEncoderRelation(EncoderData *former, EncoderData *
         return DXMT_ENCODER_LIST_OP_SWAP; // carry on (RENDER -> RESOLVE -> RESOLVE -> ...)
       }
     }
-    return hasDataDependency(latter, former) ? DXMT_ENCODER_LIST_OP_SYNCHRONIZE : DXMT_ENCODER_LIST_OP_SWAP;
+    if (hasDataDependency(latter, former)) {
+      gw2_enc_.refuse[(unsigned)gw2::Refuse::Dependency]++; // gw2 (#4)
+      return DXMT_ENCODER_LIST_OP_SYNCHRONIZE;
+    }
+    return DXMT_ENCODER_LIST_OP_SWAP;
   }
 
   if (former->type == EncoderType::Render) {
     auto r1 = reinterpret_cast<RenderEncoderData *>(latter);
     auto r0 = reinterpret_cast<RenderEncoderData *>(former);
 
-    if (isEncoderSignatureMatched(r0, r1) &&
-        // can't merge if latter's vertex wait for former's fragment
-        !r1->fence_wait_vertex.intersectedWith(r0->fence_update)) {
+    // gw2 (#4): the first reason the two can't merge counts in refuse=
+    auto refuse = encoderSignatureMismatch(r0, r1);
+    // can't merge if latter's vertex wait for former's fragment
+    if (refuse == gw2::Refuse::None && r1->fence_wait_vertex.intersectedWith(r0->fence_update))
+      refuse = gw2::Refuse::VertexFence;
+    if (refuse != gw2::Refuse::None)
+      gw2_enc_.refuse[(unsigned)refuse]++;
+    if (refuse == gw2::Refuse::None) {
       for (unsigned i = 0; i < r0->render_target_count; i++) {
         auto &a0 = r0->colors[i];
         auto &a1 = r1->colors[i];
@@ -1539,7 +1660,11 @@ ArgumentEncodingContext::checkEncoderRelation(EncoderData *former, EncoderData *
     }
   }
 
-  return hasDataDependency(latter, former) ? DXMT_ENCODER_LIST_OP_SYNCHRONIZE : DXMT_ENCODER_LIST_OP_SWAP;
+  if (hasDataDependency(latter, former)) {
+    gw2_enc_.refuse[(unsigned)gw2::Refuse::Dependency]++; // gw2 (#4)
+    return DXMT_ENCODER_LIST_OP_SYNCHRONIZE;
+  }
+  return DXMT_ENCODER_LIST_OP_SWAP;
 }
 
 bool
@@ -1566,65 +1691,65 @@ ArgumentEncodingContext::hasDataDependency(EncoderData *latter, EncoderData *for
          latter->fence_update.intersectedWith(former->fence_wait);
 }
 
-bool
-ArgumentEncodingContext::isEncoderSignatureMatched(RenderEncoderData *r0, RenderEncoderData *r1) {
+gw2::Refuse
+ArgumentEncodingContext::encoderSignatureMismatch(RenderEncoderData *r0, RenderEncoderData *r1) {
   // FIXME: it can be different?
   if (r0->render_target_count != r1->render_target_count)
-    return false;
+    return gw2::Refuse::Target;
   if (r0->dsv_planar_flags != r1->dsv_planar_flags)
-    return false;
+    return gw2::Refuse::Target;
   if (r0->dsv_readonly_flags != r1->dsv_readonly_flags)
-    return false;
+    return gw2::Refuse::Target;
   if (r0->render_target_array_length != r1->render_target_array_length)
-    return false;
+    return gw2::Refuse::Target;
   /**
   In case two encoder has different argument buffer
   It can be further optimized by inserting extra setBuffer() calls
   but let's just simplify it, as it's a rather rare case.
   */
   if (r0->allocated_argbuf != r1->allocated_argbuf)
-    return false;
+    return gw2::Refuse::ArgBuf;
   if (r0->dsv_planar_flags & 1) {
     if (r0->depth.attachment != r1->depth.attachment)
-      return false;
+      return gw2::Refuse::Target;
     if (r0->dsv_readonly_flags & 1) {
       if (r1->depth.load_action == WMTLoadActionClear)
-        return false;
+        return gw2::Refuse::Load;
     } else {
       if (r0->depth.store_action != WMTStoreActionStore)
-        return false;
+        return gw2::Refuse::Store;
       if (r1->depth.load_action != WMTLoadActionLoad)
-        return false;
+        return gw2::Refuse::Load;
     }
   }
   if (r0->dsv_planar_flags & 2) {
     if (r0->stencil.attachment != r1->stencil.attachment)
-      return false;
+      return gw2::Refuse::Target;
     if (r0->dsv_readonly_flags & 2) {
       if (r1->stencil.load_action == WMTLoadActionClear)
-        return false;
+        return gw2::Refuse::Load;
     } else {
       if (r0->stencil.store_action != WMTStoreActionStore)
-        return false;
+        return gw2::Refuse::Store;
       if (r1->stencil.load_action != WMTLoadActionLoad)
-        return false;
+        return gw2::Refuse::Load;
     }
   }
   for (unsigned i = 0; i < r0->render_target_count; i++) {
     auto &a0 = r0->colors[i];
     auto &a1 = r1->colors[i];
     if (a0.attachment != a1.attachment)
-      return false;
+      return gw2::Refuse::Target;
     if (a0.depth_plane != a1.depth_plane)
-      return false;
+      return gw2::Refuse::Target;
     if (!a0.attachment)
       continue;
     if (a0.store_action != WMTStoreActionStore)
-      return false;
+      return gw2::Refuse::Store;
     if (a1.load_action != WMTLoadActionLoad)
-      return false;
+      return gw2::Refuse::Load;
   }
-  return true;
+  return gw2::Refuse::None;
 }
 
 RenderEncoderColorAttachmentData *

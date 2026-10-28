@@ -26,6 +26,7 @@ dxmt_src = [
   'dxmt_gw2_stats.cpp',
   'dxmt_gw2_compile.cpp',
   'dxmt_gw2_present.cpp',
+  'dxmt_gw2_cmds.cpp',
 ]
 
 dxmt_shaders = [
