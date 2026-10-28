@@ -24,10 +24,92 @@
 #include "util_env.hpp"
 #include "util_win32_compat.h"
 #include <atomic>
+#include <cstdlib>
+#include <format>
 
 #define ASYNC_ENCODING 1
 
 namespace dxmt {
+
+namespace {
+
+// gw2 (#8): DXMT_CHUNKS, the ring's size: 32 (default, upstream's), 64 or 128.
+uint32_t
+ChunkCountFromEnv() {
+  auto v = env::getEnvVar("DXMT_CHUNKS");
+  if (v.empty())
+    return kCommandChunkCount;
+  auto n = std::strtoul(v.c_str(), nullptr, 10);
+  if (n == 32 || n == 64 || n == 128)
+    return n;
+  WARN("DXMT_CHUNKS=", v, " is not 32, 64 or 128; using ", kCommandChunkCount);
+  return kCommandChunkCount;
+}
+
+// gw2 (#8): the Metal queue's bound on uncompleted command buffers. Unset DXMT_CHUNKS keeps
+// upstream's 32 (the ring's size). Set, it is the ring plus headroom for the present split's extra
+// buffer: one per frame in flight, and SetMaximumFrameLatency allows at most 16 frames.
+uint32_t
+MetalBufferCount(uint32_t chunks) {
+  if (env::getEnvVar("DXMT_CHUNKS").empty())
+    return kCommandChunkCount;
+  return chunks + 16;
+}
+
+// gw2 (#8): DXMT_MAX_FRAME_LATENCY, 1-16, replaces the latency the game sets; 0: not set.
+uint32_t
+MaxLatencyOverrideFromEnv() {
+  auto v = env::getEnvVar("DXMT_MAX_FRAME_LATENCY");
+  if (v.empty())
+    return 0;
+  auto n = std::strtoul(v.c_str(), nullptr, 10);
+  if (n >= 1 && n <= 16)
+    return n;
+  WARN("DXMT_MAX_FRAME_LATENCY=", v, " is not 1-16; ignored");
+  return 0;
+}
+
+// gw2 (#8): the RING section. The render thread adds, the 2 s window drains.
+struct RingStats {
+  std::atomic<uint32_t> chunks{kCommandChunkCount};
+  std::atomic<uint64_t> commits{0};
+  std::atomic<uint64_t> occupancy_sum{0}; // chunks in flight after each commit
+  std::atomic<uint64_t> peak{0};
+  std::atomic<uint64_t> stalls{0};
+  std::atomic<uint64_t> stalled_frames{0};
+  std::atomic<uint64_t> stall_ns{0};
+  std::atomic<uint64_t> frame_stall_max_ns{0};
+};
+RingStats g_ring;
+
+void
+atomicMax(std::atomic<uint64_t> &a, uint64_t v) {
+  auto cur = a.load(std::memory_order_relaxed);
+  while (cur < v && !a.compare_exchange_weak(cur, v, std::memory_order_relaxed))
+    ;
+}
+
+std::string
+RingSection(double, uint32_t frames) {
+  auto commits = g_ring.commits.exchange(0, std::memory_order_relaxed);
+  auto occupancy = g_ring.occupancy_sum.exchange(0, std::memory_order_relaxed);
+  auto peak = g_ring.peak.exchange(0, std::memory_order_relaxed);
+  auto stalls = g_ring.stalls.exchange(0, std::memory_order_relaxed);
+  auto stalled = g_ring.stalled_frames.exchange(0, std::memory_order_relaxed);
+  auto stall_ns = g_ring.stall_ns.exchange(0, std::memory_order_relaxed);
+  auto frame_max_ns = g_ring.frame_stall_max_ns.exchange(0, std::memory_order_relaxed);
+  if (!commits)
+    return {};
+  double n = frames ? frames : 1;
+  return std::format(
+      "chunks={} occupancy={:.1f}/{} stalls={:.2f} stalled={} ms={:.2f}/{:.1f}", g_ring.chunks.load(),
+      double(occupancy) / commits, peak, stalls / n, stalled, stall_ns / 1e6 / n, frame_max_ns / 1e6
+  );
+}
+
+gw2::SectionRegistrar g_ring_section("RING", RingSection);
+
+} // namespace
 
 void *
 CommandChunk::allocate_cpu_heap(size_t size, size_t alignment) {
@@ -35,10 +117,13 @@ CommandChunk::allocate_cpu_heap(size_t size, size_t alignment) {
 }
 
 CommandQueue::CommandQueue(WMT::Device device) :
+    chunk_count_(ChunkCountFromEnv()),
+    metal_buffer_count_(MetalBufferCount(chunk_count_)),
+    max_latency_override_(MaxLatencyOverrideFromEnv()),
     encodeThread([this]() { this->EncodingThread(); }),
     finishThread([this]() { this->WaitForFinishThread(); }),
     device(device),
-    commandQueue(device.newCommandQueue(kCommandChunkCount)),
+    commandQueue(device.newCommandQueue(metal_buffer_count_)),
     shared_event_listener(SharedEventListener_create()),
     event_listener_thread([this]() { SharedEventListener_start(this->shared_event_listener); }),
     staging_allocator({
@@ -56,12 +141,20 @@ CommandQueue::CommandQueue(WMT::Device device) :
     argument_encoding_ctx(*this, device, cmd_library),
     initializer(device),
     counter_pool(device) {
-  for (unsigned i = 0; i < kCommandChunkCount; i++) {
+  for (unsigned i = 0; i < kCommandChunkCountMax; i++) {
     auto &chunk = chunks[i];
     chunk.queue = this;
     chunk.reset();
   };
   event = device.newSharedEvent();
+
+  // gw2 (#8): the ring and the frame latency in effect, once per device
+  g_ring.chunks.store(chunk_count_, std::memory_order_relaxed);
+  Logger::info(str::format(
+      "CommandQueue: chunks=", chunk_count_, env::getEnvVar("DXMT_CHUNKS").empty() ? " (default)" : " (DXMT_CHUNKS)",
+      " metalbuffers=", metal_buffer_count_, " maxlatency=", max_latency_,
+      max_latency_override_ ? " (DXMT_MAX_FRAME_LATENCY, replaces the game's)" : " (until the game sets it)"
+  ));
 
   std::string env = env::getEnvVar("DXMT_CAPTURE_FRAME");
 
@@ -83,7 +176,7 @@ CommandQueue::~CommandQueue() {
   SharedEventListener_destroy(shared_event_listener);
   encodeThread.join();
   finishThread.join();
-  for (unsigned i = 0; i < kCommandChunkCount; i++) {
+  for (unsigned i = 0; i < kCommandChunkCountMax; i++) {
     auto &chunk = chunks[i];
     chunk.reset();
   };
@@ -94,7 +187,7 @@ CommandQueue::~CommandQueue() {
 void
 CommandQueue::CommitCurrentChunk() {
   auto chunk_id = ready_for_encode.load(std::memory_order_relaxed);
-  auto &chunk = chunks[chunk_id % kCommandChunkCount];
+  auto &chunk = chunks[chunk_id % chunk_count_];
   chunk.chunk_id = chunk_id;
   chunk.chunk_event_id = GetNextEventSeqId();
   chunk.frame_ = frame_count;
@@ -106,10 +199,32 @@ CommandQueue::CommitCurrentChunk() {
   ready_for_encode.notify_one();
 
   auto t0 = clock::now();
-  chunk_ongoing.wait(kCommandChunkCount - 1, std::memory_order_acquire);
-  chunk_ongoing.fetch_add(1, std::memory_order_relaxed);
+  // gw2 (#8): at most chunk_count_ - 1 chunks in flight; a full ring blocks here (a ring stall)
+  const uint64_t ring_limit = chunk_count_ - 1;
+  bool ring_full = chunk_ongoing.load(std::memory_order_acquire) >= ring_limit;
+  if (ring_full)
+    chunk_ongoing.wait(ring_limit, std::memory_order_acquire);
+  uint64_t in_flight = chunk_ongoing.fetch_add(1, std::memory_order_relaxed) + 1;
   auto t1 = clock::now();
   statistics.commit_interval += (t1 - t0);
+
+  if (gw2::statsEnabled()) {
+    g_ring.commits.fetch_add(1, std::memory_order_relaxed);
+    g_ring.occupancy_sum.fetch_add(in_flight, std::memory_order_relaxed);
+    atomicMax(g_ring.peak, in_flight);
+    if (ring_full) {
+      uint64_t ns = std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
+      if (ring_stall_frame_ != frame_count) {
+        ring_stall_frame_ = frame_count;
+        ring_frame_stall_ns_ = 0;
+        g_ring.stalled_frames.fetch_add(1, std::memory_order_relaxed);
+      }
+      ring_frame_stall_ns_ += ns;
+      g_ring.stalls.fetch_add(1, std::memory_order_relaxed);
+      g_ring.stall_ns.fetch_add(ns, std::memory_order_relaxed);
+      atomicMax(g_ring.frame_stall_max_ns, ring_frame_stall_ns_);
+    }
+  }
 
 #else
   CommitChunkInternal(chunk, ready_for_encode.fetch_add(1, std::memory_order_relaxed));
@@ -176,7 +291,7 @@ CommandQueue::EncodingThread() {
     if (stopped.load())
       break;
     // perform...
-    auto &chunk = chunks[internal_seq % kCommandChunkCount];
+    auto &chunk = chunks[internal_seq % chunk_count_];
     CommitChunkInternal(chunk, internal_seq);
     internal_seq++;
   }
@@ -194,7 +309,7 @@ CommandQueue::WaitForFinishThread() {
     ready_for_commit.wait(internal_seq, std::memory_order_acquire);
     if (stopped.load())
       break;
-    auto &chunk = chunks[internal_seq % kCommandChunkCount];
+    auto &chunk = chunks[internal_seq % chunk_count_];
     if (chunk.attached_cmdbuf.status() <= WMTCommandBufferStatusScheduled) {
       chunk.attached_cmdbuf.waitUntilCompleted();
     }
@@ -230,7 +345,7 @@ CommandQueue::WaitForFinishThread() {
 }
 
 void CommandQueue::Retain(uint64_t seq, Allocation* allocation) {
-  auto &chunk = chunks[seq % kCommandChunkCount];
+  auto &chunk = chunks[seq % chunk_count_];
   auto &tracker = chunk.ref_tracker;
   constexpr size_t block_size = decltype(reftracker_storage_allocator)::block_size;
   while (unlikely(!tracker.track(allocation))) {

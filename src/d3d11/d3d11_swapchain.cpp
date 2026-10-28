@@ -978,7 +978,7 @@ public:
       return v.empty() ? 50.0 : std::strtod(v.c_str(), nullptr);
     }();
     gw2::logStartup(str::format(
-        "chunks=", kCommandChunkCount, " cpus=", GetActiveProcessorCount(ALL_PROCESSOR_GROUPS), " refresh=",
+        "chunks=", device_->GetDXMTDevice().queue().ChunkCount(), " cpus=", GetActiveProcessorCount(ALL_PROCESSOR_GROUPS), " refresh=",
         init_refresh_rate_ != DBL_MAX ? init_refresh_rate_ : 0.0
     ));
     gw2::apiCall(gw2::Api::Present);
