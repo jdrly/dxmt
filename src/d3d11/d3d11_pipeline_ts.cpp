@@ -23,6 +23,7 @@
 #include "d3d11_pipeline.hpp"
 #include "d3d11_shader.hpp"
 #include "log/log.hpp"
+#include "dxmt_gw2_compile.hpp"
 #include "thread.hpp"
 
 namespace dxmt {
@@ -91,7 +92,10 @@ public:
   }
 
   void GetPipeline(MTL_COMPILED_TESSELLATION_MESH_PIPELINE *pPipeline) final {
-    ready_.wait(false, std::memory_order_acquire);
+    if (!ready_.load(std::memory_order_acquire)) {
+      gw2::CompileWaitScope wait; // gw2 (#5): the encode thread waits for this compile
+      ready_.wait(false, std::memory_order_acquire);
+    }
     *pPipeline = {state_rasterization_, hull_reflection.NumOutputElement,
                   hull_reflection.ThreadsPerPatch};
   }
@@ -173,8 +177,10 @@ public:
 
     {
       std::lock_guard<dxmt::mutex> lock(ts_global_mutex);
+      auto t0 = gw2::compileClock(); // gw2 (#5)
       state_rasterization_ =
           device_->GetMTLDevice().newRenderPipelineState(info, err);
+      gw2::compilePipelineBuilt(t0, state_rasterization_ != nullptr); // gw2 (#5)
     }
     if (state_rasterization_ == nullptr) {
       ERR("Failed to create tessellation raster PSO: ",

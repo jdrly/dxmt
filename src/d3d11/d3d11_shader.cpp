@@ -3,6 +3,7 @@
 #include "airconv_public.h"
 #include "config/config.hpp"
 #include "d3d11_input_layout.hpp"
+#include "dxmt_gw2_compile.hpp"
 #include "sha1/sha1_util.hpp"
 #include <mutex>
 
@@ -48,6 +49,7 @@ public:
   ThreadpoolWork *
   RunThreadpoolWork() {
     auto pool = WMT::MakeAutoreleasePool();
+    auto t0 = gw2::compileClock(); // gw2 (#5): AIR cache hit/miss and build time for COMPILE
     WMT::Reference<WMT::Error> err;
     WMT::Reference<WMT::DispatchData> lib_data = shader_->find_cached_variant(variant_digest_);
 
@@ -70,12 +72,15 @@ public:
       break;
     }
 
+    gw2::compileAirLookup(lib_data != nullptr);
     if (!lib_data) {
       SM50_COMPILED_BITCODE bitcode;
       sm50_bitcode_t compile_result = proc(func_name.c_str(), &sm50_common);
 
-      if (!compile_result)
+      if (!compile_result) {
+        gw2::compileShaderBuilt(t0);
         return this;
+      }
 
       SM50GetCompiledBitcode(compile_result, &bitcode);
       lib_data = WMT::MakeDispatchData(bitcode.Data, bitcode.Size);
@@ -98,6 +103,7 @@ public:
       }
     }
 
+    gw2::compileShaderBuilt(t0);
     return this;
   }
 

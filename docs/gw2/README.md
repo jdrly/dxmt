@@ -27,6 +27,10 @@ GW2 on Mac sets `DXMT_LOG_PATH` to its `work/logs`, so the lines below land in
 | `DXMT_CHUNKS` | unset (32) | The chunk ring's size, `32`, `64` or `128` (anything else: 32, with a warning). The render thread blocks in `CommitCurrentChunk` at size − 1 chunks in flight. Set (even to 32), the Metal queue's bound on uncompleted command buffers is the size + 16 (headroom for the present split's extra buffer, one per frame in flight); unset, it stays 32. An experiment (#8) | unset: upstream's ring of 32 and Metal bound of 32 |
 | `DXMT_MAX_FRAME_LATENCY` | unset | `=1`…`16` replaces the frame latency the game sets with `SetMaximumFrameLatency` (and the default of 3 before it calls); out of range: ignored, with a warning. At 15–16 the 16 per-frame statistics slots (STATS, HUD) can mix frames | unset: the game's value, 0 taken as 3 |
 | `DXMT_CAP_LIMITER` | on | With display sync, a frame cap (`d3d11.preferredMaxFrameRate`) below the refresh rate that isn't a whole number of refreshes (50 fps on 60 Hz) is kept by a frame limiter on the render thread: Present sleeps to a fixed cadence before it takes the device lock, and the present goes out with display sync and the deadline. Whole numbers (30, 20 fps on 60 Hz) keep the minimum duration, half a refresh short, as before | the cap is dropped (`vsync_duration` 0: uncapped to the refresh rate) |
+| `DXMT_COMPILE_WAIT_MS` | 2 | A `COMPILE frame=…` line for a frame whose encode-thread pipeline waits add up to at least this many ms (at most 5 lines a second); `0` turns them off. Needs `DXMT_STATS` | — |
+| `DXMT_PSO_ARCHIVE` | off | `=1`: Metal binary archives for pipelines. Pipelines are looked up in the archives of the last 4 sessions, and every render and compute pipeline built is added to this session's archive (see [COMPILE](#compile)) | no archives: no lookup, no capture, no files |
+| `DXMT_PSO_ARCHIVE_DIR` | user cache dir | With `DXMT_PSO_ARCHIVE=1`: an absolute unix directory that replaces `$(getconf DARWIN_USER_CACHE_DIR)dxmt/pso` | — |
+| `DXMT_PSO_FLUSH_EVERY` | 256 | With `DXMT_PSO_ARCHIVE=1`: serialize this session's archive every this many new pipelines (also every 120 s if any are new; never at exit) | — |
 
 Not switchable: `SetMaximumFrameLatency(0)` means the default, 3 (DXGI's definition; only
 `DXMT_MAX_FRAME_LATENCY` replaces the result). Typeless depth targets without stencil
@@ -81,7 +85,7 @@ Sections: a feature registers a function with `gw2::SectionRegistrar` (`src/dxmt
 
 | Line | When |
 |---|---|
-| `GW2 fork <commit>: DXMT_STATS=1 DXMT_HITCH_MS=… DXMT_PRESENT_SPLIT=… DXMT_DISPLAY_SYNC=… DXMT_PRESENT_DEADLINE=… DXMT_CAP_LIMITER=… DXMT_STENCIL_PFV=… DXMT_DEPTH_PFV=… DXMT_BG_FPS=… DXMT_BG_FPS_MINIMIZED=… DXMT_BG_POLICY=… DXMT_RENDER_THREAD_PRIORITY=… DXMT_PSO_BLEND_HASH=… DXMT_PSO_MRU=… DXMT_PSO_TOPOLOGY_KEEP=… DXMT_CHUNKS=… DXMT_MAX_FRAME_LATENCY=… cpus=… refresh=… set: …` | Once per process, at the first Present: the build, the **effective** value of every switch above (defaults included; `DXMT_PRESENT_DEADLINE=refresh` is one refresh, `DXMT_CHUNKS` is the ring size in effect, `DXMT_MAX_FRAME_LATENCY=unset` leaves the game's value), the CPUs the game sees, the refresh rate (0 if unknown), then every `DXMT_*`, `WINENCPU` and `WINEMSYNC` variable set (`set: none` if none). A PR that adds a switch adds its effective value here |
+| `GW2 fork <commit>: DXMT_STATS=1 DXMT_HITCH_MS=… DXMT_PRESENT_SPLIT=… DXMT_DISPLAY_SYNC=… DXMT_PRESENT_DEADLINE=… DXMT_CAP_LIMITER=… DXMT_STENCIL_PFV=… DXMT_DEPTH_PFV=… DXMT_BG_FPS=… DXMT_BG_FPS_MINIMIZED=… DXMT_BG_POLICY=… DXMT_RENDER_THREAD_PRIORITY=… DXMT_PSO_BLEND_HASH=… DXMT_PSO_MRU=… DXMT_PSO_TOPOLOGY_KEEP=… DXMT_CHUNKS=… DXMT_MAX_FRAME_LATENCY=… DXMT_COMPILE_WAIT_MS=… DXMT_PSO_ARCHIVE=… DXMT_PSO_ARCHIVE_DIR=… DXMT_PSO_FLUSH_EVERY=… cpus=… refresh=… set: …` | Once per process, at the first Present: the build, the **effective** value of every switch above (defaults included; `DXMT_PRESENT_DEADLINE=refresh` is one refresh, `DXMT_CHUNKS` is the ring size in effect, `DXMT_MAX_FRAME_LATENCY=unset` leaves the game's value, `DXMT_PSO_ARCHIVE` is `1` when the archives are on, `0` when not asked for, `failed` when asked for but they couldn't start, `DXMT_PSO_ARCHIVE_DIR=default` is the user cache dir), the CPUs the game sees, the refresh rate (0 if unknown), then every `DXMT_*`, `WINENCPU` and `WINEMSYNC` variable set (`set: none` if none). A PR that adds a switch adds its effective value here |
 | `HITCH frame=… ms=… commit=…x… sync=…x… bgsleep=… dxmt(ms/calls): …` | A Present-to-Present interval of at least `DXMT_HITCH_MS`, logged at the top of the Present that ends it. `frame` is the frame that Present presents (1-based, as the latency fence counts); the interval holds the previous Present and the game's work on this frame. `commit` (waits for a free chunk) and `sync` (Map's waits for the GPU) are ms × count, from the same interval; they overlap the categories they happen in. `bgsleep` is whether the background throttle was on. The categories are as `PACE`'s `dxmt` (`presentwait` is the latency wait) |
 | `SetMaximumFrameLatency(n)` | Every call; 0 is taken as 3 |
 | `SetMaximumFrameLatency(n): DXMT_MAX_FRAME_LATENCY keeps m` | Every call while `DXMT_MAX_FRAME_LATENCY` is set: the game asked for `n`, `m` stays in effect |
@@ -249,3 +253,79 @@ refresh, and those can now and then count one skipped refresh too many.
 Deadlines aren't anchored to the vsync grid yet;
 that comes after the deadline A/B (`DXMT_PRESENT_DEADLINE` default, `=8`, `=12`) is measured with
 this line.
+
+### COMPILE
+
+Shader and pipeline compiles (jdrly/dxmt #5). GW2 creates shaders just before it draws with
+them; DXMT compiles each shader variant and each pipeline on its compile workers, and the encode
+thread waits in `GetPipeline` when the draw that needs a pipeline is encoded before the
+pipeline is built. A frame with such waits is a hitch DXMT causes.
+
+`COMPILE variants= air=hit/miss pso=hit/miss built= failed= build=shader:ms/max pipeline:ms/max
+queue=now/max threads= wait=Nx ms/max slow= [archive=hit/miss added= queued= unflushed= addfailed= capped=]`
+
+Counts are **totals in the 2 s window**; the `COMPILE frame=` line below has them per frame. Times are ms. Without `DXMT_STATS` nothing is counted or timed (no clock reads), except the count of built pipelines that `DXMT_PSO_FLUSH_EVERY` needs.
+
+| Field | Meaning |
+|---|---|
+| `variants` | New shader variants (a shader with a new input layout, blend or output setup): each one is a compile task |
+| `air` | DXMT's AIR disk cache (`DXMT_SHADER_CACHE`): variants loaded from it / compiled by airconv (a cache entry Metal refuses counts as a miss) |
+| `pso` | DXMT's in-memory pipeline caches, at draw time on the render thread: lookups that found a pipeline / new pipelines (each one is a compile task). Hits in a context's MRU (`DXMT_PSO_MRU`) never reach the caches and aren't counted here; the `PSO` section counts them as `mru` |
+| `built`, `failed` | Pipelines Metal built (render, compute, geometry and tessellation emulation), and failed builds |
+| `build` | Compile-worker time: `shader` = AIR cache lookup or airconv compile plus `newLibrary`/`newFunction`, total/max per variant; `pipeline` = `newRenderPipelineState`/`newComputePipelineState`, total/max per pipeline. Workers run in parallel, so totals can exceed the window |
+| `queue` | Compile tasks submitted and not yet finished (variants and pipelines, those waiting for their shaders included): now / max in the window |
+| `threads` | Compile workers (the pool starts with 2 and grows while all of them are busy) |
+| `wait` | The encode thread's waits in `GetPipeline` for a pipeline that wasn't ready: count, total ms, max ms. A ready pipeline costs no wait and isn't counted |
+| `slow` | Frames whose waits reached `DXMT_COMPILE_WAIT_MS` |
+| `archive` | Only with `DXMT_PSO_ARCHIVE=1`: pipelines found in earlier sessions' archives / built without a hit in the window, pipelines added to this session's archive in the window, adds still queued, adds not yet serialized, adds that failed and pipelines not added because the session reached 8192 (both since start) |
+
+**`COMPILE frame=N wait=Nx ms/max queue=Q variants= air=hit/miss pso=hit/miss built= failed=
+build=shader:ms pipeline:ms [dropped=D]`** (with `DXMT_STATS`): a frame whose encode-thread
+waits in `GetPipeline` added up to at least `DXMT_COMPILE_WAIT_MS` (2 ms): their count, total
+and longest wait, and the compile queue when the next frame's encoding started. `variants` to
+`build` are the section's fields, counted on all threads while the encode thread was on this
+frame (from the start of its encoding to the start of the next frame's). The render thread
+records ahead of the encode thread, so a variant or lookup can belong to a later frame of the
+game; the counts say what was compiling during the hitch, not which draw asked for it. At
+most one line per 200 ms; `dropped` = qualifying frames since the last line that weren't logged
+(`slow` in the section counts them all). The line is written when the encode thread starts the
+next frame. Nothing is skipped: the draw still waits for its pipeline.
+
+**PSO archives** (`DXMT_PSO_ARCHIVE=1`, off by default). Metal binary archives
+(`MTLBinaryArchive`), managed on the unix side of the bridge (`src/winemetal/unix/pso_archive.c`,
+bridge calls 149–151):
+
+- Files: `$(getconf DARWIN_USER_CACHE_DIR)dxmt/pso/<exe>/os-<OS build>-<GPU>/`
+  (`DXMT_PSO_ARCHIVE_DIR` replaces `…/dxmt/pso`), one `<unix time>-<pid>.mtlarchive` per session
+  with a `.sum` next to it (size and SHA-256). Another OS build or GPU gets a new directory, and
+  the old one is removed.
+- At device creation (once per process) the newest 4 sessions whose `.sum` matches are loaded for
+  lookup. An archive without a matching `.sum` (an interrupted write), one Metal refuses, and
+  older sessions are deleted; `newBinaryArchiveWithDescriptor:` can crash on a bad file, so
+  nothing is loaded unchecked.
+- Each render and compute pipeline is first built with `MTLPipelineOptionFailOnBinaryArchiveMiss`
+  against those archives (a hit), and on a miss built again normally. Then it is added to this
+  session's archive on a background queue (utility QoS), hits included, so a session's archive
+  holds every pipeline it used. Geometry and tessellation emulation (mesh pipelines) and DXMT's
+  tile pipelines are not archived.
+- The archive is serialized by a low-priority thread (`dxmt-pso-archive`) every
+  `DXMT_PSO_FLUSH_EVERY` (256) new pipelines, every 120 s if any are new, and soon after a
+  device is released. Exit never flushes (serializing can take long, and Metal's threads may be
+  gone): a session loses at most the pipelines added since the last flush. `MTLBinaryArchive` writes all its contents each
+  time: the session's file grows and is rewritten (`.tmp`, then renamed; the `.sum` last).
+- Not covered: the archive saves Metal's backend compile only. AIR translation is DXMT's own AIR
+  cache, and the draw-time pipeline lookup still happens; the state-cache prewarm (building last
+  session's pipelines at startup) is not implemented.
+
+| Line | When |
+|---|---|
+| `PSO archive: on: N archives for lookup (X MB) in <dir>; this session writes <file> (keep 4 sessions, at most 8192 pipelines each)` | Once, at the first device creation |
+| `PSO archive: loaded <file> (X MB)` | Each archive loaded for lookup |
+| `PSO archive: deleted <file>: <reason>` | An archive skipped and removed: `no .sum`, `.sum does not match …`, `unreadable`, `Metal refused it: …`, `older than the newest 4 sessions` |
+| `PSO archive: removed <os-dir> (another OS build or GPU)`, `… leftover .tmp/.sum files` | Cleanup at start |
+| `PSO archive: off: <reason>` | The archives couldn't start (no cache dir, a relative `DXMT_PSO_ARCHIVE_DIR`, …) |
+| `PSO archive: flushing every N new pipelines, every 120 s if any are new (not at exit)` | Once, when on |
+| `PSO archive: flushed <file>: N pipelines (+M), X MB in T ms` | Each flush; `(session cap reached …)` once 8192 pipelines are in it |
+| `PSO archive: flush of <file> failed after T ms: <reason>` | A failed flush; the next one tries again |
+| `dxmt: PSO archive: about N pipelines added since the last flush are not saved (no flush at exit)` | At exit, on Wine's stderr (DXMT's log is gone by then), if the last completed flush missed some: adds not in it plus adds still queued (a flush still running counts as not done; an add in progress can count twice) |
+| `PSO archive: N pipelines could not be added so far; first error: …` | At the next flush after an add failed |

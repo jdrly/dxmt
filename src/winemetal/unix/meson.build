@@ -1,6 +1,7 @@
 winemetal_unix_src = [
   'winemetal_unix.c',
   'cache.c',
+  'pso_archive.c',
 ]
 
 if wine_build_path != ''
