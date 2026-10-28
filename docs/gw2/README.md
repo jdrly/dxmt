@@ -18,6 +18,7 @@ GW2 on Mac sets `DXMT_LOG_PATH` to its `work/logs`, so the lines below land in
 | `DXMT_STENCIL_PFV` | off | `=1` keeps `PixelFormatView` (no lossless compression) on typeless depth-stencil targets with a stencil plane | — |
 | `DXMT_BG_FPS` | 30 | Present sleeps to this rate while another process's window is in the foreground | `=0`: no throttle |
 | `DXMT_BG_FPS_MINIMIZED` | 10 | The same while GW2's window is minimized | `=0`: no throttle |
+| `DXMT_RENDER_THREAD_PRIORITY` | off | On the first Present of each thread that presents (GW2's render thread): `=1` sets the macOS QoS class user-interactive (`pthread_set_qos_class_self_np` through the bridge), `=2` calls `SetThreadPriority(THREAD_PRIORITY_HIGHEST)`, `=3` both; see [Render thread priority](#render-thread-priority) | unset or `=0`: the thread keeps the priority and QoS it had |
 
 Not switchable: `SetMaximumFrameLatency(0)` means the default, 3 (DXGI's definition), and typeless
 depth targets without stencil (`R32_TYPELESS`, `R16_TYPELESS` as depth) never get
@@ -78,3 +79,30 @@ Sections: a feature registers a function with `gw2::SectionRegistrar` (`src/dxmt
 | `Present: presenting normally again (was: …)` | It lets go |
 | `PixelFormatView (no lossless compression): format F bind B WxH` | Once per format and bind flags of a render or depth target that keeps the flag |
 | `TextureView: stencil view of a depth-stencil texture without PixelFormatView …` | Up to 8 times, if a stencil view meets a compressed depth-stencil texture |
+| `RenderThreadPriority: thread T QoS OLD -> NEW (pthread_set_qos_class_self_np user-interactive: ok\|error E, left unchanged)` | `DXMT_RENDER_THREAD_PRIORITY` 1 or 3, once per presenting thread: its Win32 thread id, `qos_class_self()` before and after, and the call's result (an errno) |
+| `RenderThreadPriority: thread T priority OLD -> NEW (SetThreadPriority THREAD_PRIORITY_HIGHEST: ok\|error E, left unchanged)` | `DXMT_RENDER_THREAD_PRIORITY` 2 or 3, once per presenting thread: `GetThreadPriority` before and after, and `GetLastError` on failure |
+| `RenderThreadPriority: thread T: DXMT_RENDER_THREAD_PRIORITY=N isn't 1, 2 or 3, left unchanged` | Any other value |
+
+### Render thread priority
+
+`DXMT_RENDER_THREAD_PRIORITY` (#9) is an experiment: in Lion's Arch GW2's render thread ran 22% of
+its time on Performance cores while the main thread and DXMT's encode thread stayed on Super cores.
+It acts on the first Present of each thread that presents, which in GW2 is the bgfx render thread,
+and never on DXMT's own threads (the encode thread keeps `THREAD_PRIORITY_TIME_CRITICAL`).
+
+- `=1`, **QoS class.** Bridge call 153 (`WMTSetThreadQoSClassSelf`) runs on the calling thread and
+  calls `pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0)`. The QoS class is what
+  macOS uses to choose between Super and Performance cores. Wine itself never sets a QoS class.
+- `=2`, **Win32 priority.** `SetThreadPriority(THREAD_PRIORITY_HIGHEST)`. In this engine's Wine
+  (athei/wine `d23b39774528`, `server/thread.c` `apply_thread_priority`) the wineserver maps it
+  to Mach policies on the thread: `THREAD_PRECEDENCE_POLICY` importance 9 (normal is 0),
+  timeshare kept, and latency and throughput QoS tier 0. These are scheduling policies, not a
+  QoS class. (`THREAD_PRIORITY_TIME_CRITICAL`, the encode thread's, turns timeshare off and gives
+  importance 32.)
+- `=3`, both: `SetThreadPriority` first, then the QoS class, because a `thread_policy_set` from the
+  wineserver probably takes a thread out of its QoS class.
+
+There is no restore: the render thread lives as long as the game, and only the thread itself can
+set its QoS class. Not verified in GW2 yet: whether macOS accepts the QoS class on a thread the
+wineserver has already given Mach policies (every Wine thread gets them at start; the log line
+shows the errno if not), and whether a later `SetThreadPriority` by the game undoes it.

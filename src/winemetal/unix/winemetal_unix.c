@@ -9,6 +9,8 @@
 #include "objc/objc-runtime.h"
 #include <bootstrap.h>
 #include <mach/mach_port.h>
+#include <pthread.h>
+#include <pthread/qos.h>
 #define WINEMETAL_API
 #include "../winemetal_thunks.h"
 #include "../airconv_thunks.h"
@@ -3179,6 +3181,16 @@ _MTLTexture_getBytes(void *obj) {
   return STATUS_SUCCESS;
 }
 
+/* gw2 (#9): runs on the calling thread, so "self" is the thread that made the unix call. */
+static NTSTATUS
+_WMTSetThreadQoSClassSelf(void *obj) {
+  struct unixcall_wmt_set_thread_qos *params = obj;
+  params->ret_old_qos_class = qos_class_self();
+  params->ret = pthread_set_qos_class_self_np((qos_class_t)params->qos_class, params->relative_priority);
+  params->ret_new_qos_class = qos_class_self();
+  return STATUS_SUCCESS;
+}
+
 /*
  * Definition from cache.c
  */
@@ -3337,6 +3349,14 @@ const void *__wine_unix_call_funcs[] = {
     &_MTLDevice_newLibraryWithSource,
     &_MTLTexture_getBytes,
     &_MTLCommandBuffer_presentDrawableWithDeadline,
+    /* gw2: 147-152 are reserved for other fork issues (#1 147, #7 148, #5 149-152) */
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    &_WMTSetThreadQoSClassSelf, /* 153, gw2 #9 */
 };
 
 #ifndef DXMT_NATIVE
@@ -3488,5 +3508,13 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_MTLDevice_newLibraryWithSource,
     &_MTLTexture_getBytes,
     &_MTLCommandBuffer_presentDrawableWithDeadline,
+    /* gw2: 147-152 are reserved for other fork issues (#1 147, #7 148, #5 149-152) */
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    &_WMTSetThreadQoSClassSelf, /* 153, gw2 #9 */
 };
 #endif
