@@ -109,8 +109,11 @@ struct FrontCounters {
   void publish();
 };
 
-// The DXMT_PROMOTE_FLUSH_MIN in effect (0: upstream), for the CMDS line.
-void setPromoteMin(uint32_t min);
+// The DXMT_PROMOTE_FLUSH_MIN (0: upstream) and DXMT_PROMOTE_FLUSH_MS in effect, set by the immediate
+// context, for the CMDS line and the startup line.
+void setPromoteFlush(uint32_t min, uint32_t ms);
+uint32_t promoteFlushMin();
+uint32_t promoteFlushMs();
 
 // Metal encoders by type, as flushCommands encodes them (after the optimizer's merges).
 enum class Enc : uint8_t { Render, Compute, Blit, Clear, Resolve, Present, Upscale, Event, Timestamp, Count };

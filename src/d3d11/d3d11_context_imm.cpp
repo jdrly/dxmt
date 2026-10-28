@@ -782,7 +782,7 @@ public:
     promote_min_ = min.empty() ? 0 : (uint32_t)std::strtoul(min.c_str(), nullptr, 10);
     auto ms = env::getEnvVar("DXMT_PROMOTE_FLUSH_MS");
     promote_timer_ms_ = ms.empty() ? 2 : std::max(1ul, std::strtoul(ms.c_str(), nullptr, 10));
-    gw2::setPromoteMin(promote_min_);
+    gw2::setPromoteFlush(promote_min_, promote_timer_ms_);
     if (promote_min_) {
       // the device isn't visible to the game yet (its constructor creates this context)
       mutex.force_locking();

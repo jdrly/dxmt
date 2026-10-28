@@ -33,6 +33,7 @@ counter g_commit[kCommitWhyCount];
 counter g_pass_close[kPassCloseCount];
 counter g_promote[kPromoteCount];
 std::atomic<uint32_t> g_promote_min{0};
+std::atomic<uint32_t> g_promote_ms{2};
 
 counter g_draws, g_dispatches, g_tile, g_pso, g_use_resource, g_blit_cmds;
 counter g_enc[kEncCount];
@@ -138,8 +139,19 @@ SectionRegistrar s_encode("ENCODE", &encodeSection);
 } // namespace
 
 void
-setPromoteMin(uint32_t min) {
+setPromoteFlush(uint32_t min, uint32_t ms) {
   g_promote_min.store(min, std::memory_order_relaxed);
+  g_promote_ms.store(ms, std::memory_order_relaxed);
+}
+
+uint32_t
+promoteFlushMin() {
+  return g_promote_min.load(std::memory_order_relaxed);
+}
+
+uint32_t
+promoteFlushMs() {
+  return g_promote_ms.load(std::memory_order_relaxed);
 }
 
 void
