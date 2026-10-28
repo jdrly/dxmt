@@ -1123,6 +1123,12 @@ ReleaseMetalView(Object view) {
   return ::ReleaseMetalView(view.handle);
 }
 
+// gw2 (#1): WMTViewVisibility flags of the view's window (cached on the unix side, never blocks).
+inline uint64_t
+MetalViewVisibility(Object view) {
+  return ::MetalView_visibility(view.handle);
+}
+
 inline void
 InitializeRenderPassInfo(WMTRenderPassInfo &info) {
   std::memset(&info, 0, sizeof(WMTRenderPassInfo));
