@@ -88,7 +88,7 @@ public:
       }
 
   gw2::TimestampMode timestamp_mode_ = gw2::timestampMode(); // gw2 (#24)
-  bool gw2_ts_uncommitted_ = false; // gw2 (#24): a disjoint query waits for the current chunk
+  bool gw2_ts_uncommitted_ = false; // gw2 (#24): a timestamp or disjoint query waits for the current chunk
 
   ~MTLD3D11ImmediateContext() {
     if (watchdog_started_) {
@@ -415,8 +415,11 @@ public:
       if (gw2_front_.on)
         gw2::timestampCount(gw2::TsCount::End); // gw2 (#24)
       if (timestamp_mode_ != gw2::TimestampMode::Exact) {
-        if (auto query = static_cast<MTLD3D11TimestampQuery *>(pAsync)->End())
+        auto timestamp = static_cast<MTLD3D11TimestampQuery *>(pAsync);
+        if (auto query = timestamp->End()) {
+          timestamp->SetIssuedChunk(cmd_queue.CurrentSeqId());
           EndTimestampKeepingPass(query);
+        }
         break;
       }
       if (auto query = static_cast<MTLD3D11TimestampQuery *>(pAsync)->End()) {
@@ -507,6 +510,13 @@ public:
       uint64_t null_data;
       uint64_t *data_ptr = pData ? (uint64_t *)pData : &null_data;
       hr = static_cast<MTLD3D11TimestampQuery *>(pAsync)->GetData(data_ptr);
+      // gw2 (#24): estimate/boundary leave the pass open, so a game that only polls with DONOTFLUSH
+      // might never see its chunk committed (exact commits it at the next draw's new pass). As an event
+      // query's stall: after 64 unresolved polls while the query's chunk is still being recorded,
+      // the poll flushes (Flush commits it: gw2_ts_uncommitted_)
+      if (hr == S_FALSE && timestamp_mode_ != gw2::TimestampMode::Exact &&
+          static_cast<MTLD3D11TimestampQuery *>(pAsync)->PollStalled(cmd_queue.CurrentSeqId()))
+        GetDataFlags &= ~D3D11_ASYNC_GETDATA_DONOTFLUSH;
       break;
     }
     case D3D11_QUERY_TIMESTAMP_DISJOINT: {
@@ -920,8 +930,8 @@ public:
 
   // gw2 (#24): DXMT_TIMESTAMP_MODE estimate/boundary. The query is marked where it is in the command
   // stream, and the open pass stays open (exact closes it). estimate requests no commit; boundary
-  // requests the speculative commit at the next pass change, as exact does. EmitOP, as exact's
-  // sample: a Flush after it commits the chunk the value comes from.
+  // requests the speculative commit at the next pass change, as exact does. A game that only polls
+  // gets the chunk committed by GetData's stall rule (PollStalled).
   void
   EndTimestampKeepingPass(TimestampQuery *query) {
     gw2::timestampActed();
@@ -930,6 +940,7 @@ public:
     EmitOP([query = Rc(query)](ArgumentEncodingContext &enc) mutable {
       enc.markTimestamp(std::move(query));
     });
+    gw2_ts_uncommitted_ = true; // a Flush commits the chunk (GetData's after a stalled poll)
     if (timestamp_mode_ == gw2::TimestampMode::Boundary)
       PromoteFlush(gw2::CommitWhy::Timestamp);
     else if (gw2_front_.on)

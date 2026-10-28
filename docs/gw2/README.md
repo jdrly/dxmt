@@ -355,7 +355,7 @@ outermost reason (a staging `Map` that waits commits through `Flush()` as `map`)
 | Key | The commit |
 |---|---|
 | `flush` | The game's `Flush`/`Flush1` (and D3D10's) |
-| `getdata` | `GetData` without `DONOTFLUSH` on a query that isn't ready, or an event query that stalls (after 64 polls `DONOTFLUSH` is ignored) |
+| `getdata` | `GetData` without `DONOTFLUSH` on a query that isn't ready, or an event query that stalls (after 64 polls `DONOTFLUSH` is ignored), or a timestamp query that stalls the same way in `DXMT_TIMESTAMP_MODE` `estimate`/`boundary` (see [TIMESTAMP](#timestamp)) |
 | `map` | `Map` of a staging resource that has to wait for the GPU |
 | `occlusion`, `timestamp`, `event` | Speculative (`promote_flush`): the next pass change after an occlusion, timestamp (or timestamp-disjoint), event query `End` |
 | `staging`, `readback` | Speculative: after a staging → staging copy, after a device → staging copy (readback) |
@@ -436,10 +436,17 @@ handed out before it on that queue's finish thread (the rule `exact` already has
 monotonic. `estimate` asks for no commit: a frame's queries resolve when its last chunk has finished
 (at Present, a Flush, or a GetData that flushes), about a frame later than `exact`'s.
 
+Progress for a game that only polls: in `exact` the draw after a timestamp opens a new pass, which
+commits the query's chunk. `estimate` and `boundary` keep the pass, so a timestamp query counts its
+unresolved `GetData(DONOTFLUSH)` polls while its chunk is still the one being recorded, and after 64
+of them (the stall rule event queries already have) such a poll flushes: the chunk is committed and
+CMDS counts it as `getdata`. Polls of a query whose chunk is already committed never flush.
+
 A timestamp-disjoint query (`Frequency` 1 GHz, `Disjoint` FALSE, as upstream) signals no event in
 `estimate` and `boundary`. It becomes ready when the chunk it ended in has finished on the finish
 thread, which resolves that chunk's timestamps first, so the game never sees a frame's disjoint data
-before its timestamps. A Flush commits that chunk even without other work in it.
+before its timestamps. A Flush commits that chunk even without other work in it, and the event
+queries' stall rule (64 unresolved polls) makes a polling `GetData` flush.
 
 | Field | Meaning |
 |---|---|
