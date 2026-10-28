@@ -9,6 +9,7 @@
 #include "dxmt_context.hpp"
 #include "dxmt_hud_state.hpp"
 #include "dxmt_statistics.hpp"
+#include "dxmt_gw2_present.hpp"
 #include "dxmt_gw2_stats.hpp"
 #include "dxmt_presenter.hpp"
 #include "log/log.hpp"
@@ -871,6 +872,9 @@ public:
     RaiseRenderThreadPriority();
     PresentStart();
     ThrottleBackground();
+    // gw2 (#7): the pacing of this present; a frame cap that display sync can't express sleeps here
+    Pacing pacing = ComputePacing(SyncInterval);
+    LimitFrameRate(pacing.limiter);
     int64_t gw2_present_t0 = gw2::nowNs();
 
     if (should_exit_fs)
@@ -885,27 +889,8 @@ public:
       return hr;
     }
 
-    double vsync_duration;
-    bool display_sync = display_sync_vsync_ && SyncInterval > 0;
-    presenter->changeDisplaySync(display_sync);
-    if (display_sync) {
-      // gw2: vsync by the display (Metal's FIFO), as d9mt fd76b39: a minimum duration of exactly one
-      // refresh on top of it makes a frame that is a hair late wait a whole refresh more, and
-      // presentation latches at half rate. A limit stays only for longer intervals (SyncInterval
-      // > 1, a frame cap below the refresh rate), half a refresh short so it lands on the refresh
-      // it aims for. DXMT_DISPLAY_SYNC=0 restores DXMT's own pacing.
-      double refresh = init_refresh_rate_ != DBL_MAX ? init_refresh_rate_ : 60.0;
-      double interval = SyncInterval / refresh;
-      if (preferred_max_frame_rate)
-        interval = std::max(interval, 1.0 / preferred_max_frame_rate);
-      vsync_duration = interval > 1.5 / refresh ? interval - 0.5 / refresh : 0;
-    } else {
-      vsync_duration =
-          std::max(SyncInterval * 1.0 /
-                       (preferred_max_frame_rate ? preferred_max_frame_rate
-                                                 : init_refresh_rate_),
-                   preferred_max_frame_rate ? 1.0 / preferred_max_frame_rate : 0);
-    }
+    double vsync_duration = pacing.vsync_duration;
+    presenter->changeDisplaySync(pacing.display_sync);
 
     // gw2: a present without a minimum duration goes out with a deadline one refresh ahead
     // (presentDrawable:atTime:). macOS runs the GPU at the lowest clock that meets the deadline it
@@ -919,6 +904,7 @@ public:
     }
     stats_deadline_ms_ = present_deadline * 1000;
     stats_sync_interval_ = SyncInterval;
+    LogPacing(pacing, SyncInterval, present_deadline);
 
     auto &cmd_queue = device_->GetDXMTDevice().queue();
     auto chunk = cmd_queue.CurrentChunk();
@@ -1065,6 +1051,118 @@ public:
       return "user-interactive";
     }
     return "other";
+  }
+
+  // gw2: how a present is paced. With display sync (CAMetalLayer's vsync, as d9mt fd76b39) a
+  // minimum duration of exactly one refresh on top of it makes a frame that is a hair late wait a
+  // whole refresh more, and presentation latches at half rate. A limit stays only for longer
+  // intervals (SyncInterval > 1, a frame cap below the refresh rate), half a refresh short so it
+  // lands on the refresh it aims for. DXMT_DISPLAY_SYNC=0 restores DXMT's own pacing.
+  //
+  // gw2 (#7): a minimum duration can only express whole refreshes: a 50 fps cap on 60 Hz (20 ms,
+  // 1.2 refreshes) was dropped (vsync_duration 0, so 60 fps), and an exact 20 ms would show every
+  // frame for two refreshes (30 fps). A cap that isn't a whole number of refreshes is now kept by
+  // a frame limiter on the render thread (fixed cadence, like the background throttle) with display
+  // sync and the deadline present; frames then alternate between one and two refreshes. Whole
+  // numbers (30, 20 fps on 60 Hz) keep the minimum duration. DXMT_CAP_LIMITER=0 restores dropping.
+  struct Pacing {
+    bool display_sync = false;
+    double vsync_duration = 0; // s: presentDrawable:afterMinimumDuration:
+    double limiter = 0;        // s: the render thread's frame interval, 0 = none
+    const char *mode = "plain";
+    uint32_t vsyncs = 0; // refreshes a frame is meant to stay on screen; 0 = no vsync grid
+  };
+
+  Pacing ComputePacing(UINT SyncInterval) {
+    Pacing p;
+    p.display_sync = display_sync_vsync_ && SyncInterval > 0;
+    if (p.display_sync) {
+      double refresh = init_refresh_rate_ != DBL_MAX ? init_refresh_rate_ : 60.0;
+      double interval = SyncInterval / refresh;
+      if (preferred_max_frame_rate)
+        interval = std::max(interval, 1.0 / preferred_max_frame_rate);
+      double refreshes = interval * refresh;
+      bool whole = std::abs(refreshes - std::round(refreshes)) < 0.02;
+      if (refreshes < 1.005) {
+        p.mode = "vsync";
+      } else if (whole || !cap_limiter_) {
+        p.vsync_duration = interval > 1.5 / refresh ? interval - 0.5 / refresh : 0;
+        p.mode = p.vsync_duration > 0 ? "vsync+after" : "vsync (cap dropped)";
+      } else {
+        p.limiter = interval;
+        p.mode = "vsync+limiter";
+      }
+      double shown = std::max(p.vsync_duration > 0 ? p.vsync_duration + 0.5 / refresh : 0, p.limiter) * refresh;
+      p.vsyncs = std::max(1u, uint32_t(std::ceil(shown - 0.02)));
+    } else {
+      p.vsync_duration =
+          std::max(SyncInterval * 1.0 /
+                       (preferred_max_frame_rate ? preferred_max_frame_rate
+                                                 : init_refresh_rate_),
+                   preferred_max_frame_rate ? 1.0 / preferred_max_frame_rate : 0);
+      p.mode = p.vsync_duration > 0 ? "after" : "plain";
+    }
+    return p;
+  }
+
+  // gw2 (#7): the frame limiter of ComputePacing. Fixed cadence from the previous deadline, so an
+  // oversleep comes back on the next frame; a frame that overran restarts it.
+  clock::time_point cap_deadline_{};
+  bool cap_limiter_ = env::getEnvVar("DXMT_CAP_LIMITER") != "0";
+
+  void LimitFrameRate(double interval) {
+    auto now = clock::now();
+    if (interval <= 0 || cap_deadline_ == clock::time_point{}) {
+      cap_deadline_ = interval > 0 ? now : clock::time_point{};
+      return;
+    }
+    cap_deadline_ += std::chrono::duration_cast<clock::duration>(std::chrono::duration<double>(interval));
+    if (cap_deadline_ <= now) {
+      cap_deadline_ = now;
+      return;
+    }
+    std::this_thread::sleep_until(cap_deadline_);
+  }
+
+  // gw2 (#7): the pacing in effect, once and on each change; also hands it to the PRESENT section.
+  struct {
+    std::string mode;
+    UINT interval = ~0u;
+    int cap = -1;
+    double refresh = -1, duration = -1, limiter = -1, deadline = -1;
+  } pacing_logged_;
+
+  void LogPacing(const Pacing &p, UINT SyncInterval, double deadline) {
+    double refresh = init_refresh_rate_ != DBL_MAX ? init_refresh_rate_ : 60.0;
+    if (gw2::statsEnabled())
+      gw2::presentSetPacing(1000.0 / refresh, p.vsyncs, p.limiter * 1000);
+    auto &l = pacing_logged_;
+    if (l.mode == p.mode && l.interval == SyncInterval && l.cap == preferred_max_frame_rate && l.refresh == refresh &&
+        l.duration == p.vsync_duration && l.limiter == p.limiter && l.deadline == deadline)
+      return;
+    l.mode = p.mode;
+    l.interval = SyncInterval;
+    l.cap = preferred_max_frame_rate;
+    l.refresh = refresh;
+    l.duration = p.vsync_duration;
+    l.limiter = p.limiter;
+    l.deadline = deadline;
+    double rate = refresh;
+    if (p.vsync_duration > 0)
+      rate = p.display_sync ? refresh / p.vsyncs : 1.0 / p.vsync_duration;
+    else if (p.limiter > 0)
+      rate = 1.0 / p.limiter;
+    else if (!p.display_sync)
+      rate = 0;
+    Logger::info(std::format(
+        "Present pacing: mode={} rate={} refresh={:.2f}{} cap={} interval={} duration={:.2f} ms limiter={:.2f} ms "
+        "deadline={}",
+        p.mode, rate > 0 ? std::format("{:.1f}", rate) : std::string("uncapped"), refresh,
+        init_refresh_rate_ != DBL_MAX ? "" : " (assumed)", preferred_max_frame_rate, SyncInterval,
+        p.vsync_duration * 1000, p.limiter * 1000,
+        p.vsync_duration > 0 ? std::string("- (minimum duration)")
+                             : (deadline > 0 ? std::format("{:.1f} ms", deadline * 1000) : std::string("off"))
+    ));
   }
 
   // gw2: the background throttle (d9mt 42b0c47). When the window isn't visible, macOS doesn't make

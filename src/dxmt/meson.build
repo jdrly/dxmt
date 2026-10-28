@@ -24,6 +24,7 @@ dxmt_src = [
   'dxmt_fence.cpp',
   'dxmt_keyed_mutex.cpp',
   'dxmt_gw2_stats.cpp',
+  'dxmt_gw2_present.cpp',
 ]
 
 dxmt_shaders = [
