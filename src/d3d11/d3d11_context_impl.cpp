@@ -2011,8 +2011,12 @@ public:
     std::lock_guard<mutex_t> lock(mutex);
 
     if (state_.InputAssembler.Topology != Topology) {
+      bool keep = KeepsRenderPipelineAcrossTopology(state_.InputAssembler.Topology, Topology);
       state_.InputAssembler.Topology = Topology;
-      InvalidateRenderPipeline();
+      if (keep)
+        gw2::psoCount(gw2::PsoCounter::TopologyKept);
+      else
+        InvalidateRenderPipeline();
     }
   }
   void
@@ -4353,6 +4357,57 @@ public:
   }
 
   /**
+  gw2 (#6): a topology change needs no new pipeline when the current one is a plain VS/PS
+  pipeline (no GS, HS or DS bound; RenderPipelineReady is only set by
+  FinalizeCurrentRenderPipeline's plain path) and both topologies are of one class that isn't
+  Unspecified (adjacency, patch lists and UNDEFINED are). Proof: InitializeGraphicsPipelineDesc
+  is the only place the key is built, and the topology reaches it only as TopologyClass and
+  GSStripTopology, which is false without a GS. The plain pipeline is built from the key alone
+  (MTLCompiledGraphicsPipelineImpl), and every draw reads the primitive type from the current
+  topology. DXMT_PSO_TOPOLOGY_KEEP=0 invalidates on every change, as before.
+  */
+  bool
+  KeepsRenderPipelineAcrossTopology(D3D11_PRIMITIVE_TOPOLOGY from, D3D11_PRIMITIVE_TOPOLOGY to) {
+    if (!pso_topology_keep_ || cmdbuf_state != CommandBufferState::RenderPipelineReady)
+      return false;
+    if (state_.ShaderStages[PipelineStage::Geometry].Shader || state_.ShaderStages[PipelineStage::Hull].Shader ||
+        state_.ShaderStages[PipelineStage::Domain].Shader)
+      return false;
+    if (from == D3D_PRIMITIVE_TOPOLOGY_UNDEFINED || to == D3D_PRIMITIVE_TOPOLOGY_UNDEFINED)
+      return false;
+    auto topology_class = to_metal_primitive_topology(from);
+    return topology_class != WMTPrimitiveTopologyClassUnspecified && topology_class == to_metal_primitive_topology(to);
+  }
+
+  /**
+  gw2 (#6): a small MRU of the plain pipelines this context looked up, in front of the device's
+  pipeline cache (its lock, hash and bucket walk). It compares with the cache's own equality, so
+  a hit returns the pipeline the cache would. Lifetime: the keys' pointers (shaders, input
+  layout, blend and SO layout states) and the pipelines are owned by the device's pipeline and
+  state caches, which never evict and outlive every context, so the MRU holds no references.
+  Only touched under the context's lock. DXMT_PSO_MRU=0 turns it off.
+  */
+  bool
+  LookupPipelineMru(const MTL_GRAPHICS_PIPELINE_DESC &desc, MTLCompiledGraphicsPipeline **ppPipeline) {
+    std::equal_to<MTL_GRAPHICS_PIPELINE_DESC> equal;
+    for (uint32_t i = 0; i < pso_mru_count_; i++) {
+      auto &entry = pso_mru_[(pso_mru_next_ + kPsoMruSize - 1 - i) % kPsoMruSize];
+      if (equal(entry.desc, desc)) {
+        *ppPipeline = entry.pipeline;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  void
+  InsertPipelineMru(const MTL_GRAPHICS_PIPELINE_DESC &desc, MTLCompiledGraphicsPipeline *pipeline) {
+    pso_mru_[pso_mru_next_] = {desc, pipeline};
+    pso_mru_next_ = (pso_mru_next_ + 1) % kPsoMruSize;
+    pso_mru_count_ = std::min(pso_mru_count_ + 1, kPsoMruSize);
+  }
+
+  /**
   Render pipeline can be invalidate by reasons:
   - shader program changes
   - input layout changes (if using metal vertex descriptor)
@@ -4631,6 +4686,7 @@ public:
   template <bool IndexedDraw>
   void
   InitializeGraphicsPipelineDesc(MTL_GRAPHICS_PIPELINE_DESC &Desc) {
+    gw2::psoCount(gw2::PsoCounter::Build); // gw2 (#6)
     // TODO: reduce branching
     auto PS = GetManagedShader<PipelineStage::Pixel>();
     auto GS = GetManagedShader<PipelineStage::Geometry>();
@@ -4841,7 +4897,14 @@ public:
     MTL_GRAPHICS_PIPELINE_DESC pipelineDesc;
     InitializeGraphicsPipelineDesc<IndexedDraw>(pipelineDesc);
 
-    device->CreateGraphicsPipeline(&pipelineDesc, &pipeline);
+    // gw2 (#6): the context's MRU first, then the device's pipeline cache.
+    if (pso_mru_enabled_ && LookupPipelineMru(pipelineDesc, &pipeline)) {
+      gw2::psoCount(gw2::PsoCounter::MruHit);
+    } else {
+      device->CreateGraphicsPipeline(&pipelineDesc, &pipeline);
+      if (pso_mru_enabled_)
+        InsertPipelineMru(pipelineDesc, pipeline);
+    }
     EmitST([pso = std::move(pipeline)](ArgumentEncodingContext& enc) {
       MTL_COMPILED_GRAPHICS_PIPELINE GraphicsPipeline{};
       pso->GetPipeline(&GraphicsPipeline); // may block
@@ -5146,6 +5209,18 @@ protected:
   IMTLD3D11RasterizerState *default_rasterizer_state;
   IMTLD3D11DepthStencilState *default_depth_stencil_state;
   IMTLD3D11BlendState *default_blend_state;
+
+  // gw2 (#6): the pipeline MRU and the topology switch (see LookupPipelineMru).
+  static constexpr uint32_t kPsoMruSize = 4;
+  struct PsoMruEntry {
+    MTL_GRAPHICS_PIPELINE_DESC desc;
+    MTLCompiledGraphicsPipeline *pipeline;
+  };
+  PsoMruEntry pso_mru_[kPsoMruSize] = {};
+  uint32_t pso_mru_count_ = 0;
+  uint32_t pso_mru_next_ = 0;
+  bool pso_mru_enabled_ = gw2::psoSettings().mru;
+  bool pso_topology_keep_ = gw2::psoSettings().topology_keep;
 
 public:
   enum class DirtyState {

@@ -261,6 +261,29 @@ public:
          desc_.RenderTarget[0].SrcBlendAlpha >= D3D11_BLEND_SRC1_COLOR ||
          desc_.RenderTarget[0].DestBlendAlpha >= D3D11_BLEND_SRC1_COLOR ||
          desc_.RenderTarget[0].DestBlend >= D3D11_BLEND_SRC1_COLOR);
+    // gw2 (#6): pipeline_hash_[n] covers what equal_to<MTL_GRAPHICS_PIPELINE_DESC> compares when
+    // it looks at n render targets: both flags, then per target the write mask and the two
+    // enables, the blend ops and factors only if blending is on, the logic op only if it is on.
+    HashState hash;
+    hash.add((size_t(bool(desc_.IndependentBlendEnable)) << 1) | size_t(bool(desc_.AlphaToCoverageEnable)));
+    pipeline_hash_[0] = hash;
+    for (unsigned i = 0; i < 8; i++) {
+      auto &rt = desc_.RenderTarget[i];
+      hash.add(rt.RenderTargetWriteMask);
+      hash.add(rt.BlendEnable);
+      hash.add(rt.LogicOpEnable);
+      if (rt.BlendEnable) {
+        hash.add(rt.BlendOp);
+        hash.add(rt.BlendOpAlpha);
+        hash.add(rt.SrcBlend);
+        hash.add(rt.SrcBlendAlpha);
+        hash.add(rt.DestBlend);
+        hash.add(rt.DestBlendAlpha);
+      }
+      if (rt.LogicOpEnable)
+        hash.add(rt.LogicOp);
+      pipeline_hash_[i + 1] = hash;
+    }
   }
   ~MTLD3D11BlendState() {}
 
@@ -314,6 +337,11 @@ public:
 
   bool IsDualSourceBlending() { return dual_source_blending_; }
 
+  size_t PipelineBlendHash(uint32_t num_color_attachments) {
+    // gw2 (#6): equal_to compares one target without independent blend, else one per attachment.
+    return pipeline_hash_[desc_.IndependentBlendEnable ? std::min(num_color_attachments, 8u) : 1];
+  }
+
   void SetupMetalPipelineDescriptor(WMTRenderPipelineBlendInfo *info, uint32_t num_rt, uint32_t valid_rt) {
     for (unsigned rt = 0; rt < num_rt; rt++) {
       if (!(valid_rt & (1 << rt)))
@@ -357,6 +385,7 @@ public:
 private:
   const D3D11_BLEND_DESC1 desc_;
   bool dual_source_blending_;
+  size_t pipeline_hash_[9];
   MTLD3D10BlendState d3d10_;
 };
 
