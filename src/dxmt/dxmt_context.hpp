@@ -701,6 +701,10 @@ public:
 
   void endPass();
 
+  // gw2 (#2): the render pass's depth-stencil texture (DXMT_STATS on only), so encodeShaderResources can
+  // log it once when a shader of the same pass reads it as a shader resource (DEPTHSRV)
+  void gw2NotePassDepth(Texture *texture, uint8_t dsv_readonly_flags);
+
   constexpr EncoderData *
   currentEncoder() {
     assert(encoder_current);
@@ -888,6 +892,11 @@ private:
   EncoderData *encoder_last = &encoder_head;
   EncoderData *encoder_current = nullptr;
   unsigned encoder_count_ = 0;
+
+  // gw2 (#2): set by gw2NotePassDepth, cleared by endPass and after the first DEPTHSRV hit of a pass
+  Texture *gw2_pass_depth_ = nullptr;
+  uint8_t gw2_pass_dsv_readonly_ = 0;
+  void gw2ReportDepthSrv(PipelineStage stage, unsigned slot, uint64_t viewId);
   
   uint64_t encoder_id_ = kParityLane; // actually important to not start from 0
   std::array<WMT::Reference<WMT::Fence>, kParityLane> fence_pool_;
