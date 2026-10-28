@@ -6,7 +6,10 @@
 // The immediate context counts every Map and Unmap in its bucket (kind x op). It times every call on
 // a resource that isn't a dynamic or default-usage buffer, and one buffer call in 16, scaled by 16:
 // a timed call costs two clock reads, and in Wine a clock read (QueryPerformanceCounter) is a
-// syscall. Counting is plain increments on the render thread; publish() hands the totals over once
+// syscall. The 1 in 16 is pseudo-random (sampleDraw), so it doesn't alias with repeating sequences
+// (Map/Unmap, kinds, periodic renames); it reuses the call's ApiScope draw when there is one, with
+// another value, so MAP and PACE never time the same call and neither's clock reads land in the
+// other's window. Counting is plain increments on the render thread; publish() hands the totals over once
 // per chunk with relaxed atomic adds, as FrontCounters does. With DXMT_STATS=0 nothing is counted.
 
 #include "dxmt_gw2_stats.hpp"
@@ -58,7 +61,6 @@ mapOp(uint32_t map_type) {
 struct MapCounters {
   bool on = statsEnabled(); // DXMT_STATS, cached: off, nothing is counted
   bool dirty = false;
-  uint32_t sample = 0;
   uint32_t calls[kMapKindCount][kMapOpCount] = {};
   uint64_t ns[kMapKindCount][kMapOpCount] = {};
   uint32_t renames = 0; // a dynamic buffer took a new allocation (its page was used up)
@@ -72,13 +74,22 @@ struct MapCounters {
 // One Map or Unmap: counts it in the bucket set last, timing it as the header says.
 class MapScope {
 public:
-  MapScope(MapCounters &counters, MapKind kind, MapOp op) : c_(counters), kind_(kind), op_(op) {
+  // api: the same call's ApiScope (its draw, if it made one, decides this scope's sample too)
+  MapScope(MapCounters &counters, MapKind kind, MapOp op, const ApiScope &api) :
+      c_(counters),
+      kind_(kind),
+      op_(op) {
     if (!c_.on)
       return;
-    if (!isBufferKind(kind))
+    if (!isBufferKind(kind)) {
       scale_ = 1;
-    else if ((c_.sample++ & 15) == 8) // off the phase of ApiScope's 1-in-16, which counts from 0
-      scale_ = 16;
+    } else {
+      uint32_t draw = api.draw();
+      if (!draw)
+        draw = sampleDraw();
+      if ((draw >> 28) == 8) // ApiScope times the calls whose draw has 0 there
+        scale_ = 16;
+    }
     if (scale_)
       t0_ = nowNs();
   }

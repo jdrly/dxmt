@@ -252,7 +252,7 @@ public:
     if (unlikely(!pResource))
       return E_INVALIDARG;
     auto gw2_common = GetResourceCommon(pResource);
-    gw2::MapScope gw2_map(gw2_map_, gw2::MapKind(gw2_common->gw2_map_kind_), gw2::mapOp(MapType)); // gw2 (#25)
+    gw2::MapScope gw2_map(gw2_map_, gw2::MapKind(gw2_common->gw2_map_kind_), gw2::mapOp(MapType), gw2_api_scope_); // gw2 (#25)
     if (gw2_map_fast_ && gw2_common->gw2_dynamic_)
       return MapBufferFast(*gw2_common->gw2_dynamic_, gw2_common, MapType, pMappedResource);
     UINT buffer_length = 0, &row_pitch = buffer_length;
@@ -422,7 +422,7 @@ public:
     if (unlikely(!pResource))
       return;
     auto gw2_common = GetResourceCommon(pResource);
-    gw2::MapScope gw2_map(gw2_map_, gw2::MapKind(gw2_common->gw2_map_kind_), gw2::MapOp::Unmap); // gw2 (#25)
+    gw2::MapScope gw2_map(gw2_map_, gw2::MapKind(gw2_common->gw2_map_kind_), gw2::MapOp::Unmap, gw2_api_scope_); // gw2 (#25)
     // gw2 (#25): a D3D11Buffer has nothing to unmap (its staging() and dynamicTexture() are null)
     if (gw2_map_fast_ && gw2_common->gw2_dynamic_)
       return;

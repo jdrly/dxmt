@@ -102,11 +102,7 @@ MapCounters::publish() {
   add(g_created, created);
   add(g_grown, grown);
   add(g_dropped, dropped);
-  bool keep_on = on;
-  uint32_t keep_sample = sample;
   *this = {};
-  on = keep_on;
-  sample = keep_sample;
 }
 
 } // namespace dxmt::gw2
