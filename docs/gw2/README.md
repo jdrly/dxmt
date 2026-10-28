@@ -19,10 +19,11 @@ GW2 on Mac sets `DXMT_LOG_PATH` to its `work/logs`, so the lines below land in
 | `DXMT_BG_FPS` | 30 | Present sleeps to this rate while another process's window is in the foreground | `=0`: no throttle |
 | `DXMT_BG_FPS_MINIMIZED` | 10 | The same while GW2's window is minimized | `=0`: no throttle |
 | `DXMT_RENDER_THREAD_PRIORITY` | off | On the first Present of each thread that presents (GW2's render thread): `=1` sets the macOS QoS class user-interactive (`pthread_set_qos_class_self_np` through the bridge), `=2` calls `SetThreadPriority(THREAD_PRIORITY_HIGHEST)`, `=3` both; see [Render thread priority](#render-thread-priority) | unset or `=0`: the thread keeps the priority and QoS it had |
+| `DXMT_DEPTH_PFV` | off | `=1` keeps `PixelFormatView` (no lossless compression) on typeless single-plane depth targets (`R32_TYPELESS`, `R16_TYPELESS` bound as depth), the part `DXMT_STENCIL_PFV` doesn't cover (#2) | — |
 
-Not switchable: `SetMaximumFrameLatency(0)` means the default, 3 (DXGI's definition), and typeless
-depth targets without stencil (`R32_TYPELESS`, `R16_TYPELESS` as depth) never get
-`PixelFormatView`.
+Not switchable: `SetMaximumFrameLatency(0)` means the default, 3 (DXGI's definition). Typeless
+depth targets without stencil (`R32_TYPELESS`, `R16_TYPELESS` as depth) get `PixelFormatView` only
+with `DXMT_DEPTH_PFV=1`.
 
 ## The STATS line
 
@@ -78,10 +79,12 @@ Sections: a feature registers a function with `gw2::SectionRegistrar` (`src/dxmt
 | `Present: <reason>, throttling to N fps (foreground window …, pid …, ours …)` | The background throttle engages |
 | `Present: presenting normally again (was: …)` | It lets go |
 | `PixelFormatView (no lossless compression): format F bind B WxH` | Once per format and bind flags of a render or depth target that keeps the flag |
-| `TextureView: stencil view of a depth-stencil texture without PixelFormatView …` | Up to 8 times, if a stencil view meets a compressed depth-stencil texture |
 | `RenderThreadPriority: thread T QoS OLD -> NEW (pthread_set_qos_class_self_np user-interactive: ok\|error E, left unchanged)` | `DXMT_RENDER_THREAD_PRIORITY` 1 or 3, once per presenting thread: its Win32 thread id, `qos_class_self()` before and after, and the call's result (an errno) |
 | `RenderThreadPriority: thread T priority OLD -> NEW (SetThreadPriority THREAD_PRIORITY_HIGHEST: ok\|error E, left unchanged)` | `DXMT_RENDER_THREAD_PRIORITY` 2 or 3, once per presenting thread: `GetThreadPriority` before and after, and `GetLastError` on failure |
 | `RenderThreadPriority: thread T: DXMT_RENDER_THREAD_PRIORITY=N isn't 1, 2 or 3, left unchanged` | Any other value |
+| `DXMT_DEPTH_PFV=1: keeping PixelFormatView on typeless single-plane depth targets (first: format F bind B WxH)` | Once, the first time `DXMT_DEPTH_PFV` keeps the flag (the `PixelFormatView` line above then follows per format and bind flags) |
+| `DEPTHVIEW base=… view=… swizzle=… type=… size=… usage=… pfv=… aspect=… nil=…` | Once per distinct view of a depth/stencil texture, and for any view that came back nil (a warning then); at most 64, then `DEPTHVIEW: more than 64 distinct views, the rest are suppressed`. Replaces the old stencil-only `TextureView` warning. Fields below |
+| `DEPTHSRV format=… size=… pfv=… readonly=… stage=… slot=… view=… swizzled=… aspect=…` | Once per texture (with `DXMT_STATS` on) that is a render pass's depth-stencil attachment and is read by a shader of the same pass as a shader resource; at most 64, then `DEPTHSRV: more than 64 textures, the rest are suppressed`. Fields below |
 
 ### Render thread priority
 
@@ -106,3 +109,39 @@ There is no restore: the render thread lives as long as the game, and only the t
 set its QoS class. Not verified in GW2 yet: whether macOS accepts the QoS class on a thread the
 wineserver has already given Mach policies (every Wine thread gets them at start; the log line
 shows the errno if not), and whether a later `SetThreadPriority` by the game undoes it.
+
+### DEPTHVIEW and DEPTHSRV (#2)
+
+They look for what makes fire and smoke draw dark smudges since `007a574`: GW2's soft particles read
+the depth buffer, which no longer has `PixelFormatView` (so Metal compresses it).
+
+`DEPTHVIEW` is written where DXMT makes a Metal texture view (`TextureView`, `src/dxmt/dxmt_texture.cpp`),
+which happens once per view and allocation, never per draw. A tuple is (base format, view format,
+texture type, size, usage, nil).
+
+| Field | Meaning |
+|---|---|
+| `base` | The texture's Metal pixel format |
+| `view` | The view's Metal pixel format, without DXMT's swizzle bits (`R32X8X32` shows as `Depth32Float_Stencil8`) |
+| `swizzle` | The view's swizzle (`0`, `1`, `R`, `G`, `B`, `A` per channel): `RGBA` for a plain view, `R001` for a depth view of a depth-stencil buffer (`R24_UNORM_X8_TYPELESS`, `R32_FLOAT_X8X24_TYPELESS`), `0R01` for its stencil view |
+| `type` | The view's `MTLTextureType` (2 = 2D, 3 = 2D array, …) |
+| `size` | The texture's mip 0 width × height |
+| `usage`, `pfv` | The texture's `MTLTextureUsage` bits (1 read, 2 write, 4 render target, 16 pixel format view, 32 atomic), and whether `PixelFormatView` is among them (0: Metal may compress it losslessly) |
+| `aspect` | The planes the view covers: `depth`, `stencil`, `depth+stencil`, `none` (not a depth/stencil view) |
+| `nil` | 1 if `newTextureView` returned nil: the shader then reads nothing from that view |
+
+`DEPTHSRV` is checked where DXMT encodes a shader's resources into the argument buffer
+(`encodeShaderResources`, `src/dxmt/dxmt_context.cpp`): each new render pass marks every SRV dirty,
+so each texture a shader of the pass actually uses is encoded there at least once, and only the
+shader's own bindings count. The front end notes the pass's depth-stencil texture when it sets up the
+pass; the check is one pointer comparison per encoded texture, and it stops for the rest of a pass after
+its first hit. With `DXMT_STATS=0` it isn't armed at all. A texture is recognised by its address, so a
+new texture at a freed one's address isn't logged again. The check compares textures, not
+subresources: a pass that writes one mip or slice while reading another also shows up.
+
+| Field | Meaning |
+|---|---|
+| `format`, `size`, `pfv` | The depth-stencil texture's Metal format, mip 0 size, and whether it has `PixelFormatView` |
+| `readonly` | The pass's read-only planes from the DSV flags (`depth`, `stencil`, `depth+stencil`, `none`). D3D11 only lets a plane be read while it's bound as depth if it's read-only, so `depth` or `depth+stencil` is the soft-particle case |
+| `stage`, `slot` | The shader stage and SRV slot that reads it |
+| `view`, `swizzled`, `aspect` | The SRV's Metal format (without swizzle bits), whether it's one of DXMT's swizzled formats, and the planes it covers |

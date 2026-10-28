@@ -4554,6 +4554,8 @@ public:
             stencil.load_action = WMTLoadActionLoad;
             stencil.store_action = WMTStoreActionStore;
           }
+          // gw2 (#2): DEPTHSRV, if a shader of this pass reads the same texture
+          ctx.gw2NotePassDepth(dsv.Texture.ptr(), dsv.ReadOnlyFlags);
         }
         if (effective_render_target == 0) {
           if (uav_only) {
