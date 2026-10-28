@@ -33,6 +33,7 @@ GW2 on Mac sets `DXMT_LOG_PATH` to its `work/logs`, so the lines below land in
 | `DXMT_PSO_FLUSH_EVERY` | 256 | With `DXMT_PSO_ARCHIVE=1`: serialize this session's archive every this many new pipelines (also every 120 s if any are new; never at exit) | — |
 | `DXMT_PROMOTE_FLUSH_MIN` | 0 | `=<n>`: a speculative commit of an occlusion or timestamp query `End` waits until `n` such requests have accumulated, with a progress guarantee (see [CMDS](#cmds)). `1` commits as upstream does | `=0`: upstream (commit at the next pass change) |
 | `DXMT_PROMOTE_FLUSH_MS` | 2 | With `DXMT_PROMOTE_FLUSH_MIN`: the longest a held commit waits (the timer at the next pass change, and the watchdog's period) | — |
+| `DXMT_TIMESTAMP_MODE` | `estimate` | How a timestamp query `End` (and a timestamp-disjoint one) is taken. `estimate`: the open pass stays open and nothing is committed; the value is interpolated between the GPU start and end of the command buffer the query lands in, by its position among the chunk's encoders. `boundary`: the pass stays open, but the commit still happens at the next pass change (as `exact`, so `DXMT_PROMOTE_FLUSH_MIN` applies); the value is interpolated the same way. Both keep the values monotonic and make a disjoint query ready only after its chunk's timestamps are resolved; see [TIMESTAMP](#timestamp) | `exact` (or `0`): upstream, a pass split and a commit per timestamp, the value the buffer's GPU end |
 
 Not switchable: `SetMaximumFrameLatency(0)` means the default, 3 (DXGI's definition; only
 `DXMT_MAX_FRAME_LATENCY` replaces the result). Typeless depth targets without stencil
@@ -87,7 +88,7 @@ Sections: a feature registers a function with `gw2::SectionRegistrar` (`src/dxmt
 
 | Line | When |
 |---|---|
-| `GW2 fork <commit>: DXMT_STATS=1 DXMT_HITCH_MS=… DXMT_PRESENT_SPLIT=… DXMT_DISPLAY_SYNC=… DXMT_PRESENT_DEADLINE=… DXMT_CAP_LIMITER=… DXMT_STENCIL_PFV=… DXMT_DEPTH_PFV=… DXMT_BG_FPS=… DXMT_BG_FPS_MINIMIZED=… DXMT_BG_POLICY=… DXMT_RENDER_THREAD_PRIORITY=… DXMT_PSO_BLEND_HASH=… DXMT_PSO_MRU=… DXMT_PSO_TOPOLOGY_KEEP=… DXMT_CHUNKS=… DXMT_MAX_FRAME_LATENCY=… DXMT_COMPILE_WAIT_MS=… DXMT_PSO_ARCHIVE=… DXMT_PSO_ARCHIVE_DIR=… DXMT_PSO_FLUSH_EVERY=… DXMT_PROMOTE_FLUSH_MIN=… DXMT_PROMOTE_FLUSH_MS=… cpus=… refresh=… set: …` | Once per process, at the first Present: the build, the **effective** value of every switch above (defaults included; `DXMT_PRESENT_DEADLINE=refresh` is one refresh, `DXMT_CHUNKS` is the ring size in effect, `DXMT_MAX_FRAME_LATENCY=unset` leaves the game's value, `DXMT_PSO_ARCHIVE` is `1` when the archives are on, `0` when not asked for, `failed` when asked for but they couldn't start, `DXMT_PSO_ARCHIVE_DIR=default` is the user cache dir, `DXMT_PROMOTE_FLUSH_MIN`/`_MS` as the immediate context parsed them: `MS` is at least 1 and is shown even when `MIN=0` turns it off), the CPUs the game sees, the refresh rate (0 if unknown), then every `DXMT_*`, `WINENCPU` and `WINEMSYNC` variable set (`set: none` if none). A PR that adds a switch adds its effective value here |
+| `GW2 fork <commit>: DXMT_STATS=1 DXMT_HITCH_MS=… DXMT_PRESENT_SPLIT=… DXMT_DISPLAY_SYNC=… DXMT_PRESENT_DEADLINE=… DXMT_CAP_LIMITER=… DXMT_STENCIL_PFV=… DXMT_DEPTH_PFV=… DXMT_BG_FPS=… DXMT_BG_FPS_MINIMIZED=… DXMT_BG_POLICY=… DXMT_RENDER_THREAD_PRIORITY=… DXMT_PSO_BLEND_HASH=… DXMT_PSO_MRU=… DXMT_PSO_TOPOLOGY_KEEP=… DXMT_CHUNKS=… DXMT_MAX_FRAME_LATENCY=… DXMT_COMPILE_WAIT_MS=… DXMT_PSO_ARCHIVE=… DXMT_PSO_ARCHIVE_DIR=… DXMT_PSO_FLUSH_EVERY=… DXMT_PROMOTE_FLUSH_MIN=… DXMT_PROMOTE_FLUSH_MS=… DXMT_TIMESTAMP_MODE=… cpus=… refresh=… set: …` | Once per process, at the first Present: the build, the **effective** value of every switch above (defaults included; `DXMT_PRESENT_DEADLINE=refresh` is one refresh, `DXMT_CHUNKS` is the ring size in effect, `DXMT_MAX_FRAME_LATENCY=unset` leaves the game's value, `DXMT_PSO_ARCHIVE` is `1` when the archives are on, `0` when not asked for, `failed` when asked for but they couldn't start, `DXMT_PSO_ARCHIVE_DIR=default` is the user cache dir, `DXMT_PROMOTE_FLUSH_MIN`/`_MS` as the immediate context parsed them: `MS` is at least 1 and is shown even when `MIN=0` turns it off, `DXMT_TIMESTAMP_MODE` is `exact`, `estimate` or `boundary`), the CPUs the game sees, the refresh rate (0 if unknown), then every `DXMT_*`, `WINENCPU` and `WINEMSYNC` variable set (`set: none` if none). A PR that adds a switch adds its effective value here |
 | `HITCH frame=… ms=… commit=…x… sync=…x… bgsleep=… dxmt(ms/calls): …` | A Present-to-Present interval of at least `DXMT_HITCH_MS`, logged at the top of the Present that ends it. `frame` is the frame that Present presents (1-based, as the latency fence counts); the interval holds the previous Present and the game's work on this frame. `commit` (waits for a free chunk) and `sync` (Map's waits for the GPU) are ms × count, from the same interval; they overlap the categories they happen in. `bgsleep` is whether the background throttle was on. The categories are as `PACE`'s `dxmt` (`presentwait` is the latency wait) |
 | `SetMaximumFrameLatency(n)` | Every call; 0 is taken as 3 |
 | `SetMaximumFrameLatency(n): DXMT_MAX_FRAME_LATENCY keeps m` | Every call while `DXMT_MAX_FRAME_LATENCY` is set: the game asked for `n`, `m` stays in effect |
@@ -107,6 +108,8 @@ Sections: a feature registers a function with `gw2::SectionRegistrar` (`src/dxmt
 | `PSO: blend hash on/off (DXMT_PSO_BLEND_HASH), MRU on, 4 entries/off (DXMT_PSO_MRU), topology keep on/off (DXMT_PSO_TOPOLOGY_KEEP)` | Once per device: the effective pipeline lookup settings |
 | `Present pacing: mode=… rate=… refresh=… cap=… interval=… duration=… ms limiter=… ms deadline=…` | At the first Present and whenever one of its values changes. `mode`: `vsync` (display sync alone), `vsync+after` (display sync and a minimum duration of `duration`), `vsync+limiter` (display sync and the frame limiter at `limiter`, `DXMT_CAP_LIMITER`), `vsync (cap dropped)` (`DXMT_CAP_LIMITER=0` and a cap that isn't a whole number of refreshes), `after` and `plain` (display sync off: DXMT's own minimum duration, or none). `rate`: the frame rate the pacing aims for (`uncapped` without a limit). `refresh`: the display's rate, `(assumed)` when DXMT didn't get one and uses 60. `cap`: `d3d11.preferredMaxFrameRate` (0 = none). `interval`: the game's sync interval. `deadline`: what a present without a minimum duration asks `presentDrawable:atTime:` for (`DXMT_PRESENT_DEADLINE`: one refresh by default, `=8` → `8.0 ms`, `=12` → `12.0 ms`, `=0` → `off`); `- (minimum duration)` when the minimum-duration branch ignores it |
 | `Promote flush: a speculative commit (occlusion/timestamp query End) waits for N requests, at most M ms (a watchdog thread under the device lock, now always on) …` | Once per device, when `DXMT_PROMOTE_FLUSH_MIN` is on |
+| `Timestamp queries: exact\|estimate\|boundary (DXMT_TIMESTAMP_MODE): …` | Once per process, when the first immediate context is created: the mode in effect and what it does (a warning before it for a value that isn't `exact`, `estimate`, `boundary` or `0`) |
+| `Timestamp queries: the first query End in M mode kept its pass open[ and requested no commit]` | Once per process, the first time `estimate` or `boundary` handles a timestamp or timestamp-disjoint `End` |
 
 ### Render thread priority
 
@@ -413,3 +416,39 @@ With `DXMT_STATS=0` nothing is counted.
 | `perchunk` | Encoders per chunk: average, and the most in one chunk |
 | `loadMB`, `storeMB` | Attachment bytes per frame (MB = 10⁶) loaded (`Load` action) and stored (`Store`, plus resolved targets), by aspect `color`/`depth`/`stencil`: render area × layers × texel size × samples. Uncompressed, an upper bound (lossless compression moves less); clear and resolve passes included, the present pass not |
 | `refuse` | Why the encoder optimizer (`checkEncoderRelation`) didn't merge, per frame. Per render → render pair it tried: `target` (different targets, planes, read-only flags, array length: the usual case), `argbuf` (argument buffers in different blocks), `load` (the later pass clears or doesn't load), `store` (the earlier pass doesn't store), `vfence` (the later pass's vertex stage waits for the earlier one's fragments). For any pair: `dep` (a data dependency ends the search) and `sync` (an event or timestamp encoder ends it) |
+
+### TIMESTAMP
+
+`TIMESTAMP mode= ends= disjoint= kept= saved= clamped= tsspan=avg/max` (jdrly/dxmt #24): GW2's GPU
+timestamp queries and what `DXMT_TIMESTAMP_MODE` did with them. Counts are per frame (encode-thread
+frames of the window). No line in a window without timestamp queries.
+
+DXMT samples no GPU counter for a timestamp: the value is a command buffer's GPU end time. In `exact`
+mode (upstream) each `End` therefore closes the open encoder pass and asks for a commit at the next
+pass change, so each query gets a buffer of its own (in busy Lion's Arch, CMDS showed
+`cbwhy=timestamp:34 close=query:30`). `estimate` and `boundary` leave the pass open and mark the
+query at its position in the chunk's encoder list (2 × the encoders closed before it, + 1 inside an
+open pass). When the chunk's command buffer completes, the finish thread sets the query to the
+buffer's GPU start + (end − start) × the query's share of the buffer's positions, as if each encoder
+took the same GPU time. With the present split, a chunk has two buffers, and a query reads the one
+its position falls in (at the split point: the first buffer's end). A value is never below one
+handed out before it on that queue's finish thread (the rule `exact` already has), so the values are
+monotonic. `estimate` asks for no commit: a frame's queries resolve when its last chunk has finished
+(at Present, a Flush, or a GetData that flushes), about a frame later than `exact`'s.
+
+A timestamp-disjoint query (`Frequency` 1 GHz, `Disjoint` FALSE, as upstream) signals no event in
+`estimate` and `boundary`. It becomes ready when the chunk it ended in has finished on the finish
+thread, which resolves that chunk's timestamps first, so the game never sees a frame's disjoint data
+before its timestamps. A Flush commits that chunk even without other work in it.
+
+| Field | Meaning |
+|---|---|
+| `mode` | `DXMT_TIMESTAMP_MODE` in effect |
+| `ends`, `disjoint` | Timestamp and timestamp-disjoint query `End`s (all modes) |
+| `kept` | `End`s that found an encoder pass open and left it open (`estimate`, `boundary`; `exact` closes it and CMDS counts `close=query`). A disjoint `End` counts only where `exact` would signal an event (work since the last one) |
+| `saved` | `estimate` only: pass changes at which `exact` would have committed for a timestamp and nothing was committed, i.e. command buffers saved. A pass change inside an explicit commit (Flush, Map, GetData, fence, `WaitUntilGPUIdle`) isn't counted, since that commit follows. An estimate: CMDS `cb` in `exact` against `estimate` is the measurement |
+| `clamped` | Queries whose value was raised to an earlier one to stay monotonic (finish thread) |
+| `tsspan` | Per frame, the last timestamp value minus the first (what the game sees from its first timestamp of the frame to its last), avg/max ms over the frames whose queries resolved in the window, in every mode; `unavailable` if none. Compare with `GPU gpuspan`: `exact` and `estimate` should be close |
+
+Not covered: a deferred context's command list with timestamp queries still commits in `boundary`
+and `exact` (as upstream); in `estimate` it no longer asks for a commit for them.

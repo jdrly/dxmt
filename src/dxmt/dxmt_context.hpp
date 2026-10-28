@@ -851,6 +851,8 @@ public:
   }
 
   void sampleTimestamp(Rc<TimestampQuery> &&query);
+  // gw2 (#24): DXMT_TIMESTAMP_MODE estimate/boundary: the query at its position, without an encoder
+  void markTimestamp(Rc<TimestampQuery> &&query);
 
   void barrierOnQueue(WMT::CommandBuffer cmdbuf) {
     barrier_index_++;

@@ -22,6 +22,7 @@
 
 #include "Metal.hpp"
 #include "dxmt_gw2_stats.hpp"
+#include "dxmt_gw2_timestamp.hpp"
 #include "d3d11_annotation.hpp"
 #include "d3d11_context.hpp"
 #include "d3d11_device_child.hpp"
@@ -4329,6 +4330,17 @@ public:
     return false;
   }
 
+  // gw2 (#24): DXMT_TIMESTAMP_MODE=estimate: a timestamp End since the last commit for which exact
+  // mode would have committed at the next pass change (TIMESTAMP's saved). Set by the immediate
+  // context only (with DXMT_STATS), cleared by its commits.
+  bool gw2_ts_commit_skipped_ = false;
+
+  // gw2 (#24): a pass change where exact mode would have committed and nothing did
+  virtual void
+  TimestampCommitSkipped() {
+    gw2_ts_commit_skipped_ = false;
+  }
+
   /**
   Render pass can be invalidated by reasons:
   - render target changes (including depth stencil)
@@ -4384,6 +4396,8 @@ public:
       Commit();
       return true;
     }
+    if (!defer_commit && gw2_ts_commit_skipped_)
+      TimestampCommitSkipped(); // gw2 (#24)
 
     return false;
   }

@@ -871,6 +871,12 @@ ArgumentEncodingContext::sampleTimestamp(Rc<TimestampQuery> &&query) {
 }
 
 void
+ArgumentEncodingContext::markTimestamp(Rc<TimestampQuery> &&query) {
+  // gw2 (#24): no encoder and no pass end; an open pass (encoder_current) stays open
+  timestamp_state_.markQuery(query.ptr(), 2 * uint64_t(encoder_count_) + (encoder_current ? 1 : 0));
+}
+
+void
 ArgumentEncodingContext::resolveComputePassBarrier() {
   assert(encoder_current);
   assert(encoder_current->type == EncoderType::Compute);
@@ -1051,7 +1057,8 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer &cmdbuf, uint64_t seqI
   }
   std::erase_if(pending_queries_, [=](auto &query) -> bool { return query->queryEndAt() == seqId; });
 
-  readbacks.timestamp = timestamp_state_.flush(cmdbuf);
+  readbacks.timestamp = timestamp_state_.flush(cmdbuf, frame_id_);
+  readbacks.timestamp_estimate = timestamp_state_.flushEstimated(cmdbuf, 2 * uint64_t(encoder_count), frame_id_); // gw2 (#24)
 
   // gw2 (#4): ENCODE's counters, only with DXMT_STATS
   bool gw2_stats = gw2_enc_.on;
@@ -1256,6 +1263,9 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer &cmdbuf, uint64_t seqI
         if (gw2::statsEnabled())
           queue_.KeepSplitCommandBuffer(seqId, cmdbuf); // gw2 (#3): its GPU span counts for the frame
         cmdbuf = queue_.CreateCommandBuffer();
+        // gw2 (#24): the timestamps estimated after this point read the present's buffer
+        if (readbacks.timestamp_estimate)
+          readbacks.timestamp_estimate->split(cmdbuf, 2 * uint64_t(encoder_count - encoder_index));
         currentFrameStatistics().present_split_count++;
       }
       auto t0 = clock::now();
