@@ -7,7 +7,7 @@
 namespace dxmt {
 
 void d3d11_device_mutex::lock() {
-  if (!protected_)
+  if (!forced_ && !protected_) // gw2 (#4): forced_
     return;
   uint32_t tid = dxmt::this_thread::get_id();
   uint32_t expected = 0;
@@ -29,7 +29,7 @@ void d3d11_device_mutex::lock() {
   counter_++;
 }
 void d3d11_device_mutex::unlock() noexcept {
-  if (!protected_)
+  if (!forced_ && !protected_) // gw2 (#4): forced_
     return;
   counter_--;
   if (likely(counter_ == 0))
@@ -39,7 +39,8 @@ void d3d11_device_mutex::unlock() noexcept {
 bool d3d11_device_mutex::set_protected(bool Protected) {
   bool ret = protected_;
   protected_ = Protected;
-  if (ret && !Protected) {
+  // gw2 (#4): a forced lock keeps its owner; turning protection off changes nothing then
+  if (ret && !Protected && !forced_) {
     counter_ = 0;
     owner_.store(0, std::memory_order_release);
   }

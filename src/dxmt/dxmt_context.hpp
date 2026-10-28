@@ -601,10 +601,12 @@ public:
   }
 
   // gw2 (#4): ENCODE's command counts, decided at compile time from the command's type: a plain
-  // increment for the counted kinds, nothing for the others.
+  // increment for the counted kinds, nothing for the others; nothing at all with DXMT_STATS=0.
   template <typename cmd_struct>
   void
   gw2CountCommand() {
+    if (!gw2_enc_.on)
+      return;
     if constexpr (std::is_same_v<cmd_struct, wmtcmd_render_draw> ||
                   std::is_same_v<cmd_struct, wmtcmd_render_draw_indexed> ||
                   std::is_same_v<cmd_struct, wmtcmd_render_draw_indirect> ||
@@ -688,7 +690,8 @@ public:
   cmd_struct &
   encodeBlitCommand() {
     assert(encoder_current->type == EncoderType::Blit);
-    gw2_enc_.blit_cmds++; // gw2 (#4)
+    if (gw2_enc_.on)
+      gw2_enc_.blit_cmds++; // gw2 (#4)
     auto encoder = static_cast<BlitEncoderData *>(encoder_current);
     auto storage = (cmd_struct *)allocate_cpu_heap(sizeof(cmd_struct), 16);
     encoder->cmd_tail->next.set(storage);

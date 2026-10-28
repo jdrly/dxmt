@@ -647,7 +647,8 @@ public:
                          : promote_forced_ != gw2::CommitWhy::None ? promote_forced_
                          : promote_flush                  ? promote_why_
                                                           : gw2::CommitWhy::Other;
-    gw2_front_.commit[(unsigned)why]++;
+    if (gw2_front_.on)
+      gw2_front_.commit[(unsigned)why]++;
     if (deferred_since_)
       EndDeferral(scope);
     promote_requests_ = 0;
@@ -769,11 +770,12 @@ public:
   //   a Map(DO_NOT_WAIT) that would wait for the held chunk (upstream had already committed);
   // - the timer: the next pass change at least DXMT_PROMOTE_FLUSH_MS (default 2) after the first
   //   deferral commits;
-  // - the watchdog: with a multithread-protected device (ID3D11Multithread), whose lock every entry
-  //   point takes, a thread commits under that lock DXMT_PROMOTE_FLUSH_MS after the deferral if it
-  //   is still pending. Without protection the lock is a no-op and nothing may enter the context
-  //   from another thread, so there is no watchdog and the timer acts at the next pass change. A
-  //   chunk never spans frames.
+  // - the watchdog: a thread commits it under the device lock, which every entry point takes,
+  //   DXMT_PROMOTE_FLUSH_MS after the deferral began if it is still pending, even if the game never
+  //   calls the context again. The switch forces that lock on (d3d11_device_mutex::force_locking),
+  //   so it excludes the game's threads whether or not the game asked for multithread protection,
+  //   and SetMultithreadProtected(FALSE) can't take it away. The cost: an uncontended lock per
+  //   context call when the switch is on. A chunk never spans frames.
   void
   InitPromoteFlush() {
     auto min = env::getEnvVar("DXMT_PROMOTE_FLUSH_MIN");
@@ -781,13 +783,16 @@ public:
     auto ms = env::getEnvVar("DXMT_PROMOTE_FLUSH_MS");
     promote_timer_ms_ = ms.empty() ? 2 : std::max(1ul, std::strtoul(ms.c_str(), nullptr, 10));
     gw2::setPromoteMin(promote_min_);
-    if (promote_min_)
+    if (promote_min_) {
+      // the device isn't visible to the game yet (its constructor creates this context)
+      mutex.force_locking();
       Logger::info(str::format(
           "Promote flush: a speculative commit (occlusion/timestamp query End) waits for ", promote_min_,
           " requests, at most ", promote_timer_ms_,
-          " ms or until Present, a poll that isn't ready, a non-deferrable request or an idle GPU "
-          "(DXMT_PROMOTE_FLUSH_MIN, DXMT_PROMOTE_FLUSH_MS)"
+          " ms (a watchdog thread under the device lock, now always on) or until Present, a poll that "
+          "isn't ready, a non-deferrable request or an idle GPU (DXMT_PROMOTE_FLUSH_MIN, DXMT_PROMOTE_FLUSH_MS)"
       ));
+    }
   }
 
   bool
@@ -795,7 +800,7 @@ public:
     if (!promote_min_)
       return false;
     auto commit = [&](gw2::Promote what) {
-      gw2_front_.promote[(unsigned)what]++;
+      CountPromote(what);
       return false;
     };
     if (promote_nodefer_)
@@ -813,7 +818,7 @@ public:
       promote_forced_ = gw2::CommitWhy::Timer;
       return commit(gw2::Promote::Timer);
     }
-    gw2_front_.promote[(unsigned)gw2::Promote::Skip]++;
+    CountPromote(gw2::Promote::Skip);
     return true;
   }
 
@@ -824,21 +829,27 @@ public:
     case gw2::CommitWhy::None:
       break; // counted by DeferPromotedCommit
     case gw2::CommitWhy::Present:
-      gw2_front_.promote[(unsigned)gw2::Promote::Present]++;
+      CountPromote(gw2::Promote::Present);
       break;
     case gw2::CommitWhy::Poll:
-      gw2_front_.promote[(unsigned)gw2::Promote::Poll]++;
+      CountPromote(gw2::Promote::Poll);
       break;
     case gw2::CommitWhy::Watchdog:
-      gw2_front_.promote[(unsigned)gw2::Promote::Watchdog]++;
+      CountPromote(gw2::Promote::Watchdog);
       break;
     default:
-      gw2_front_.promote[(unsigned)gw2::Promote::Explicit]++;
+      CountPromote(gw2::Promote::Explicit);
       break;
     }
     deferred_since_ = 0;
     if (watchdog_started_)
       watchdog_armed_.store(0, std::memory_order_release);
+  }
+
+  void
+  CountPromote(gw2::Promote what) {
+    if (gw2_front_.on)
+      gw2_front_.promote[(unsigned)what]++;
   }
 
   // Commits a deferred speculative commit now (the caller holds the device lock).
@@ -854,17 +865,6 @@ public:
   void
   ArmWatchdog() {
     if (!watchdog_started_) {
-      if (!mutex.get_protected()) {
-        if (!watchdog_logged_)
-          Logger::info("Promote flush: no watchdog, the device isn't multithread-protected; a held commit "
-                       "waits for the next pass change, poll or Present");
-        watchdog_logged_ = true;
-        return;
-      }
-      Logger::info(str::format(
-          "Promote flush: watchdog on (multithread-protected device), commits a held commit after ",
-          promote_timer_ms_, " ms"
-      ));
       watchdog_started_ = true;
       watchdog_ = dxmt::thread([this] { WatchdogLoop(); });
     }
@@ -887,8 +887,6 @@ public:
         break;
       if (watchdog_armed_.load(std::memory_order_acquire) != gen)
         continue; // that deferral has ended (a newer one gets its own period)
-      if (!mutex.get_protected())
-        continue; // protection was turned off: the lock no longer excludes the game's threads
       std::lock_guard<d3d11_device_mutex> lock(mutex);
       if (watchdog_armed_.load(std::memory_order_relaxed) != gen)
         continue;
@@ -901,7 +899,6 @@ public:
   int64_t deferred_since_ = 0; // when the pending deferral began (gw2::nowNs), 0: none
   gw2::CommitWhy promote_forced_ = gw2::CommitWhy::None;
   bool watchdog_started_ = false;
-  bool watchdog_logged_ = false;
   uint64_t watchdog_gen_ = 0;
   std::atomic<uint64_t> watchdog_armed_ = 0; // the pending deferral's generation, 0: none
   std::atomic<bool> watchdog_stop_ = false;

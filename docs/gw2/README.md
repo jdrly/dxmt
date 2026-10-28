@@ -105,11 +105,8 @@ Sections: a feature registers a function with `gw2::SectionRegistrar` (`src/dxmt
 | `DEPTHVIEW base=… view=… swizzle=… type=… size=… usage=… pfv=… aspect=… nil=…` | Once per distinct view of a depth/stencil texture, and for any view that came back nil (a warning then); at most 64, then `DEPTHVIEW: more than 64 distinct views, the rest are suppressed`. Replaces the old stencil-only `TextureView` warning. Fields below |
 | `DEPTHSRV format=… size=… pfv=… readonly=… stage=… slot=… view=… swizzled=… aspect=…` | Once per texture (with `DXMT_STATS` on) that is a render pass's depth-stencil attachment and is read by a shader of the same pass as a shader resource; at most 64, then `DEPTHSRV: more than 64 textures, the rest are suppressed`. Fields below |
 | `PSO: blend hash on/off (DXMT_PSO_BLEND_HASH), MRU on, 4 entries/off (DXMT_PSO_MRU), topology keep on/off (DXMT_PSO_TOPOLOGY_KEEP)` | Once per device: the effective pipeline lookup settings |
-
 | `Present pacing: mode=… rate=… refresh=… cap=… interval=… duration=… ms limiter=… ms deadline=…` | At the first Present and whenever one of its values changes. `mode`: `vsync` (display sync alone), `vsync+after` (display sync and a minimum duration of `duration`), `vsync+limiter` (display sync and the frame limiter at `limiter`, `DXMT_CAP_LIMITER`), `vsync (cap dropped)` (`DXMT_CAP_LIMITER=0` and a cap that isn't a whole number of refreshes), `after` and `plain` (display sync off: DXMT's own minimum duration, or none). `rate`: the frame rate the pacing aims for (`uncapped` without a limit). `refresh`: the display's rate, `(assumed)` when DXMT didn't get one and uses 60. `cap`: `d3d11.preferredMaxFrameRate` (0 = none). `interval`: the game's sync interval. `deadline`: what a present without a minimum duration asks `presentDrawable:atTime:` for (`DXMT_PRESENT_DEADLINE`: one refresh by default, `=8` → `8.0 ms`, `=12` → `12.0 ms`, `=0` → `off`); `- (minimum duration)` when the minimum-duration branch ignores it |
-| `Promote flush: a speculative commit (occlusion/timestamp query End) waits for N requests, at most M ms …` | Once per device, when `DXMT_PROMOTE_FLUSH_MIN` is on |
-| `Promote flush: watchdog on (multithread-protected device), commits a held commit after M ms` | Once, at the first held commit on a multithread-protected device |
-| `Promote flush: no watchdog, the device isn't multithread-protected; …` | Once, at the first held commit on a device without multithread protection |
+| `Promote flush: a speculative commit (occlusion/timestamp query End) waits for N requests, at most M ms (a watchdog thread under the device lock, now always on) …` | Once per device, when `DXMT_PROMOTE_FLUSH_MIN` is on |
 
 ### Render thread priority
 
@@ -339,7 +336,8 @@ bridge calls 149–151):
 
 `CMDS cb= cbwhy=k:v,… close=k:v,… promote=off|min:N,k:v,…` (jdrly/dxmt #4). Why the game's render
 thread commits chunks (command buffers) and closes encoder passes. Counted with plain increments in
-the immediate context and handed over once per chunk.
+the immediate context and handed over once per chunk; with `DXMT_STATS=0` nothing is counted. `cb`
+and `cbwhy` come from one drain of the totals, so they always agree.
 
 | Field | Meaning |
 |---|---|
@@ -389,18 +387,20 @@ held commit is committed at the latest:
   held chunk commit it first (upstream would already have committed it), so a game that only polls
   still makes progress;
 - by the **timer**: the next pass change at least `DXMT_PROMOTE_FLUSH_MS` after the first hold;
-- by the **watchdog**, only on a multithread-protected device (`ID3D11Multithread`): a thread waits
+- by the **watchdog**, even if the game never calls the context again: a thread waits
   `DXMT_PROMOTE_FLUSH_MS` after a hold and, if it is still pending, commits under the device lock
-  every context entry point takes. Without protection that lock is a no-op and no other thread may
-  enter the immediate context safely, so there is no watchdog (a log line says so); then the timer
-  waits for the next pass change, poll or Present. That leaves only the GPU's time at risk, never a
-  result the game waits for.
+  every context entry point takes. Upstream's lock is a no-op unless the game turns on multithread
+  protection (`ID3D11Multithread`), so `DXMT_PROMOTE_FLUSH_MIN` forces it on for the device's life:
+  it then excludes the game's threads whatever the game asks, and `SetMultithreadProtected(FALSE)`
+  neither disables it nor drops its owner. The cost of the switch: an uncontended lock and unlock per
+  context call, and a game call that meets the watchdog's commit spins until it ends.
 
 ### ENCODE
 
 `ENCODE draws= dispatches= tile= pso= useres= blitcmds= enc=k:v,… perchunk=avg/max loadMB=… storeMB=…
 refuse=k:v,…` (jdrly/dxmt #4). What the encode thread encodes, per frame. The command counts are
 plain increments decided at compile time; the encode thread hands its totals over once per chunk.
+With `DXMT_STATS=0` nothing is counted.
 
 | Field | Meaning |
 |---|---|

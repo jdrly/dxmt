@@ -1,5 +1,6 @@
 #include "dxmt_gw2_cmds.hpp"
 #include "dxmt_gw2_stats.hpp"
+#include <array>
 #include <atomic>
 #include <format>
 #include <string>
@@ -51,13 +52,24 @@ take(counter &total) {
   return total.exchange(0, std::memory_order_relaxed);
 }
 
+// Drains every entry once: the fields formatted from the snapshot agree with each other.
+template <std::size_t N>
+std::array<uint64_t, N>
+takeAll(counter (&totals)[N]) {
+  std::array<uint64_t, N> out;
+  for (unsigned i = 0; i < N; i++)
+    out[i] = take(totals[i]);
+  return out;
+}
+
 // "a:1.0,b:2.5": per frame, entries that are zero left out unless always_shown says otherwise.
-template <unsigned N>
+template <std::size_t N>
 std::string
-perFrameList(counter (&totals)[N], const char *const (&names)[N], double frames, unsigned first, int always_shown) {
+perFrameList(const std::array<uint64_t, N> &values, const char *const (&names)[N], double frames, unsigned first,
+             int always_shown) {
   std::string out;
   for (unsigned i = first; i < N; i++) {
-    uint64_t v = take(totals[i]);
+    uint64_t v = values[i];
     if (!v && (int)i != always_shown)
       continue;
     if (!out.empty())
@@ -72,12 +84,14 @@ cmdsSection(double, uint32_t frames) {
   if (!frames)
     return {};
   double f = frames;
+  // cb and cbwhy come from one drain, so a chunk published meanwhile counts in the next window
+  auto commit = takeAll(g_commit);
   uint64_t commits = 0;
-  for (unsigned i = 0; i < kCommitWhyCount; i++)
-    commits += g_commit[i].load(std::memory_order_relaxed);
+  for (uint64_t v : commit)
+    commits += v;
   std::string out = std::format("cb={:.1f}", commits / f);
-  out += " cbwhy=" + perFrameList(g_commit, kCommitWhyNames, f, (unsigned)CommitWhy::Other, (int)CommitWhy::Other);
-  out += " close=" + perFrameList(g_pass_close, kPassCloseNames, f, 0, -1);
+  out += " cbwhy=" + perFrameList(commit, kCommitWhyNames, f, (unsigned)CommitWhy::Other, (int)CommitWhy::Other);
+  out += " close=" + perFrameList(takeAll(g_pass_close), kPassCloseNames, f, 0, -1);
   uint32_t min = g_promote_min.load(std::memory_order_relaxed);
   if (!min) {
     for (auto &c : g_promote)
@@ -101,7 +115,7 @@ encodeSection(double, uint32_t frames) {
       "draws={:.1f} dispatches={:.1f} tile={:.1f} pso={:.1f} useres={:.1f} blitcmds={:.1f}", take(g_draws) / f,
       take(g_dispatches) / f, take(g_tile) / f, take(g_pso) / f, take(g_use_resource) / f, take(g_blit_cmds) / f
   );
-  out += " enc=" + perFrameList(g_enc, kEncNames, f, 0, -1);
+  out += " enc=" + perFrameList(takeAll(g_enc), kEncNames, f, 0, -1);
   uint64_t chunks = take(g_chunks);
   uint64_t chunk_encoders = take(g_chunk_encoders);
   uint32_t chunk_max = g_chunk_encoders_max.exchange(0, std::memory_order_relaxed);
@@ -130,41 +144,41 @@ setPromoteMin(uint32_t min) {
 
 void
 FrontCounters::publish() {
-  if (statsEnabled()) {
-    for (unsigned i = 0; i < kCommitWhyCount; i++)
-      add(g_commit[i], commit[i]);
-    for (unsigned i = 0; i < kPassCloseCount; i++)
-      add(g_pass_close[i], pass_close[i]);
-    for (unsigned i = 0; i < kPromoteCount; i++)
-      add(g_promote[i], promote[i]);
-  }
+  if (!on)
+    return; // nothing was counted
+  for (unsigned i = 0; i < kCommitWhyCount; i++)
+    add(g_commit[i], commit[i]);
+  for (unsigned i = 0; i < kPassCloseCount; i++)
+    add(g_pass_close[i], pass_close[i]);
+  for (unsigned i = 0; i < kPromoteCount; i++)
+    add(g_promote[i], promote[i]);
   *this = {};
 }
 
 void
 EncodeCounters::publishChunk() {
-  if (statsEnabled()) {
-    add(g_draws, draws);
-    add(g_dispatches, dispatches);
-    add(g_tile, tile);
-    add(g_pso, pso);
-    add(g_use_resource, use_resource);
-    add(g_blit_cmds, blit_cmds);
-    for (unsigned i = 0; i < kEncCount; i++)
-      add(g_enc[i], encoders[i]);
-    for (unsigned i = 0; i < kRefuseCount; i++)
-      add(g_refuse[i], refuse[i]);
-    for (unsigned i = 0; i < kAspectCount; i++) {
-      add(g_load[i], load_bytes[i]);
-      add(g_store[i], store_bytes[i]);
-    }
-    g_chunks.fetch_add(1, std::memory_order_relaxed);
-    add(g_chunk_encoders, chunk_encoders);
-    // one producer (the encode thread); the drain resets it to 0
-    uint32_t seen = g_chunk_encoders_max.load(std::memory_order_relaxed);
-    while (chunk_encoders > seen &&
-           !g_chunk_encoders_max.compare_exchange_weak(seen, chunk_encoders, std::memory_order_relaxed)) {
-    }
+  if (!on)
+    return; // nothing was counted
+  add(g_draws, draws);
+  add(g_dispatches, dispatches);
+  add(g_tile, tile);
+  add(g_pso, pso);
+  add(g_use_resource, use_resource);
+  add(g_blit_cmds, blit_cmds);
+  for (unsigned i = 0; i < kEncCount; i++)
+    add(g_enc[i], encoders[i]);
+  for (unsigned i = 0; i < kRefuseCount; i++)
+    add(g_refuse[i], refuse[i]);
+  for (unsigned i = 0; i < kAspectCount; i++) {
+    add(g_load[i], load_bytes[i]);
+    add(g_store[i], store_bytes[i]);
+  }
+  g_chunks.fetch_add(1, std::memory_order_relaxed);
+  add(g_chunk_encoders, chunk_encoders);
+  // one producer (the encode thread); the drain resets it to 0
+  uint32_t seen = g_chunk_encoders_max.load(std::memory_order_relaxed);
+  while (chunk_encoders > seen &&
+         !g_chunk_encoders_max.compare_exchange_weak(seen, chunk_encoders, std::memory_order_relaxed)) {
   }
   *this = {};
 }

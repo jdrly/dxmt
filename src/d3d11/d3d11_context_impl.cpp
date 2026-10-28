@@ -4339,7 +4339,7 @@ public:
   */
   bool
   InvalidateCurrentPass(bool defer_commit = false, gw2::PassClose why = gw2::PassClose::Other) {
-    if (cmdbuf_state != CommandBufferState::Idle)
+    if (gw2_front_.on && cmdbuf_state != CommandBufferState::Idle)
       gw2_front_.pass_close[(unsigned)why]++; // gw2 (#4)
     switch (cmdbuf_state) {
     case CommandBufferState::Idle:

@@ -11,8 +11,9 @@
 // Counting is plain increments on the thread that owns the counters (the immediate context, under
 // the device's call order; the encode thread). Each side hands its totals over once per chunk with
 // relaxed atomic adds (publish()), and the section drains them every 2 s. With DXMT_STATS=0 nothing
-// is published or logged.
+// is counted (each owner checks its counters' cached `on` first), published or logged.
 
+#include "dxmt_gw2_stats.hpp"
 #include <cstdint>
 
 namespace dxmt::gw2 {
@@ -100,6 +101,7 @@ extern const char *const kPromoteNames[kPromoteCount];
 
 // The render thread's counters (the immediate context).
 struct FrontCounters {
+  bool on = statsEnabled(); // DXMT_STATS, cached: off, nothing is counted
   uint32_t commit[kCommitWhyCount] = {};
   uint32_t pass_close[kPassCloseCount] = {};
   uint32_t promote[kPromoteCount] = {};
@@ -135,6 +137,7 @@ constexpr unsigned kAspectCount = (unsigned)Aspect::Count;
 
 // The encode thread's counters (ArgumentEncodingContext).
 struct EncodeCounters {
+  bool on = statsEnabled(); // DXMT_STATS, cached: off, nothing is counted
   uint32_t draws = 0;      // draw commands of every kind, internal ones included
   uint32_t dispatches = 0; // compute dispatches, internal ones included
   uint32_t tile = 0;       // tile dispatches (tile barriers)

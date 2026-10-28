@@ -977,6 +977,35 @@ ArgumentEncodingContext::gw2CountAttachments(RenderEncoderData *data) {
     count(data->stencil.attachment.ptr(), data->stencil.load_action, data->stencil.store_action, gw2::Aspect::Stencil);
 }
 
+// gw2 (#4): ENCODE's enc= kind of a (non-null) encoder
+static gw2::Enc
+gw2EncoderKind(EncoderType type) {
+  switch (type) {
+  case EncoderType::Null: // not counted; the caller skips it
+  case EncoderType::Render:
+    return gw2::Enc::Render;
+  case EncoderType::Compute:
+    return gw2::Enc::Compute;
+  case EncoderType::Blit:
+    return gw2::Enc::Blit;
+  case EncoderType::Clear:
+    return gw2::Enc::Clear;
+  case EncoderType::Resolve:
+    return gw2::Enc::Resolve;
+  case EncoderType::Present:
+    return gw2::Enc::Present;
+  case EncoderType::SpatialUpscale:
+  case EncoderType::TemporalUpscale:
+    return gw2::Enc::Upscale;
+  case EncoderType::SignalEvent:
+  case EncoderType::WaitForEvent:
+    return gw2::Enc::Event;
+  case EncoderType::SampleTimestamp:
+    return gw2::Enc::Timestamp;
+  }
+  return gw2::Enc::Render;
+}
+
 constexpr unsigned kEncoderOptimizerThreshold = 64;
 
 QueryReadbacks
@@ -1024,47 +1053,16 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer &cmdbuf, uint64_t seqI
 
   readbacks.timestamp = timestamp_state_.flush(cmdbuf);
 
-  // gw2 (#4): ENCODE's attachment bytes; the cheap counters always run, they're published only with stats
-  bool gw2_stats = gw2::statsEnabled();
+  // gw2 (#4): ENCODE's counters, only with DXMT_STATS
+  bool gw2_stats = gw2_enc_.on;
 
   while (encoder_index) {
     auto current = encoders[encoder_count - encoder_index];
     // gw2 (#4): the Metal encoders as they are encoded, after the optimizer's merges
-    switch (current->type) {
-    case EncoderType::Null:
-      break;
-    case EncoderType::Render:
-      gw2_enc_.encoders[(unsigned)gw2::Enc::Render]++;
-      break;
-    case EncoderType::Compute:
-      gw2_enc_.encoders[(unsigned)gw2::Enc::Compute]++;
-      break;
-    case EncoderType::Blit:
-      gw2_enc_.encoders[(unsigned)gw2::Enc::Blit]++;
-      break;
-    case EncoderType::Clear:
-      gw2_enc_.encoders[(unsigned)gw2::Enc::Clear]++;
-      break;
-    case EncoderType::Resolve:
-      gw2_enc_.encoders[(unsigned)gw2::Enc::Resolve]++;
-      break;
-    case EncoderType::Present:
-      gw2_enc_.encoders[(unsigned)gw2::Enc::Present]++;
-      break;
-    case EncoderType::SpatialUpscale:
-    case EncoderType::TemporalUpscale:
-      gw2_enc_.encoders[(unsigned)gw2::Enc::Upscale]++;
-      break;
-    case EncoderType::SignalEvent:
-    case EncoderType::WaitForEvent:
-      gw2_enc_.encoders[(unsigned)gw2::Enc::Event]++;
-      break;
-    case EncoderType::SampleTimestamp:
-      gw2_enc_.encoders[(unsigned)gw2::Enc::Timestamp]++;
-      break;
-    }
-    if (current->type != EncoderType::Null)
+    if (gw2_stats && current->type != EncoderType::Null) {
+      gw2_enc_.encoders[(unsigned)gw2EncoderKind(current->type)]++;
       gw2_enc_.chunk_encoders++;
+    }
     switch (current->type) {
     case EncoderType::Render: {
       auto data = static_cast<RenderEncoderData *>(current);
@@ -1169,7 +1167,8 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer &cmdbuf, uint64_t seqI
           encoder.useResource(task.draw_arguments, WMTResourceUsageRead, WMTRenderStageVertex);
           encoder.useResource(task.dispatch_arguments_buffer, WMTResourceUsageWrite, WMTRenderStageVertex);
         }
-        gw2_enc_.use_resource += 2 * task_count; // gw2 (#4)
+        if (gw2_stats)
+          gw2_enc_.use_resource += 2 * task_count; // gw2 (#4)
         tasks_data[task_count - 1].end_of_command = 1;
         emulated_cmd.MarshalGSDispatchArguments(encoder, task_data_buffer, task_data_buffer_offset);
       }
@@ -1197,7 +1196,8 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer &cmdbuf, uint64_t seqI
           encoder.useResource(task.draw_arguments, WMTResourceUsageRead, WMTRenderStageVertex);
           encoder.useResource(task.dispatch_arguments_buffer, WMTResourceUsageWrite, WMTRenderStageVertex);
         }
-        gw2_enc_.use_resource += 2 * task_count; // gw2 (#4)
+        if (gw2_stats)
+          gw2_enc_.use_resource += 2 * task_count; // gw2 (#4)
         tasks_data[task_count - 1].end_of_command = 1;
         emulated_cmd.MarshalTSDispatchArguments(encoder, task_data_buffer, task_data_buffer_offset);
       }
@@ -1497,7 +1497,8 @@ ArgumentEncodingContext::checkEncoderRelation(EncoderData *former, EncoderData *
   if (former->type == EncoderType::SignalEvent || latter->type == EncoderType::SignalEvent ||
       former->type == EncoderType::WaitForEvent || latter->type == EncoderType::WaitForEvent ||
       former->type == EncoderType::SampleTimestamp || latter->type == EncoderType::SampleTimestamp) {
-    gw2_enc_.refuse[(unsigned)gw2::Refuse::Sync]++;
+    if (gw2_enc_.on)
+      gw2_enc_.refuse[(unsigned)gw2::Refuse::Sync]++;
     return DXMT_ENCODER_LIST_OP_SYNCHRONIZE;
   }
 
@@ -1582,7 +1583,8 @@ ArgumentEncodingContext::checkEncoderRelation(EncoderData *former, EncoderData *
       }
     }
     if (hasDataDependency(latter, former)) {
-      gw2_enc_.refuse[(unsigned)gw2::Refuse::Dependency]++; // gw2 (#4)
+      if (gw2_enc_.on)
+        gw2_enc_.refuse[(unsigned)gw2::Refuse::Dependency]++; // gw2 (#4)
       return DXMT_ENCODER_LIST_OP_SYNCHRONIZE;
     }
     return DXMT_ENCODER_LIST_OP_SWAP;
@@ -1597,7 +1599,7 @@ ArgumentEncodingContext::checkEncoderRelation(EncoderData *former, EncoderData *
     // can't merge if latter's vertex wait for former's fragment
     if (refuse == gw2::Refuse::None && r1->fence_wait_vertex.intersectedWith(r0->fence_update))
       refuse = gw2::Refuse::VertexFence;
-    if (refuse != gw2::Refuse::None)
+    if (gw2_enc_.on && refuse != gw2::Refuse::None)
       gw2_enc_.refuse[(unsigned)refuse]++;
     if (refuse == gw2::Refuse::None) {
       for (unsigned i = 0; i < r0->render_target_count; i++) {
@@ -1661,7 +1663,8 @@ ArgumentEncodingContext::checkEncoderRelation(EncoderData *former, EncoderData *
   }
 
   if (hasDataDependency(latter, former)) {
-    gw2_enc_.refuse[(unsigned)gw2::Refuse::Dependency]++; // gw2 (#4)
+    if (gw2_enc_.on)
+      gw2_enc_.refuse[(unsigned)gw2::Refuse::Dependency]++; // gw2 (#4)
     return DXMT_ENCODER_LIST_OP_SYNCHRONIZE;
   }
   return DXMT_ENCODER_LIST_OP_SWAP;
