@@ -8,8 +8,8 @@
  *  - is then added to this session's archive, on a serial background queue (utility QoS), so the
  *    extra backend work never delays the pipeline the game waits for.
  * The PE side serializes this session's archive every DXMT_PSO_FLUSH_EVERY new pipelines (on its
- * own thread, WMTPSOArchiveFlush), and the unix side once more at exit if the lock is free (an
- * exit never waits for a flush).
+ * own thread, WMTPSOArchiveFlush) and every 120 s if any are new. Exit never flushes; it only
+ * reports what the last flush missed.
  *
  * Rules carried over from d9mt's Metal 4 archives (work/d9mt-ref, docs/state-cache.md §6):
  *  - newBinaryArchiveWithDescriptor: with a URL crashes on a file that isn't an archive and may
@@ -201,20 +201,14 @@ pso_flush_locked(struct report *r) {
 }
 
 static void
-pso_flush_atexit(void) {
-  /* Another thread may still be adding or flushing, or died holding the lock while the process
-   * tears down: never block exit on it. */
-  if (pthread_mutex_trylock(&g_lock))
-    return;
-  @autoreleasepool {
-    char buf[512];
-    struct report r = {buf, sizeof(buf), 0};
-    buf[0] = '\0';
-    pso_flush_locked(&r);
-    if (r.len)
-      fprintf(stderr, "dxmt: %s", buf);
-  }
-  pthread_mutex_unlock(&g_lock);
+pso_report_atexit(void) {
+  /* Exit does no Metal or disk work: serializing can take long, and the threads Metal depends on
+   * may already be gone. The periodic flushes bound what is lost (at most DXMT_PSO_FLUSH_EVERY - 1
+   * pipelines or 120 s); only report it. */
+  uint64_t n = atomic_load(&g_unflushed) + atomic_load(&g_queued);
+  if (n)
+    fprintf(stderr, "dxmt: PSO archive: %llu pipelines added since the last flush are not saved (no flush at exit)\n",
+            (unsigned long long)n);
 }
 
 static void
@@ -415,7 +409,7 @@ pso_archive_init(id<MTLDevice> device, const struct WMTPSOArchiveConfig *cfg, st
       retain];
   g_queue = dispatch_queue_create("dxmt.pso-archive",
                                   dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0));
-  atexit(pso_flush_atexit);
+  atexit(pso_report_atexit);
   atomic_store_explicit(&g_enabled, true, memory_order_release);
   report_line(r, "PSO archive: on: %lu archives for lookup (%.1f MB) in %s; this session writes %s (keep %u sessions, "
               "at most %u pipelines each)",

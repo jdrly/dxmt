@@ -6,7 +6,8 @@
 //   pipeline cache hits/misses, pipelines built, build time, the compile queue, and the encode
 //   thread's waits for pipelines that weren't ready (GetPipeline).
 // - A per-frame "COMPILE frame=..." line for a frame whose encode-thread waits reach
-//   DXMT_COMPILE_WAIT_MS (default 2), at most one per 200 ms.
+//   DXMT_COMPILE_WAIT_MS (default 2), at most one per 200 ms, with the variants, cache lookups
+//   and builds of all threads while that frame was encoded.
 // - DXMT_PSO_ARCHIVE=1 (off by default): Metal binary archives for pipelines, kept on the unix
 //   side of the bridge (src/winemetal/unix/pso_archive.c); a thread here serializes them every
 //   DXMT_PSO_FLUSH_EVERY new pipelines and logs each flush.
@@ -20,10 +21,12 @@ namespace dxmt::gw2 {
 // Render thread / any thread.
 void compileVariantNew();
 void compilePipelineLookup(bool hit);
-// Compile workers.
+// Compile workers. compileClock() is the start of a build (0, no clock read, without DXMT_STATS);
+// the *Built calls take it. compilePipelineBuilt also counts for the archive flushes.
 void compileAirLookup(bool hit);
-void compileShaderBuilt(uint64_t ns);
-void compilePipelineBuilt(uint64_t ns, bool ok);
+int64_t compileClock();
+void compileShaderBuilt(int64_t t0);
+void compilePipelineBuilt(int64_t t0, bool ok);
 // The compile scheduler: a task was submitted (+1) or completed (-1); its worker count.
 void compileQueue(int64_t delta);
 void compileThreads(uint64_t threads);

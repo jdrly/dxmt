@@ -5,7 +5,6 @@
 #include "d3d11_shader.hpp"
 #include "log/log.hpp"
 #include "dxmt_gw2_compile.hpp"
-#include "dxmt_gw2_stats.hpp"
 #include <atomic>
 
 namespace dxmt {
@@ -101,9 +100,9 @@ public:
     info.immutable_vertex_buffers = (1 << 16) | (1 << 29) | (1 << 30);
     info.immutable_fragment_buffers = (1 << 29) | (1 << 30);
 
-    auto t0 = gw2::nowNs();
+    auto t0 = gw2::compileClock(); // gw2 (#5)
     state_ = device_->GetMTLDevice().newRenderPipelineState(info, err);
-    gw2::compilePipelineBuilt(gw2::nowNs() - t0, state_ != nullptr); // gw2 (#5)
+    gw2::compilePipelineBuilt(t0, state_ != nullptr); // gw2 (#5)
 
     if (state_ == nullptr) {
       ERR("Failed to create PSO: ", err.description().getUTF8String());
@@ -182,9 +181,9 @@ public:
     info.tgsize_is_multiple_of_sgwidth = tgsize_is_multiple_of_sgwidth;
     info.immutable_buffers = (1 << 29) | (1 << 30);
 
-    auto t0 = gw2::nowNs();
+    auto t0 = gw2::compileClock(); // gw2 (#5)
     state_ = device_->GetMTLDevice().newComputePipelineState(info, err);
-    gw2::compilePipelineBuilt(gw2::nowNs() - t0, state_ != nullptr); // gw2 (#5)
+    gw2::compilePipelineBuilt(t0, state_ != nullptr); // gw2 (#5)
 
     if (!state_) {
       ERR("Failed to create compute PSO: ", err.description().getUTF8String());

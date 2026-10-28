@@ -24,7 +24,6 @@
 #include "d3d11_shader.hpp"
 #include "log/log.hpp"
 #include "dxmt_gw2_compile.hpp"
-#include "dxmt_gw2_stats.hpp"
 #include "thread.hpp"
 
 namespace dxmt {
@@ -178,10 +177,10 @@ public:
 
     {
       std::lock_guard<dxmt::mutex> lock(ts_global_mutex);
-      auto t0 = gw2::nowNs();
+      auto t0 = gw2::compileClock(); // gw2 (#5)
       state_rasterization_ =
           device_->GetMTLDevice().newRenderPipelineState(info, err);
-      gw2::compilePipelineBuilt(gw2::nowNs() - t0, state_rasterization_ != nullptr); // gw2 (#5)
+      gw2::compilePipelineBuilt(t0, state_rasterization_ != nullptr); // gw2 (#5)
     }
     if (state_rasterization_ == nullptr) {
       ERR("Failed to create tessellation raster PSO: ",

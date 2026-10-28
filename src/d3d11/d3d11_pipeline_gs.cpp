@@ -22,7 +22,6 @@
 #include "d3d11_pipeline.hpp"
 #include "log/log.hpp"
 #include "dxmt_gw2_compile.hpp"
-#include "dxmt_gw2_stats.hpp"
 
 namespace dxmt {
 
@@ -136,9 +135,9 @@ public:
 
     info.raster_sample_count = SampleCount;
 
-    auto t0 = gw2::nowNs();
+    auto t0 = gw2::compileClock(); // gw2 (#5)
     state_mesh_ = device_->GetMTLDevice().newRenderPipelineState(info, err);
-    gw2::compilePipelineBuilt(gw2::nowNs() - t0, state_mesh_ != nullptr); // gw2 (#5)
+    gw2::compilePipelineBuilt(t0, state_mesh_ != nullptr); // gw2 (#5)
 
     if (state_mesh_ == nullptr) {
       ERR("Failed to create mesh PSO: ", err.description().getUTF8String());

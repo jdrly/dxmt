@@ -24,10 +24,22 @@ atomicMax(std::atomic<uint64_t> &a, uint64_t v) {
   }
 }
 
-// --- window counters (all threads), drained by the COMPILE section
+// --- counters (all threads), kept twice: the COMPILE section drains the window's, the encode
+// thread drains the frame's at each frame boundary (for the COMPILE frame= line)
 
-std::atomic<uint64_t> g_variants, g_air_hit, g_air_miss, g_pso_hit, g_pso_miss;
-std::atomic<uint64_t> g_built, g_build_failed, g_shader_ns, g_shader_max_ns, g_pso_ns, g_pso_max_ns;
+struct Counts {
+  std::atomic<uint64_t> variants, air_hit, air_miss, pso_hit, pso_miss, built, failed, shader_ns, pso_ns;
+};
+
+Counts g_window, g_frame;
+
+void
+bump(std::atomic<uint64_t> Counts::*field, uint64_t v = 1) {
+  (g_window.*field).fetch_add(v, std::memory_order_relaxed);
+  (g_frame.*field).fetch_add(v, std::memory_order_relaxed);
+}
+
+std::atomic<uint64_t> g_shader_max_ns, g_pso_max_ns;
 std::atomic<uint64_t> g_wait_n, g_wait_ns, g_wait_max_ns, g_slow_frames;
 std::atomic<int64_t> g_queue;
 std::atomic<uint64_t> g_queue_max, g_threads;
@@ -54,6 +66,14 @@ constexpr int64_t kLineIntervalNs = 200'000'000; // at most 5 COMPILE frame line
 
 void
 finishFrame() {
+  // What all threads did while the encode thread was on this frame (the render thread may already
+  // record a later one): drained at every boundary, so it never spans frames.
+  auto x = [](std::atomic<uint64_t> Counts::*field) {
+    return (g_frame.*field).exchange(0, std::memory_order_relaxed);
+  };
+  uint64_t variants = x(&Counts::variants), air_hit = x(&Counts::air_hit), air_miss = x(&Counts::air_miss),
+           pso_hit = x(&Counts::pso_hit), pso_miss = x(&Counts::pso_miss), built = x(&Counts::built),
+           failed = x(&Counts::failed), shader_ns = x(&Counts::shader_ns), pso_ns = x(&Counts::pso_ns);
   if (t_frame == ~0ull || !t_wait_n)
     return;
   double threshold = waitLineMs();
@@ -63,8 +83,10 @@ finishFrame() {
     auto now = nowNs();
     if (now - t_last_line_ns >= kLineIntervalNs) {
       Logger::info(std::format(
-          "COMPILE frame={} wait={}x {:.1f}/{:.1f} queue={}{}", t_frame, t_wait_n, ms, t_wait_max_ns / 1e6,
-          std::max<int64_t>(0, g_queue.load(std::memory_order_relaxed)),
+          "COMPILE frame={} wait={}x {:.1f}/{:.1f} queue={} variants={} air={}/{} pso={}/{} built={} failed={} "
+          "build=shader:{:.0f} pipeline:{:.0f}{}",
+          t_frame, t_wait_n, ms, t_wait_max_ns / 1e6, std::max<int64_t>(0, g_queue.load(std::memory_order_relaxed)),
+          variants, air_hit, air_miss, pso_hit, pso_miss, built, failed, shader_ns / 1e6, pso_ns / 1e6,
           t_dropped ? std::format(" dropped={}", t_dropped) : std::string()
       ));
       t_last_line_ns = now;
@@ -154,11 +176,12 @@ section(double, uint32_t) {
   auto x = [](std::atomic<uint64_t> &v) { return v.exchange(0, std::memory_order_relaxed); };
   auto queue_now = std::max<int64_t>(0, g_queue.load(std::memory_order_relaxed));
   auto queue_max = g_queue_max.exchange(queue_now, std::memory_order_relaxed);
+  auto &w = g_window;
   return std::format(
       "variants={} air={}/{} pso={}/{} built={} failed={} build=shader:{:.0f}/{:.1f} pipeline:{:.0f}/{:.1f} "
       "queue={}/{} threads={} wait={}x {:.1f}/{:.1f} slow={}{}",
-      x(g_variants), x(g_air_hit), x(g_air_miss), x(g_pso_hit), x(g_pso_miss), x(g_built), x(g_build_failed),
-      x(g_shader_ns) / 1e6, x(g_shader_max_ns) / 1e6, x(g_pso_ns) / 1e6, x(g_pso_max_ns) / 1e6, queue_now,
+      x(w.variants), x(w.air_hit), x(w.air_miss), x(w.pso_hit), x(w.pso_miss), x(w.built), x(w.failed),
+      x(w.shader_ns) / 1e6, x(g_shader_max_ns) / 1e6, x(w.pso_ns) / 1e6, x(g_pso_max_ns) / 1e6, queue_now,
       queue_max, g_threads.load(std::memory_order_relaxed), x(g_wait_n), x(g_wait_ns) / 1e6, x(g_wait_max_ns) / 1e6,
       x(g_slow_frames), archiveSection()
   );
@@ -171,34 +194,41 @@ SectionRegistrar g_section("COMPILE", section);
 void
 compileVariantNew() {
   if (statsEnabled())
-    g_variants.fetch_add(1, std::memory_order_relaxed);
+    bump(&Counts::variants);
 }
 
 void
 compilePipelineLookup(bool hit) {
   if (statsEnabled())
-    (hit ? g_pso_hit : g_pso_miss).fetch_add(1, std::memory_order_relaxed);
+    bump(hit ? &Counts::pso_hit : &Counts::pso_miss);
 }
 
 void
 compileAirLookup(bool hit) {
   if (statsEnabled())
-    (hit ? g_air_hit : g_air_miss).fetch_add(1, std::memory_order_relaxed);
+    bump(hit ? &Counts::air_hit : &Counts::air_miss);
+}
+
+int64_t
+compileClock() {
+  return statsEnabled() ? nowNs() : 0;
 }
 
 void
-compileShaderBuilt(uint64_t ns) {
-  if (!statsEnabled())
+compileShaderBuilt(int64_t t0) {
+  if (!t0)
     return;
-  g_shader_ns.fetch_add(ns, std::memory_order_relaxed);
+  uint64_t ns = nowNs() - t0;
+  bump(&Counts::shader_ns, ns);
   atomicMax(g_shader_max_ns, ns);
 }
 
 void
-compilePipelineBuilt(uint64_t ns, bool ok) {
-  if (statsEnabled()) {
-    (ok ? g_built : g_build_failed).fetch_add(1, std::memory_order_relaxed);
-    g_pso_ns.fetch_add(ns, std::memory_order_relaxed);
+compilePipelineBuilt(int64_t t0, bool ok) {
+  if (t0) {
+    uint64_t ns = nowNs() - t0;
+    bump(ok ? &Counts::built : &Counts::failed);
+    bump(&Counts::pso_ns, ns);
     atomicMax(g_pso_max_ns, ns);
   }
   auto &a = archive();
@@ -271,7 +301,7 @@ psoArchiveInit(uint64_t mtl_device) {
     a.on.store(true, std::memory_order_release);
     Logger::info(str::format(
         "PSO archive: flushing every ", a.flush_every, " new pipelines, every ",
-        std::chrono::duration_cast<std::chrono::seconds>(kFlushPeriod).count(), " s if any are new, and at exit"
+        std::chrono::duration_cast<std::chrono::seconds>(kFlushPeriod).count(), " s if any are new (not at exit)"
     ));
     dxmt::thread([] { archiveThread(); }).detach();
   });
