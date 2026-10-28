@@ -54,6 +54,8 @@ static uint64_t g_loaded;
 static char g_add_error[256];
 static _Atomic uint64_t g_hits, g_misses, g_added, g_add_failed, g_capped, g_queued, g_unflushed;
 static _Atomic uint64_t g_flushes, g_flushed_bytes, g_reserved;
+/* g_added when the last successful flush began: what is on disk (adds and flushes hold g_lock). */
+static _Atomic uint64_t g_persisted;
 
 struct report {
   char *buf;
@@ -153,6 +155,7 @@ mib(uint64_t bytes) {
 static int
 pso_flush_locked(struct report *r) {
   uint64_t n = atomic_exchange(&g_unflushed, 0);
+  uint64_t added = atomic_load(&g_added);
   if (g_add_error[0]) {
     report_line(r, "PSO archive: %llu pipelines could not be added so far; first error: %s",
                 (unsigned long long)atomic_load(&g_add_failed), g_add_error);
@@ -193,6 +196,7 @@ pso_flush_locked(struct report *r) {
   }
   atomic_fetch_add(&g_flushes, 1);
   atomic_store(&g_flushed_bytes, size);
+  atomic_store(&g_persisted, added);
   report_line(r, "PSO archive: flushed %s: %llu pipelines (+%llu), %.1f MB in %.0f ms%s",
               g_path.lastPathComponent.UTF8String, (unsigned long long)atomic_load(&g_added),
               (unsigned long long)n, mib(size), ms,
@@ -204,10 +208,13 @@ static void
 pso_report_atexit(void) {
   /* Exit does no Metal or disk work: serializing can take long, and the threads Metal depends on
    * may already be gone. The periodic flushes bound what is lost (at most DXMT_PSO_FLUSH_EVERY - 1
-   * pipelines or 120 s); only report it. */
-  uint64_t n = atomic_load(&g_unflushed) + atomic_load(&g_queued);
+   * pipelines or 120 s); only report it. Counted against the last completed flush (one still
+   * running counts as not done); an add in progress can count twice, hence "about". */
+  uint64_t persisted = atomic_load(&g_persisted); /* first: never above the g_added read after it */
+  uint64_t n = atomic_load(&g_added) - persisted + atomic_load(&g_queued);
   if (n)
-    fprintf(stderr, "dxmt: PSO archive: %llu pipelines added since the last flush are not saved (no flush at exit)\n",
+    fprintf(stderr,
+            "dxmt: PSO archive: about %llu pipelines added since the last flush are not saved (no flush at exit)\n",
             (unsigned long long)n);
 }
 

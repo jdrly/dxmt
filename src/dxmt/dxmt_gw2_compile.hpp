@@ -15,6 +15,7 @@
 // Everything is counted only with DXMT_STATS on, except what the archive needs.
 
 #include <cstdint>
+#include <string>
 
 namespace dxmt::gw2 {
 
@@ -45,6 +46,17 @@ public:
 private:
   int64_t t0_ = 0;
 };
+
+// The switches as parsed (once), for the code and the startup line.
+struct CompileSettings {
+  double wait_ms = 2;             // DXMT_COMPILE_WAIT_MS
+  bool archive_requested = false; // DXMT_PSO_ARCHIVE=1
+  std::string archive_dir;        // DXMT_PSO_ARCHIVE_DIR; empty: the user cache dir
+  uint64_t flush_every = 256;     // DXMT_PSO_FLUSH_EVERY
+};
+const CompileSettings &compileSettings();
+// The archives are on: requested, and psoArchiveInit got them started.
+bool psoArchiveOn();
 
 // PSO archives: once per process, with the Metal device (no-op unless DXMT_PSO_ARCHIVE=1).
 void psoArchiveInit(uint64_t mtl_device);

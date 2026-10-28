@@ -53,13 +53,7 @@ thread_local uint64_t t_dropped = 0;
 
 double
 waitLineMs() {
-  static const double ms = [] {
-    auto v = env::getEnvVar("DXMT_COMPILE_WAIT_MS");
-    if (v.empty())
-      return 2.0;
-    return std::max(0.0, std::atof(v.c_str()));
-  }();
-  return ms;
+  return compileSettings().wait_ms;
 }
 
 constexpr int64_t kLineIntervalNs = 200'000'000; // at most 5 COMPILE frame lines per second
@@ -106,7 +100,6 @@ constexpr auto kFlushPeriod = std::chrono::seconds(120);
 
 struct ArchiveState {
   std::atomic<bool> on = false;
-  uint64_t flush_every = 256;
   std::atomic<uint64_t> built = 0;
   dxmt::mutex mutex;
   dxmt::condition_variable cond;
@@ -233,7 +226,7 @@ compilePipelineBuilt(int64_t t0, bool ok) {
   }
   auto &a = archive();
   if (ok && a.on.load(std::memory_order_acquire) &&
-      (a.built.fetch_add(1, std::memory_order_relaxed) + 1) % a.flush_every == 0)
+      (a.built.fetch_add(1, std::memory_order_relaxed) + 1) % compileSettings().flush_every == 0)
     psoArchiveRequestFlush();
 }
 
@@ -277,17 +270,36 @@ CompileWaitScope::~CompileWaitScope() {
   t_wait_max_ns = std::max(t_wait_max_ns, ns);
 }
 
+const CompileSettings &
+compileSettings() {
+  static const CompileSettings settings = [] {
+    CompileSettings s;
+    if (auto v = env::getEnvVar("DXMT_COMPILE_WAIT_MS"); !v.empty())
+      s.wait_ms = std::max(0.0, std::atof(v.c_str()));
+    s.archive_requested = env::getEnvVar("DXMT_PSO_ARCHIVE") == "1";
+    s.archive_dir = env::getEnvVar("DXMT_PSO_ARCHIVE_DIR");
+    if (auto v = env::getEnvVar("DXMT_PSO_FLUSH_EVERY"); !v.empty() && std::atoi(v.c_str()) > 0)
+      s.flush_every = std::atoi(v.c_str());
+    return s;
+  }();
+  return settings;
+}
+
+bool
+psoArchiveOn() {
+  return archive().on.load(std::memory_order_acquire);
+}
+
 void
 psoArchiveInit(uint64_t mtl_device) {
   static std::once_flag once;
   std::call_once(once, [mtl_device] {
-    if (env::getEnvVar("DXMT_PSO_ARCHIVE") != "1")
+    auto &settings = compileSettings();
+    if (!settings.archive_requested)
       return;
     auto &a = archive();
-    if (auto v = env::getEnvVar("DXMT_PSO_FLUSH_EVERY"); !v.empty() && std::atoi(v.c_str()) > 0)
-      a.flush_every = std::atoi(v.c_str());
     auto exe = env::getExeName();
-    auto dir = env::getEnvVar("DXMT_PSO_ARCHIVE_DIR");
+    auto &dir = settings.archive_dir;
     WMTPSOArchiveConfig config = {};
     config.exe_name.set(exe.c_str());
     config.base_dir.set(dir.empty() ? nullptr : dir.c_str());
@@ -300,7 +312,7 @@ psoArchiveInit(uint64_t mtl_device) {
       return;
     a.on.store(true, std::memory_order_release);
     Logger::info(str::format(
-        "PSO archive: flushing every ", a.flush_every, " new pipelines, every ",
+        "PSO archive: flushing every ", settings.flush_every, " new pipelines, every ",
         std::chrono::duration_cast<std::chrono::seconds>(kFlushPeriod).count(), " s if any are new (not at exit)"
     ));
     dxmt::thread([] { archiveThread(); }).detach();
