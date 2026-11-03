@@ -12,6 +12,7 @@
 #include <utility>
 
 #include "log.hpp"
+#include "log_split.hpp"
 
 #include "../util_env.hpp"
 #include "util_string.hpp"
@@ -80,12 +81,16 @@ void Logger::emitMsg(LogLevel level, const std::string &message) {
       std::string adjusted = outstream.str();
 
       if (!adjusted.empty()) {
+        // gw2 (#43): Wine raises 0x80000005 for a line over its 1020-byte buffer; hand it pieces
         if (m_wineLogOutput)
-          m_wineLogOutput(adjusted.c_str());
+          splitLogLine(prefix, line, [this](const std::string &piece) {
+            m_wineLogOutput(piece.c_str());
+          });
         else
           std::cerr << adjusted;
       }
 
+      // the file keeps the whole line
       if (m_fileStream)
         m_fileStream << adjusted;
     }

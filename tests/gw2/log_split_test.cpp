@@ -1,0 +1,148 @@
+// gw2 (#43): host-side test of the logger's split for Wine's debug output (splitLogLine). The fake
+// below copies ntdll's __wine_dbg_output and append_output (dlls/ntdll/thread.c, CX 26.3): a
+// 1020-byte per-thread buffer that raises STATUS_BUFFER_OVERFLOW for a longer line. Not part of
+// the DLL build; run it on the Mac:
+//
+//   clang++ -std=c++20 -Isrc/util/log tests/gw2/log_split_test.cpp -o /tmp/log_split_test \
+//     && /tmp/log_split_test
+
+#include "log_split.hpp"
+#include <cstdio>
+#include <cstring>
+#include <string>
+#include <vector>
+
+using namespace dxmt;
+
+static int failures = 0;
+#define CHECK(cond)                                                                                \
+  do {                                                                                             \
+    if (!(cond)) {                                                                                 \
+      std::printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond);                                  \
+      failures++;                                                                                  \
+    }                                                                                              \
+  } while (0)
+
+namespace fake_wine {
+char output[1020];
+size_t out_pos = 0;
+bool overflow = false;
+std::string written; // what reached stderr
+
+bool
+append_output(const char *str, size_t len) {
+  if (len >= sizeof(output) - out_pos) {
+    overflow = true; // Wine: RtlRaiseStatus(STATUS_BUFFER_OVERFLOW)
+    out_pos = 0;
+    return false;
+  }
+  memcpy(output + out_pos, str, len);
+  out_pos += len;
+  return true;
+}
+
+int
+dbg_output(const char *str) {
+  const char *end = strrchr(str, '\n');
+  if (end) {
+    if (!append_output(str, end + 1 - str))
+      return 0;
+    written.append(output, out_pos);
+    out_pos = 0;
+    str = end + 1;
+  }
+  if (*str)
+    append_output(str, strlen(str));
+  return 0;
+}
+
+void
+reset() {
+  out_pos = 0;
+  overflow = false;
+  written.clear();
+}
+} // namespace fake_wine
+
+static const std::string prefix = "info:  ";
+
+// Splits `text`, sends it through the fake, and checks every piece and the reassembled text.
+static std::vector<std::string>
+run(const std::string &text, size_t maxBytes = kWineLogPieceMax) {
+  fake_wine::reset();
+  std::vector<std::string> pieces;
+  splitLogLine(
+      prefix, text,
+      [&](const std::string &piece) {
+        pieces.push_back(piece);
+        fake_wine::dbg_output(piece.c_str());
+      },
+      maxBytes
+  );
+  CHECK(!fake_wine::overflow);
+  CHECK(fake_wine::out_pos == 0); // every piece ended its line
+  std::string joined;
+  for (size_t i = 0; i < pieces.size(); i++) {
+    const std::string &p = pieces[i];
+    CHECK(p.size() <= maxBytes);
+    CHECK(!p.empty() && p.back() == '\n');
+    CHECK(p.find('\n') == p.size() - 1);
+    std::string head = i == 0 ? prefix : prefix + kWineLogContinuation;
+    CHECK(p.compare(0, head.size(), head) == 0);
+    joined += p.substr(head.size(), p.size() - head.size() - 1);
+  }
+  CHECK(joined == text);
+  CHECK(fake_wine::written.size() == [&] {
+    size_t n = 0;
+    for (auto &p : pieces)
+      n += p.size();
+    return n;
+  }());
+  return pieces;
+}
+
+int
+main() {
+  // the fake reproduces the crash: a whole 1,100-byte line overflows Wine's buffer
+  fake_wine::reset();
+  std::string whole = prefix + std::string(1100, 'x') + "\n";
+  fake_wine::dbg_output(whole.c_str());
+  CHECK(fake_wine::overflow);
+
+  // short lines stay one piece, unchanged
+  CHECK(run("") == std::vector<std::string>{prefix + "\n"});
+  CHECK(run("hello") == std::vector<std::string>{prefix + "hello\n"});
+
+  // the issue's case: 5,000 characters
+  std::string big;
+  for (int i = 0; big.size() < 5000; i++)
+    big += std::to_string(i) + " ";
+  big.resize(5000);
+  CHECK(run(big).size() == 6);
+
+  // exactly at the boundary: 900 - 7 (prefix) - 1 ('\n') = 892 bytes fit in one piece
+  CHECK(run(std::string(892, 'a')).size() == 1);
+  CHECK(run(std::string(893, 'a')).size() == 2);
+
+  // UTF-8: a cut backs up rather than splitting a sequence ("é" is 2 bytes, "€" 3)
+  for (size_t shift = 0; shift < 4; shift++) {
+    std::string utf = std::string(shift, 'a');
+    while (utf.size() < 3000)
+      utf += "é€";
+    auto pieces = run(utf);
+    for (size_t i = 1; i < pieces.size(); i++) {
+      size_t head = prefix.size() + strlen(kWineLogContinuation);
+      CHECK((static_cast<unsigned char>(pieces[i][head]) & 0xC0) != 0x80);
+    }
+  }
+
+  // a tiny limit still makes progress and never exceeds it
+  run(std::string(50, 'b'), 16);
+
+  if (failures) {
+    std::printf("%d failure(s)\n", failures);
+    return 1;
+  }
+  std::printf("log_split_test: ok\n");
+  return 0;
+}
