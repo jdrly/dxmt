@@ -45,7 +45,7 @@ because Wine raises `0x80000005` (`STATUS_BUFFER_OVERFLOW`) for a line over its 
 | `DXMT_RESIDENCY_SET` | on | One `MTLResidencySet` for the Metal device, attached to every DXMT command queue on it (macOS 15+; see [RESIDENCY](#residency)). Buffers and textures enter it when they are created and leave it when they are freed, which happens only after the last chunk that used them has retired; the set's changes are committed right before a command buffer commit, only when it changed. `makeResident` emits no `useResource` for them (`ENCODE useres` near 0). Left out, with `useResource` as before: heap-placed and shared (IOSurface) resources, CPU-placed memory (i386), DXMT's bare Metal buffers (dummy constant buffer, GS marshal). Drawables never enter it. Texture views and buffer views ride on their parent | `=0`: no set, a `useResource` per resource and encoder (upstream) |
 | `DXMT_UNRETAINED` | on | A chunk's command buffers (the frame's and the present split's) come from `commandBufferWithUnretainedReferences` (bridge call 154), so Metal retains nothing they use; DXMT holds it until the finish thread retires the chunk (see [LIFECHECK](#lifecheck)): the drawable, the presenter, events and MetalFX scalers go into the chunk's keep list instead of being released after encoding, and device teardown waits for every committed chunk before the D3D11 device's pipeline, depth-stencil and sampler caches go (the same with `DXMT_LIFETIME_CHECK=1`). Metal 4 plan phase 1 (#31), groundwork for the Metal 4 queue (#32). On by default since the lifetime check (20+ min of busy Lion's Arch with a map change and alt-tabs) found 0 early releases | `=0`: `[queue commandBuffer]`, as upstream |
 | `DXMT_LIFETIME_CHECK` | off | **Diagnostic build only** (meson `-Dgw2_lifetime_check=true`; in any other build it is compiled out and `=1` is ignored with a warning). `=1`: as d9mt's `D9MT_LIFETIME_CHECK`. Every object a chunk's command buffers use is stamped with the chunk's sequence on the encode thread; releasing DXMT's last reference to one before the GPU completed that chunk logs a `LIFETIME` line (once per object type) and counts in [LIFECHECK](#lifecheck). Works with `DXMT_UNRETAINED` on or off (it checks DXMT's own bookkeeping, not Metal's retains). It also turns on the keep lists and teardown waits that `DXMT_UNRETAINED=1` uses. Costs a lock and a hash lookup per stamp, retain and release: for test runs only | `=0`: no stamps, no counting; a normal build has no code for them at all |
-| `DXMT_METAL4` | off | `=1` asks for Metal 4: an `MTL4CommandQueue` with one `MTL4CommandAllocator` per chunk, Metal 4 command buffers, encoders and argument tables (Metal 4 plan phase 2, #32; see [Metal 4](#metal-4)). Decided once per process at the first command queue; a device without Metal 4 (macOS before 26, or not `MTLGPUFamilyMetal4`) stays on Metal 3 with a warning. **Not usable yet:** the port comes in four pull requests (the bridge, the queue and submission, the encoders and argument tables, present), and until the last one is in, `=1` checks the device, logs `Metal 4: not yet complete, staying on Metal 3`, and changes nothing | unset or `=0`: Metal 3, as upstream; no bridge call, no log line |
+| `DXMT_METAL4` | off | `=1` asks for Metal 4: an `MTL4CommandQueue` with one `MTL4CommandAllocator` per chunk, Metal 4 command buffers, encoders and argument tables (Metal 4 plan phase 2, #32; see [Metal 4](#metal-4)). Decided once per process at the first command queue; a device without Metal 4 (macOS before 26, or not `MTLGPUFamilyMetal4`) stays on Metal 3 with a warning. **Not usable yet:** the port comes in four pull requests (the bridge, the queue and submission, the encoders and argument tables, present), and until the last one is in, `=1` checks the device, logs `Metal 4: not yet complete, staying on Metal 3`, and changes nothing. Needs the residency set (`DXMT_RESIDENCY_SET`, on by default): without it the device stays on Metal 3, with a warning | unset or `=0`: Metal 3, as upstream; no bridge call, no log line |
 
 Not switchable: `SetMaximumFrameLatency(0)` means the default, 3 (DXGI's definition; only
 `DXMT_MAX_FRAME_LATENCY` replaces the result). Typeless depth targets without stencil
@@ -129,13 +129,19 @@ Sections: a feature registers a function with `gw2::SectionRegistrar` (`src/dxmt
 | `Residency: one residency set on (DXMT_RESIDENCY_SET=1), attached to this device's queue: N allocations[, X MB] resident. …` | Once per device (command queue): the set is attached; its size at that moment (MB only with `DXMT_STATS` on). When a device's queue is destroyed with the set on, it first waits for its committed command buffers, so their resources stay in the set until the GPU is done with them |
 | `Residency: off (DXMT_RESIDENCY_SET=0): a useResource per resource and encoder, as upstream` | Once per device, when switched off |
 | `Residency: off: residency sets need macOS 15 …`, `Residency: off: newResidencySet failed (…) …`, `Residency: off for this device: the set belongs to another Metal device …` | Warnings: the set couldn't start (once per process) or a device on another Metal device (once per device); `useResource` as upstream |
-| `Device error at frame F (chunk S, split-off buffer i of n, split error k, m not logged since the last line): <error>` | An error (`MTLCommandBufferStatusError`) in a command buffer the present split committed off chunk `S` of frame `F` (#10), found by the finish thread, which checks every split-off buffer when its chunk completes, with `DXMT_STATS` on or off. Followed by the buffer's logs, `Frame F (chunk S, split-off buffer i): <log>`, if it has any. The first 8 are logged, then at most one a second; `k` counts all of them since the device started, `m` those left out since the previous line. The chunk's last buffer keeps upstream's `Device error at frame F: <error>` |
+| `Device error at frame F (chunk S, split-off buffer i of n, split error k, m not logged since the last line): <error>` | An error (`MTLCommandBufferStatusError`) in a command buffer the present split committed off chunk `S` of frame `F` (#10), found by the finish thread, which checks every split-off buffer when its chunk completes, with `DXMT_STATS` on or off. Followed by the buffer's logs, `Frame F (chunk S, split-off buffer i): <log>`, if it has any. The first 8 are logged, then at most one a second; `k` counts all of them since the device started, `m` those left out since the previous line. The chunk's last buffer keeps upstream's `Device error at frame F: <error>`. On the Metal 4 path (#32) both lines come from the commits' feedback (`split-off buffer i of n` counts the chunk's earlier commits), without the logs (Metal 4 has none per command buffer) |
 | `Command buffers: unretained references (DXMT_UNRETAINED=1, the default): …`, `Command buffers: retained references (DXMT_UNRETAINED=0), as upstream` | Once per device (command queue), at its creation |
 | `Lifetime check: on (DXMT_LIFETIME_CHECK=1): …` | Once per process, at the first command queue, with the check on |
 | `Lifetime check: DXMT_LIFETIME_CHECK=1 ignored: this build doesn't have it (…)` | Warning, once per process: the variable is set in a build without `-Dgw2_lifetime_check=true` |
 | `LIFETIME <type> 0x<address> released while chunk S of queue Q may still use it (GPU completed C): the first <type> released early, N early releases so far (…)` | An error, with `DXMT_LIFETIME_CHECK=1`: DXMT released its last reference to an object that chunk `S` used, before the GPU completed it (`C` < `S`). Logged once per type; `N` and `LIFECHECK`'s `early` count all of them. See [LIFECHECK](#lifecheck) |
 | `Metal 4: not yet complete, staying on Metal 3 (DXMT_METAL4=1; the device supports it; …)` | Warning, once per process at the first command queue, with `DXMT_METAL4=1` on a device that has Metal 4, in a build before #32's last part |
-| `Metal 4: unavailable (Metal 4 needs macOS 26 \| the GPU isn't in MTLGPUFamilyMetal4 \| newMTL4CommandQueue failed), staying on Metal 3` | Warning, once per process at the first command queue, with `DXMT_METAL4=1` on a device without Metal 4 |
+| `Metal 4: unavailable (Metal 4 needs macOS 26 \| the GPU isn't in MTLGPUFamilyMetal4), staying on Metal 3` | Warning, once per process at the first command queue, with `DXMT_METAL4=1` on a device without Metal 4 |
+| `Metal 4: needs the residency set (DXMT_RESIDENCY_SET=0\|failed: Metal 4 encoders have no useResource), staying on Metal 3` | Warning, once per process at the first command queue, with `DXMT_METAL4=1` and the residency set off or unavailable |
+| `Metal 4: unavailable (<what> failed), staying on Metal 3` | Warning, once: the Metal 4 queue, its event or allocators couldn't be created, or the residency set couldn't be attached to it |
+| `Metal 4: on (DXMT_METAL4=1): this device's chunks go to an MTL4CommandQueue, with N command allocators (one per chunk slot) and commit feedback` | Once per device (command queue), when it takes the Metal 4 path |
+| `Metal 4: newCommandBuffer failed after N command buffers; DXMT can't continue on Metal 4, aborting` | Error, on the Metal 4 path, when Metal returns no command buffer after the queue's first ones (one per slot and two spares, made with the queue): the process aborts, since earlier chunks may still be on the GPU |
+| `Residency: the residency set is attached to this device's Metal 4 queue too (DXMT_METAL4)` | Once per device, on the Metal 4 path, after the usual `Residency:` line |
+| `Metal 4: chunk S not complete after 1 s (its command buffer's value V, the queue event at E); still waiting` | Warning, on the Metal 4 path, the first 8 times the finish thread waits over a second for a chunk (a GPU hang or a very long frame); counted in [METAL4](#metal4)'s `slow`. Metal 3's `waitUntilCompleted` blocks the same way without a line |
 
 ### Render thread priority
 
@@ -695,3 +701,40 @@ event), allocators, residency on the queue and the command buffer, the layer's r
 `tests/gw2/mtl4_bridge_test.m` runs the replays natively on a real Metal 4 queue (build and run
 instructions in its header) and probes whether airconv's metallibs (a copy of DXMT's shader cache)
 build and bind on Metal 4 encoders.
+
+**Part 2, the queue and submission** (`src/dxmt/dxmt_gw2_mtl4_queue.*`, `CommandQueue`). On the
+Metal 4 path a device's command queue gets an `Mtl4Queue`:
+
+- one `MTL4CommandQueue`, with the residency set attached (Metal 4 needs it: no `useResource`);
+- one `MTL4CommandAllocator` per chunk slot (the ring's size, `DXMT_CHUNKS`): a chunk's command
+  buffers take their memory from their slot's allocator, which the finish thread resets when it
+  retires the chunk, after every buffer of it completed;
+- per commit, an `Mtl4Commit` record: the command buffer (recycled after completion) and the
+  feedback its commit's handler writes (GPU start and end, error) before it raises the queue's shared
+  event to the commit's value;
+- the encode thread commits a chunk: a queue-level `waitForEvent` for the initializer's uploads
+  (Metal 3 encodes it in the command buffer), `begin` on the slot's allocator, the encoders (part 3),
+  the residency set's pending changes, `commit` with feedback. The present split (part 4) commits
+  and begins again within the chunk;
+- the finish thread waits on the event for each of the chunk's commits (no `waitUntilCompleted`),
+  logs their errors as the Metal 3 path does, hands their GPU spans to the GPU line and PRESENT's
+  `aftergpu`, destroys the chunk's readbacks (the timestamp readbacks read the commits' feedback
+  instead of a command buffer's times), then resets the allocator;
+- teardown waits for every commit before the chunks and the queue go.
+
+`tests/gw2/mtl4_queue_test.mm` runs `Mtl4Queue` natively through the real PE thunks (winemetal's
+`WINE_UNIX_CALL` dispatched straight to the unix side): a ring of 4 slots over 24 chunks, split
+commits, a queue-level event wait.
+
+### METAL4
+
+`METAL4 commits= buffers= allocmb= slow= errors=` (jdrly/dxmt #32), only on the Metal 4 path, with
+`DXMT_STATS`; window totals (2 s).
+
+| Field | Meaning |
+|---|---|
+| `commits` | Metal 4 commits (command buffers) in the window |
+| `buffers` | The most command buffers one chunk committed (1, or 2 with the present split) |
+| `allocmb` | The largest command allocator's memory (MB) at its reset: how much command memory a chunk's slot holds |
+| `slow` | Chunks the finish thread waited for over a second |
+| `errors` | Commits whose feedback had an error (each also logged as a `Device error` line) |
