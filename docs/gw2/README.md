@@ -117,7 +117,7 @@ Sections: a feature registers a function with `gw2::SectionRegistrar` (`src/dxmt
 | `Map fast path: on (DXMT_MAP_FAST): …` | Once per device, when `DXMT_MAP_FAST` is on (the default) |
 | `Pipeline binds: skip rebind on (DXMT_SKIP_REBIND): …`, `Pipeline binds: skip rebind off (DXMT_SKIP_REBIND=0): …` | Once per process, when the first encoding context is created |
 | `Pipeline binds: skipped the first bind of a pipeline already bound in its encoder` | Once per process, the first time `DXMT_SKIP_REBIND` leaves a bind out |
-| `Residency: one residency set on (DXMT_RESIDENCY_SET=1), attached to this device's queue: N allocations, X MB resident. …` | Once per device (command queue): the set is attached; its size at that moment |
+| `Residency: one residency set on (DXMT_RESIDENCY_SET=1), attached to this device's queue: N allocations[, X MB] resident. …` | Once per device (command queue): the set is attached; its size at that moment (MB only with `DXMT_STATS` on). When a device's queue is destroyed with the set on, it first waits for its committed command buffers, so their resources stay in the set until the GPU is done with them |
 | `Residency: off (DXMT_RESIDENCY_SET=0): a useResource per resource and encoder, as upstream` | Once per device, when switched off |
 | `Residency: off: residency sets need macOS 15 …`, `Residency: off: newResidencySet failed (…) …`, `Residency: off for this device: the set belongs to another Metal device …` | Warnings: the set couldn't start (once per process) or a device on another Metal device (once per device); `useResource` as upstream |
 
@@ -564,7 +564,8 @@ minute `print present_deadline=8 > /tmp/c.new && mv /tmp/c.new /tmp/dxmt-control
 
 `RESIDENCY resident= mb= adds= removes= commits= devmb=` (jdrly/dxmt #29). The device's residency
 set (`DXMT_RESIDENCY_SET`), logged only while it is on. Counts are window totals (2 s), not per
-frame.
+frame. `mb` and the window totals are counted only with `DXMT_STATS` on; with it off, texture bytes
+aren't estimated either.
 
 | Field | Meaning |
 |---|---|

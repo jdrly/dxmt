@@ -19,6 +19,7 @@
 #include "dxmt_texture.hpp"
 #include "dxmt_format.hpp"
 #include "dxmt_gw2_residency.hpp"
+#include "dxmt_gw2_stats.hpp"
 #include "dxmt_names.hpp"
 #include "dxmt_residency.hpp"
 #include "wsi_platform.hpp"
@@ -310,13 +311,14 @@ Rc<TextureAllocation>
 Texture::gw2EnterResidencySet(TextureAllocation *allocation, const WMTTextureInfo &info) {
   // Shared (IOSurface) textures stay out, and on i386 a linear texture's CPU-placed memory (freed with
   // the allocation). A linear texture enters with its buffer.
-  if (allocation->flags().test(TextureAllocationFlag::Shared))
+  if (!gw2::residencyActive() || allocation->flags().test(TextureAllocationFlag::Shared))
     return allocation;
 #ifdef __i386__
   if (allocation->buffer_)
     return allocation;
 #endif
-  uint64_t bytes = allocation->buffer_ ? bytes_per_image_ : gw2TextureBytes(info);
+  // RESIDENCY's mb only: estimated with DXMT_STATS on
+  uint64_t bytes = allocation->buffer_ ? bytes_per_image_ : gw2::statsEnabled() ? gw2TextureBytes(info) : 0;
   obj_handle_t handles[2] = {allocation->obj_.handle, allocation->buffer_.handle};
   allocation->gw2Resident = gw2::residencyAdd(device_, handles, 2, bytes);
   allocation->gw2ResidentBytes = bytes;

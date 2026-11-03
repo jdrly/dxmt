@@ -194,6 +194,20 @@ CommandQueue::~CommandQueue() {
   SharedEventListener_destroy(shared_event_listener);
   encodeThread.join();
   finishThread.join();
+  // gw2 (#29): with the residency set, a chunk's references are what keep its allocations in the set
+  // (and alive: the command buffers no longer retain them through useResource). The finish thread
+  // stopped without retiring every committed chunk, so wait for their command buffers first; the
+  // split-off ones were committed earlier on this queue and complete before their chunk's last.
+  if (gw2::residencyActive()) {
+    for (unsigned i = 0; i < kCommandChunkCountMax; i++) {
+      auto &cmdbuf = chunks[i].attached_cmdbuf;
+      if (!cmdbuf)
+        continue;
+      auto status = cmdbuf.status();
+      if (status == WMTCommandBufferStatusCommitted || status == WMTCommandBufferStatusScheduled)
+        cmdbuf.waitUntilCompleted();
+    }
+  }
   for (unsigned i = 0; i < kCommandChunkCountMax; i++) {
     auto &chunk = chunks[i];
     chunk.reset();

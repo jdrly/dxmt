@@ -61,6 +61,11 @@ residencySetRequested() {
   return on;
 }
 
+bool
+residencyActive() {
+  return state().active.load(std::memory_order_acquire);
+}
+
 const char *
 residencySetState() {
   if (!residencySetRequested())
@@ -108,10 +113,10 @@ residencyAttachQueue(WMT::Device device, WMT::CommandQueue queue) {
   }
   queue.addResidencySet(s.set);
   Logger::info(std::format(
-      "Residency: one residency set on (DXMT_RESIDENCY_SET=1), attached to this device's queue: {} allocations, "
-      "{:.1f} MB resident. Buffers and textures enter it when created and leave once their last chunk has retired; "
+      "Residency: one residency set on (DXMT_RESIDENCY_SET=1), attached to this device's queue: {} allocations{} "
+      "resident. Buffers and textures enter it when created and leave once their last chunk has retired; "
       "makeResident emits no useResource for them",
-      s.resident, s.bytes / 1e6
+      s.resident, statsEnabled() ? std::format(", {:.1f} MB", s.bytes / 1e6) : std::string()
   ));
 }
 
@@ -131,9 +136,11 @@ residencyAdd(WMT::Device device, const obj_handle_t *allocations, uint32_t count
   std::lock_guard lock(s.mutex);
   MTLResidencySet_addAllocations(s.set.handle, handles, n);
   s.resident++;
-  s.bytes += bytes;
   s.dirty.store(true, std::memory_order_release);
-  s.adds.fetch_add(1, std::memory_order_relaxed);
+  if (statsEnabled()) {
+    s.bytes += bytes;
+    s.adds.fetch_add(1, std::memory_order_relaxed);
+  }
   return true;
 }
 
@@ -151,9 +158,11 @@ residencyRemove(const obj_handle_t *allocations, uint32_t count, uint64_t bytes)
   std::lock_guard lock(s.mutex);
   MTLResidencySet_removeAllocations(s.set.handle, handles, n);
   s.resident--;
-  s.bytes -= bytes;
   s.dirty.store(true, std::memory_order_release);
-  s.removes.fetch_add(1, std::memory_order_relaxed);
+  if (statsEnabled()) {
+    s.bytes -= bytes;
+    s.removes.fetch_add(1, std::memory_order_relaxed);
+  }
 }
 
 void
@@ -170,7 +179,8 @@ residencyBeforeCommit() {
   // cleared only after the commit (adds and removes take the mutex, so none came in between): another
   // queue's thread that sees it clear can't commit a command buffer ahead of this set commit
   s.dirty.store(false, std::memory_order_release);
-  s.commits.fetch_add(1, std::memory_order_relaxed);
+  if (statsEnabled())
+    s.commits.fetch_add(1, std::memory_order_relaxed);
 }
 
 } // namespace dxmt::gw2

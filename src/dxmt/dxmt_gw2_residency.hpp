@@ -31,6 +31,9 @@ namespace dxmt::gw2 {
 // DXMT_RESIDENCY_SET (default on; "0" turns it off)
 bool residencySetRequested();
 
+// The set exists (on, and started); allocations may be in it.
+bool residencyActive();
+
 // "1" (the set is on), "0" (DXMT_RESIDENCY_SET=0), "failed" (asked for but not available: macOS
 // before 15, or newResidencySet failed). For the startup line.
 const char *residencySetState();
@@ -41,7 +44,8 @@ void residencyAttachQueue(WMT::Device device, WMT::CommandQueue queue);
 
 // Adds `count` Metal allocations (one DXMT allocation's buffer and/or texture; null handles are
 // skipped) made on `device`. Returns false (nothing added) when the set is off or on another
-// device; the caller then keeps useResource for them. `bytes` is for RESIDENCY's mb.
+// device; the caller then keeps useResource for them. `bytes` is for RESIDENCY's mb (counted only
+// with DXMT_STATS on, like the window totals).
 bool residencyAdd(WMT::Device device, const obj_handle_t *allocations, uint32_t count, uint64_t bytes);
 
 // Removes what residencyAdd added (the same handles and bytes), when the DXMT allocation is freed.
