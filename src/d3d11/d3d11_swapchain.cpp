@@ -1212,8 +1212,10 @@ public:
 
   // gw2 (#7): the deadline setting this Present uses (-1 one refresh, 0 off, > 0 ms): the control
   // file's present_deadline if it sets one, else DXMT_PRESENT_DEADLINE. A change is logged with the
-  // frame it applies from (1-based, as HITCH counts). Render thread; one relaxed atomic load.
+  // frame it applies from (1-based, as HITCH counts). Render thread; two atomic loads, unless the
+  // control file's poll thread has queued lines to log.
   double PresentDeadlineMs() {
+    gw2::controlLogPending(); // the poll thread's lines, before the change line they may explain
     int32_t us = gw2::controlPresentDeadlineUs();
     double ms = us == gw2::kControlUnset ? present_deadline_ms_ : us < 0 ? -1.0 : us / 1000.0;
     if (ms == deadline_applied_ms_)

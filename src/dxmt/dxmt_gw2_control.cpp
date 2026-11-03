@@ -11,6 +11,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <vector>
 
 namespace dxmt::gw2 {
 
@@ -22,6 +23,31 @@ constexpr double kMaxDeadlineMs = 1000.0;
 
 std::atomic<int32_t> g_present_deadline_us{kControlUnset};
 
+// gw2 (#7): the poll thread's log lines. It never calls the logger: the logger holds its mutex across
+// Wine's console and file writes, so a stalled sink would hold it and the render thread's own lines
+// (HITCH, Present pacing) would wait on the poll thread. It queues them instead (bounded; the lock is
+// held only to move a string in or the queue out), and the render thread logs them at its next
+// Present, taking the lock only with try_lock.
+constexpr size_t kMaxQueuedLines = 32;
+struct QueuedLine {
+  bool warn;
+  std::string text;
+};
+dxmt::mutex g_lines_mutex;
+std::vector<QueuedLine> g_lines;  // g_lines_mutex
+uint32_t g_lines_dropped = 0;     // g_lines_mutex
+std::atomic<bool> g_lines_pending{false};
+
+void
+post(bool warn, std::string text) {
+  std::lock_guard<dxmt::mutex> lock(g_lines_mutex);
+  if (g_lines.size() < kMaxQueuedLines)
+    g_lines.push_back({warn, std::move(text)});
+  else
+    g_lines_dropped++;
+  g_lines_pending.store(true, std::memory_order_release);
+}
+
 std::string
 trim(const std::string &s) {
   size_t b = s.find_first_not_of(" \t\r");
@@ -31,7 +57,7 @@ trim(const std::string &s) {
   return s.substr(b, e - b + 1);
 }
 
-// The poll thread's own state: what it has warned about, so each warning is logged once.
+// The poll thread's own state: what it has warned about, so each warning is posted once.
 struct Poller {
   std::string path;
   int readable = -1; // -1 not read yet, 0 can't be read, 1 read
@@ -40,7 +66,7 @@ struct Poller {
   void
   warnOnce(const std::string &key, const std::string &message) {
     if (warned.insert(key).second)
-      Logger::warn(message);
+      post(true, message);
   }
 
   // false: the value isn't understood (warned once); `us` keeps kControlUnset
@@ -89,9 +115,9 @@ struct Poller {
     }
     if (int(ok) != readable) {
       if (ok)
-        Logger::info(std::format("Control: reading {}", path));
+        post(false, std::format("Control: reading {}", path));
       else
-        Logger::warn(std::format("Control: {} can't be read; every key at its default", path));
+        post(true, std::format("Control: {} can't be read; every key at its default", path));
       readable = int(ok);
     }
 
@@ -155,6 +181,31 @@ controlStart() {
       poller->run();
     }).detach();
   });
+}
+
+void
+controlLogPending() {
+  if (!g_lines_pending.load(std::memory_order_acquire))
+    return;
+  std::vector<QueuedLine> lines;
+  uint32_t dropped;
+  if (!g_lines_mutex.try_lock())
+    return; // the poll thread is queueing a line; the next Present takes it
+  lines.swap(g_lines);
+  dropped = g_lines_dropped;
+  g_lines_dropped = 0;
+  g_lines_pending.store(false, std::memory_order_relaxed);
+  g_lines_mutex.unlock();
+  for (auto &line : lines) {
+    if (line.warn)
+      Logger::warn(line.text);
+    else
+      Logger::info(line.text);
+  }
+  if (dropped)
+    Logger::warn(
+        std::format("Control: {} lines dropped (more than {} between two Presents)", dropped, kMaxQueuedLines)
+    );
 }
 
 int32_t

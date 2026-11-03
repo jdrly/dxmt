@@ -527,7 +527,10 @@ so one start can alternate settings minute by minute. The path is opened as `DXM
 unix path works. A thread of its own (`dxmt-control`, lowest priority) reads the file when the first
 swapchain is created and then once a second; it publishes each key as an atomic that the owning code
 reads where it already uses the setting (one relaxed load per Present). The render thread never
-touches the file.
+touches the file. The poll thread never calls the logger either (it would hold the logger's lock
+while Wine writes, and the render thread's own lines would wait for it): it queues its `Control:`
+lines, at most 32 between two Presents, and the render thread logs them at its next Present with a
+`try_lock` that never waits; a line that misses it goes out at the Present after.
 
 The file is the whole state: one `key=value` per line, spaces around either ignored; blank lines
 and lines starting with `#` are skipped; the last valid line of a key wins. A key that is missing,
@@ -550,4 +553,5 @@ minute `print present_deadline=8 > /tmp/c.new && mv /tmp/c.new /tmp/dxmt-control
 | `Control: <path> can't be read; every key at its default` | Warning: the first read that fails, and the first one after a read succeeded |
 | `Control: unknown key "<key>" (line "<line>"); ignored` | Warning, once per key |
 | `Control: present_deadline=<value> isn't refresh, default, 0 or a number of ms up to 1000; ignored (the line counts as missing)` | Warning, once per value; `Control: present_deadline without =value; ignored` once for a bare key |
+| `Control: N lines dropped (more than 32 between two Presents)` | Warning, when the poll thread's queue was full |
 | `Present deadline: <new> from frame N (was <old>; <source>)` | At the Present whose deadline setting differs from the previous Present's: `refresh`, `off` or `<ms> ms`. `frame` is the frame that Present presents (1-based, as `HITCH` counts), the first one with the new setting. `source` is `DXMT_CONTROL present_deadline`, or `DXMT_PRESENT_DEADLINE, the control file doesn't set it` when the setting returns to the variable's. The `Present pacing:` line then follows with the new `deadline`, and `STATS`' `deadline` has it from that window |
