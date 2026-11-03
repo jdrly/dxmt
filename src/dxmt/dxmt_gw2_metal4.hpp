@@ -31,4 +31,10 @@ void metal4AttachQueue(WMT::Device device);
 // Metal 3, with a warning naming `what`.
 void metal4Failed(const char *what);
 
+// A feature the Metal 4 path runs through the packet replay without having been tested there
+// (geometry and tessellation emulation, deferred command lists): a warning once per kind. Issue #32
+// kept them on Metal 3 "at first"; the coordinator chose (2026-11-04) to let them run on Metal 4
+// instead (GW2 uses none of them, DXMT_METAL4 defaults to 0, refusing them would break games).
+void metal4Untested(const char *what);
+
 } // namespace dxmt::gw2

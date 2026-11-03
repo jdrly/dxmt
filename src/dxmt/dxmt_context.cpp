@@ -21,6 +21,7 @@
 #include "dxmt_command_queue.hpp"
 #include "dxmt_deptrack.hpp"
 #include "dxmt_format.hpp"
+#include "dxmt_gw2_metal4.hpp"
 #include "dxmt_gw2_present.hpp"
 #include "dxmt_gw2_residency.hpp"
 #include "dxmt_gw2_stats.hpp"
@@ -1216,6 +1217,12 @@ ArgumentEncodingContext::flushCommandsImpl(CommandBuffer &cmdbuf, uint64_t seqId
         encoder.setVertexBuffer(gpu_buffer_, 0, SM50_BINDING_INDEX_STREAM_OUTPUT0);
       encoder.setFragmentBuffer(gpu_buffer_, 0, SM50_BINDING_INDEX_CONSTANT_BUFFER);
       encoder.setFragmentBuffer(gpu_buffer_, 0, SM50_BINDING_INDEX_ARGUMENT_TABLE);
+      if constexpr (kMetal4) { // gw2 (#32): mesh draws through the replay, untested on Metal 4
+        if (data->use_geometry)
+          gw2::metal4Untested("geometry shader emulation");
+        if (data->use_tessellation)
+          gw2::metal4Untested("tessellation emulation");
+      }
       if (data->use_geometry || data->use_tessellation) {
         encoder.setObjectBuffer(gpu_buffer_, 0, SM50_BINDING_INDEX_VERTEX_BUFFER);
         encoder.setObjectBuffer(gpu_buffer_, 0, SM50_BINDING_INDEX_DRAW_ARGUMENTS);

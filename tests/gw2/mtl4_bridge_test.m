@@ -41,6 +41,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #define WINEMETAL_API
 #include "winemetal_thunks.h"
 #include "mtl4.h"
@@ -522,6 +523,20 @@ wait_value(id<MTLSharedEvent> event, uint64_t value, const char *what) {
   }
 }
 
+/* the event is forward-only: a later commit's handler may raise it past an earlier record before
+   that one's handler ran, so each record's own flag says it was written (acquire) */
+static void
+wait_done(struct WMTMtl4CommitFeedback *fb, const char *what) {
+  for (int i = 0; i < 10000; i++) {
+    if (atomic_load_explicit((_Atomic uint64_t *)&fb->done, memory_order_acquire))
+      return;
+    usleep(1000);
+  }
+  printf("FAIL %s: feedback not written in 10 s; exiting without cleanup\n", what);
+  fflush(stdout);
+  _Exit(EXIT_FAILURE);
+}
+
 /* DXMT orders the present split's two command buffers (and the buffers around queue-level events)
    with MTLFences only. Command buffer A fills 64 MB and updates a fence; B, committed separately,
    waits for it and copies the fill's last bytes: they must be the fill's. */
@@ -572,7 +587,8 @@ test_cross_commit_fence(struct mtl4 *m) {
   }
   commit_one(m, second, &fbb, event, 2);
   wait_value(event, 2, "cross-commit fence");
-  wait_value(event, 1, "cross-commit fence");
+  wait_done(&fa, "cross-commit fence A");
+  wait_done(&fbb, "cross-commit fence B");
   CHECK(!fa.error && !fbb.error, "cross-commit fence: GPU error");
   const uint8_t *bytes = small.contents;
   bool ok = true;
@@ -644,6 +660,7 @@ test_drawable(struct mtl4 *m) {
                                               .value = 1.0 / 60};
   _MetalDrawable_present(&pr);
   wait_value(event, 1, "drawable");
+  wait_done(&fb, "drawable");
   CHECK(!fb.error, "drawable: GPU error %s", fb.error ? [((NSError *)fb.error).description UTF8String] : "");
   printf("drawable: wait, pass, signal, present at a deadline: %s\n", fb.error ? "FAILED" : "ok");
   struct unixcall_generic_obj_uint64_ret reset = {.handle = m->allocator};

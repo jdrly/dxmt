@@ -138,6 +138,7 @@ Sections: a feature registers a function with `gw2::SectionRegistrar` (`src/dxmt
 | `Metal 4: needs the residency set (DXMT_RESIDENCY_SET=0\|failed: Metal 4 encoders have no useResource), staying on Metal 3` | Warning, once per process at the first command queue, with `DXMT_METAL4=1` and the residency set off or unavailable |
 | `Metal 4: DXMT_METALFX_SPATIAL_SWAPCHAIN=1: MetalFX upscaling stays on Metal 3, staying on Metal 3`, `Metal 4: needs DXMT_UNRETAINED=1 (the default): …; staying on Metal 3` | Warnings, once per process at the first command queue, with `DXMT_METAL4=1` |
 | `Metal 4: <what> isn't supported on the Metal 4 path; skipped (its fences still pass)` | An error, once per kind (`MetalFX temporal upscale`, `MetalFX spatial upscale`): the Metal 4 path met a MetalFX encoder from DXMT's context extension, which it can't encode; it draws wrong |
+| `Metal 4: geometry shader emulation \| tessellation emulation \| deferred command lists (ExecuteCommandList) run on the Metal 4 path through the packet replay, untested there` | Warning, once per kind, the first time a Metal 4 device encodes a GS or tessellation draw or executes a deferred command list (#32: the coordinator's scope decision of 2026-11-04) |
 | `Metal 4: the layer has no residency set; drawables may not be resident` | Warning, on the Metal 4 path, at a presenter's first present, if `CAMetalLayer.residencySet` is nil |
 | `Metal 4: unavailable (<what> failed), staying on Metal 3` | Warning, once: the Metal 4 queue, its event or allocators couldn't be created, or the residency set couldn't be attached to it |
 | `Metal 4: on (DXMT_METAL4=1): this device's chunks go to an MTL4CommandQueue, with N command allocators (one per chunk slot) and commit feedback` | Once per device (command queue), when it takes the Metal 4 path |
@@ -760,8 +761,15 @@ branches off), on Metal 4 into a `gw2::Mtl4Encoding` with the same encoder and e
   chunk that uses it. `METAL4 missed` counts a `UseResource` with no set: it must stay 0.
 - The timestamp readbacks read the chunk's commits' feedback (exact: the last buffer's end;
   estimate: each buffer's span from the position it began at).
-- MetalFX (`DXMT_METALFX_SPATIAL_SWAPCHAIN=1`) keeps the device on Metal 3; a MetalFX encoder from the
-  context extension logs once and is skipped with its fences kept.
+- MetalFX stays on Metal 3: `DXMT_METALFX_SPATIAL_SWAPCHAIN=1` keeps the device there, and a device
+  on Metal 4 doesn't offer the temporal scaler of DXMT's context extension (`CheckFeatureSupport`
+  says no; `TemporalUpscale` logs once and does nothing). A MetalFX encoder that still reaches the
+  Metal 4 path logs once and is skipped with its fences kept.
+- Geometry and tessellation emulation and deferred command lists run on Metal 4 through the same
+  replay (mesh draws and object/mesh buffers; a deferred list becomes the same packets), untested
+  there, with a warning once per kind. Issue #32 kept them on Metal 3 "at first"; they can't be
+  known when a device picks its queue, and the coordinator chose on 2026-11-04 to let them run
+  rather than refuse them (GW2 uses none; `DXMT_METAL4` defaults to 0).
 - Metal 4 needs `DXMT_UNRETAINED=1` (the default): its command buffers retain nothing, so the chunk's
   keep lists must hold what it uses.
 
