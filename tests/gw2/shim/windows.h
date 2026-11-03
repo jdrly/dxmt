@@ -19,6 +19,8 @@ inline DWORD tid = 1;
 inline std::map<DWORD, std::map<DWORD, void *>> fls; // per thread: slot -> value
 inline std::map<DWORD, PFLS_CALLBACK_FUNCTION> slots;
 inline DWORD next_slot = 1;
+inline bool fail_alloc = false; // FlsAlloc returns FLS_OUT_OF_INDEXES
+inline bool fail_set = false;   // FlsSetValue fails
 inline void
 exitThread() {
   for (auto &[slot, value] : fls[tid])
@@ -34,6 +36,8 @@ GetCurrentThreadId() {
 }
 inline DWORD
 FlsAlloc(PFLS_CALLBACK_FUNCTION cb) {
+  if (fake::fail_alloc)
+    return FLS_OUT_OF_INDEXES;
   DWORD i = fake::next_slot++;
   fake::slots[i] = cb;
   return i;
@@ -46,6 +50,8 @@ FlsGetValue(DWORD i) {
 }
 inline BOOL
 FlsSetValue(DWORD i, PVOID v) {
+  if (fake::fail_set)
+    return 0;
   fake::fls[fake::tid][i] = v;
   return 1;
 }

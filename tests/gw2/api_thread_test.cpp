@@ -8,6 +8,8 @@
 #include <windows.h>
 #include <cstdio>
 #include <cstdlib>
+#include <sys/wait.h>
+#include <unistd.h>
 
 using namespace dxmt::gw2;
 
@@ -32,6 +34,48 @@ mapWithWait(ApiThreadCache &ctx) {
   ApiScope outer(Api::Map, false, &ctx);
   waitAdd(Wait::Sync, 100);
   ApiScope nested(Api::Map, false, &ctx);
+}
+
+// Without a block in the fiber-local slot (FlsSetValue or FlsAlloc failed), a thread keeps one block
+// for all its lookups, cached or not, and no cache holds it. Run in a child process: the fallback is
+// a real thread_local, which the simulated threads share.
+static int
+fallbackCase(bool fail_alloc) {
+  fake::fail_alloc = fail_alloc;
+  fake::fail_set = !fail_alloc;
+  if (fail_alloc)
+    apiThreadsDetach(); // so the next lookup allocates the slot again, and fails
+  ApiThreadCache ctx;
+  fake::tid = 21;
+  otherDrain();
+  mapWithWait(ctx);
+  ApiThread &t = apiThread();
+  CHECK(&t == &apiThread()); // one block, not one per lookup
+  CHECK(!t.cacheable);
+  CHECK(t.depth == 0);
+  CHECK(otherMapCalls() == 1);
+  mapWithWait(ctx);
+  CHECK(t.depth == 0);
+  CHECK(otherMapCalls() == 1);
+  // a later thread with the same id (the block has no exit callback) must not match it in the cache:
+  // the cache never took it, so this lookup goes to apiThread again
+  { ApiScope s(Api::Map, false, &ctx); }
+  CHECK(t.depth == 0);
+  return failures;
+}
+
+static void
+runChild(const char *name, bool fail_alloc) {
+  std::fflush(stdout);
+  pid_t pid = fork();
+  if (pid == 0)
+    std::_Exit(fallbackCase(fail_alloc) ? 1 : 0);
+  int status = 0;
+  waitpid(pid, &status, 0);
+  if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+    std::printf("FAIL %s fallback case\n", name);
+    failures++;
+  }
 }
 
 int
@@ -78,6 +122,9 @@ main() {
   ApiThread *b5 = &(fake::tid = 5, apiThread());
   apiThreadsDetach();
   CHECK(b5->tid.load() == 0);
+
+  runChild("FlsSetValue", false);
+  runChild("FlsAlloc", true);
 
   std::printf(failures ? "%d failure(s)\n" : "ok\n", failures);
   return failures ? 1 : 0;
