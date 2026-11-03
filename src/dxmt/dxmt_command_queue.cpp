@@ -358,14 +358,24 @@ CommandQueue::WaitForFinishThread() {
       }
     }
 
-    // gw2 (#3): the GPU execution spans of all the chunk's buffers for the GPU line: those the
-    // present split committed first (earlier on this queue, so done or about to be), then the last
-    if (gw2::statsEnabled()) {
-      for (auto &split : chunk.split_cmdbufs) {
-        if (split.status() <= WMTCommandBufferStatusScheduled)
-          split.waitUntilCompleted();
-        gpu_collector.add(chunk.frame_, split.gpuStartTime(), split.gpuEndTime());
+    // gw2 (#10): the buffers the present split committed first (earlier on this queue, so done or
+    // about to be), checked for a GPU error as the last one is. The status is the read the GPU line
+    // needed already; a buffer still pending is waited for here, never on the encode thread.
+    // gw2 (#3): their GPU execution spans, then the last buffer's, for the GPU line
+    bool stats = gw2::statsEnabled();
+    for (size_t i = 0; i < chunk.split_cmdbufs.size(); i++) {
+      auto &split = chunk.split_cmdbufs[i];
+      auto status = split.status();
+      if (status <= WMTCommandBufferStatusScheduled) {
+        split.waitUntilCompleted();
+        status = split.status();
       }
+      if (unlikely(status == WMTCommandBufferStatusError))
+        ReportSplitError(chunk, internal_seq, i, split);
+      if (stats)
+        gpu_collector.add(chunk.frame_, split.gpuStartTime(), split.gpuEndTime());
+    }
+    if (stats) {
       uint64_t gpu_end = chunk.attached_cmdbuf.gpuEndTime();
       gpu_collector.add(chunk.frame_, chunk.attached_cmdbuf.gpuStartTime(), gpu_end);
       gw2::presentGpuEnd(chunk.frame_, gpu_end); // gw2 (#7): PRESENT's aftergpu
@@ -387,6 +397,29 @@ CommandQueue::WaitForFinishThread() {
   }
   TRACE("finishing thread gracefully terminates");
   return 0;
+}
+
+// gw2 (#10): the line for a GPU error in a split-off buffer, with the chunk's frame and sequence id,
+// then the buffer's logs, as for the chunk's last buffer. A GPU fault tends to repeat every frame,
+// so the first 8 are logged, then at most one line a second, each with the count of those not logged.
+void
+CommandQueue::ReportSplitError(CommandChunk &chunk, uint64_t seq, size_t index, WMT::CommandBuffer cmdbuf) {
+  split_errors_++;
+  auto now = clock::now();
+  if (split_errors_ > 8 && now - split_error_last_line_ < std::chrono::seconds(1))
+    return;
+  uint64_t not_logged = split_errors_ - split_errors_logged_ - 1;
+  split_errors_logged_ = split_errors_;
+  split_error_last_line_ = now;
+  ERR("Device error at frame ", chunk.frame_, " (chunk ", seq, ", split-off buffer ", index + 1, " of ",
+      chunk.split_cmdbufs.size(), ", split error ", split_errors_, ", ", not_logged, " not logged since the last line): ",
+      cmdbuf.error().description().getUTF8String());
+  if (auto logs = cmdbuf.logs()) {
+    for (auto &log : logs.elements()) {
+      ERR("Frame ", chunk.frame_, " (chunk ", seq, ", split-off buffer ", index + 1, "): ",
+          log.description().getUTF8String());
+    }
+  }
 }
 
 void CommandQueue::Retain(uint64_t seq, Allocation* allocation) {

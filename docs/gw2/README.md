@@ -10,7 +10,7 @@ GW2 on Mac sets `DXMT_LOG_PATH` to its `work/logs`, so the lines below land in
 
 | Variable | Default | What it does | Off restores |
 |---|---|---|---|
-| `DXMT_STATS` | on | The 2 s statistics lines (`STATS`, `STATS2`, `PACE`, `GPU`, the sections), `HITCH` lines, the startup line, and all their measuring (the fork's timers, the `nextDrawable` timer, the present-branch counts, keeping split-off command buffers until they complete) | none of it, and no measuring beyond upstream's frame statistics |
+| `DXMT_STATS` | on | The 2 s statistics lines (`STATS`, `STATS2`, `PACE`, `GPU`, the sections), `HITCH` lines, the startup line, and all their measuring (the fork's timers, the `nextDrawable` timer, the present-branch counts, the split-off command buffers' GPU timestamps) | none of it, and no measuring beyond upstream's frame statistics |
 | `DXMT_HITCH_MS` | 50 | A `HITCH` line for a Present-to-Present interval (game's render thread) at least this long; `0` turns them off | — |
 | `DXMT_PRESENT_SPLIT` | on | Commit the frame's command buffer before `nextDrawable` and present from a new one | the present in the frame's last buffer |
 | `DXMT_DISPLAY_SYNC` | on | A present with a sync interval uses `CAMetalLayer`'s vsync (`displaySyncEnabled`); a minimum duration only for intervals over one refresh, half a refresh short | DXMT's own pacing (minimum duration of exactly one refresh, display sync off) |
@@ -53,7 +53,7 @@ Averages are per frame over the 2 s window; times are ms.
 | Field | Meaning |
 |---|---|
 | `fps`, `ms` | Present-to-present on the **encode thread**, not the game's own Present interval |
-| `cb` | Command buffers committed per frame (chunks; the split present buffer isn't counted) |
+| `cb` | Chunks committed per frame. A chunk the present split cut has two Metal command buffers, so Metal's count is `cb` + `split`; `GPU buffers` counts every one, the split-off buffers included |
 | `rp` | Render passes per frame; `+ merged` = passes the optimizer merged away |
 | `clear` | Clear passes that weren't folded into a render pass |
 | `split` | Present splits per frame (`DXMT_PRESENT_SPLIT`) |
@@ -83,7 +83,7 @@ All are written right after `STATS`, from the same window.
 | `GPU` | `gpuspan` | Per frame, the union of the GPU execution spans (`GPUStartTime`..`GPUEndTime`) of **all** of the frame's command buffers on this device's queue, the ones the present split committed included, avg/max ms over the complete frames. A span union, not the GPU's active time; never compare it with Instruments' fragment/vertex busy time. `unavailable` when no frame in the window was complete |
 | | `gpugap` | The gap between one complete frame's last GPU end and the next complete frame's first GPU start, avg/max ms over the positive gaps (frames that overlap count as no gap); `0.00/0.0` if every pair overlapped, `unavailable` without two consecutive complete frames. Gaps are taken on the finish thread, so the one across two windows counts too |
 | | `frames`, `incomplete` | Complete frames (every buffer had timestamps) and frames with a buffer without timestamps; incomplete frames are left out of `gpuspan` and `gpugap` |
-| | `buffers`, `missing`, `dropped` | Command buffers per frame (all frames), buffers without timestamps, and (only if non-zero) frames the queue's bounded handoff (1024) dropped before the line was written |
+| | `buffers`, `missing`, `dropped` | Metal command buffers per frame (all frames; the split-off ones included, about STATS `cb` + `split`), buffers without timestamps, and (only if non-zero) frames the queue's bounded handoff (1024) dropped before the line was written |
 | sections | | A feature's own line, `<NAME> k=v …` (see below) |
 
 Sections: a feature registers a function with `gw2::SectionRegistrar` (`src/dxmt/dxmt_gw2_stats.hpp`) that returns its part of the window; each non-empty one is logged as its own line after `GPU`. A feature that adds a section documents it here.
@@ -120,6 +120,7 @@ Sections: a feature registers a function with `gw2::SectionRegistrar` (`src/dxmt
 | `Residency: one residency set on (DXMT_RESIDENCY_SET=1), attached to this device's queue: N allocations[, X MB] resident. …` | Once per device (command queue): the set is attached; its size at that moment (MB only with `DXMT_STATS` on). When a device's queue is destroyed with the set on, it first waits for its committed command buffers, so their resources stay in the set until the GPU is done with them |
 | `Residency: off (DXMT_RESIDENCY_SET=0): a useResource per resource and encoder, as upstream` | Once per device, when switched off |
 | `Residency: off: residency sets need macOS 15 …`, `Residency: off: newResidencySet failed (…) …`, `Residency: off for this device: the set belongs to another Metal device …` | Warnings: the set couldn't start (once per process) or a device on another Metal device (once per device); `useResource` as upstream |
+| `Device error at frame F (chunk S, split-off buffer i of n, split error k, m not logged since the last line): <error>` | An error (`MTLCommandBufferStatusError`) in a command buffer the present split committed off chunk `S` of frame `F` (#10), found by the finish thread, which checks every split-off buffer when its chunk completes, with `DXMT_STATS` on or off. Followed by the buffer's logs, `Frame F (chunk S, split-off buffer i): <log>`, if it has any. The first 8 are logged, then at most one a second; `k` counts all of them since the device started, `m` those left out since the previous line. The chunk's last buffer keeps upstream's `Device error at frame F: <error>` |
 
 ### Render thread priority
 
