@@ -122,6 +122,7 @@ Sections: a feature registers a function with `gw2::SectionRegistrar` (`src/dxmt
 | `Timestamp queries: exact\|estimate\|boundary (DXMT_TIMESTAMP_MODE): …` | Once per process, when the first immediate context is created: the mode in effect and what it does (a warning before it for a value that isn't `exact`, `estimate`, `boundary` or `0`) |
 | `Timestamp queries: the first query End in M mode kept its pass open[ and requested no commit]` | Once per process, the first time `estimate` or `boundary` handles a timestamp or timestamp-disjoint `End` |
 | `Map fast path: on (DXMT_MAP_FAST): …` | Once per device, when `DXMT_MAP_FAST` is on (the default) |
+| `Metal shader cache: <path> (Metal fixed it before DXMT loaded: …)` | Once per process (`dxgi.dll` load), unless `DXMT_USE_DEFAULT_METAL_CACHE=1` (#46). Replaces upstream's `Failed to set Metal cache path, fallback to system default`. Metal fixes its shader cache path at its first device creation, and Wine's display code (winemac's GPU enumeration) creates Metal devices in every GUI process before `dxgi.dll` loads, so DXMT's own `dxmt/<exe>/com.apple.metal` can't take. The line gives the path Metal really uses (bridge call 152, `MTLGetShaderCachePath`): for GW2 on Mac, `$(getconf DARWIN_USER_CACHE_DIR)com.codeweavers.CrossOver.wineloader/com.apple.metal`, keyed by the Wine loader's bundle ID and shared by every process of the engine. That cache persists across sessions and grows |
 | `Pipeline binds: skip rebind on (DXMT_SKIP_REBIND): …`, `Pipeline binds: skip rebind off (DXMT_SKIP_REBIND=0): …` | Once per process, when the first encoding context is created |
 | `Pipeline binds: skipped the first bind of a pipeline already bound in its encoder` | Once per process, the first time `DXMT_SKIP_REBIND` leaves a bind out |
 | `Residency: one residency set on (DXMT_RESIDENCY_SET=1), attached to this device's queue: N allocations[, X MB] resident. …` | Once per device (command queue): the set is attached; its size at that moment (MB only with `DXMT_STATS` on). When a device's queue is destroyed with the set on, it first waits for its committed command buffers, so their resources stay in the set until the GPU is done with them |
@@ -292,7 +293,8 @@ thread waits in `GetPipeline` when the draw that needs a pipeline is encoded bef
 pipeline is built. A frame with such waits is a hitch DXMT causes.
 
 `COMPILE variants= air=hit/miss pso=hit/miss built= failed= build=shader:ms/max pipeline:ms/max
-queue=now/max threads= wait=Nx ms/max slow= [archive=hit/miss added= queued= unflushed= addfailed= capped=]`
+queue=now/max threads= wait=Nx ms/max slow= [waitcause=queued:N/ms,variantq:N/ms,variant:N/ms,building:N/ms[,other:N/ms]
+[archbusy=N]] [archive=hit/miss added= queued= unflushed= addfailed= capped=]`
 
 Counts are **totals in the 2 s window**; the `COMPILE frame=` line below has them per frame. Times are ms. Without `DXMT_STATS` nothing is counted or timed (no clock reads), except the count of built pipelines that `DXMT_PSO_FLUSH_EVERY` needs.
 
@@ -307,10 +309,14 @@ Counts are **totals in the 2 s window**; the `COMPILE frame=` line below has the
 | `threads` | Compile workers (the pool starts with 2 and grows while all of them are busy) |
 | `wait` | The encode thread's waits in `GetPipeline` for a pipeline that wasn't ready: count, total ms, max ms. A ready pipeline costs no wait and isn't counted |
 | `slow` | Frames whose waits reached `DXMT_COMPILE_WAIT_MS` |
+| `waitcause` | (#46) Only in a window with waits: the same waits by what the waited-for pipeline task was doing when the wait started, count / total ms. `queued`: submitted, no worker had started it (behind other compile tasks). `variantq`: started, parked on its vertex or pixel shader variant, and that variant was still queued. `variant`: parked on a variant that was compiling (or between the two). `building`: inside Metal's pipeline build (`newRenderPipelineState`/`newComputePipelineState`). `other`: not classified (submitted while `DXMT_STATS` was off, or done but not yet flagged); shown only when non-zero. The counts add up to `wait` |
+| `archbusy` | (#46) Only with `DXMT_PSO_ARCHIVE=1`: waits that began while PSO archive adds were still queued on the unix side (each add compiles the pipeline again for the archive) |
 | `archive` | Only with `DXMT_PSO_ARCHIVE=1`: pipelines found in earlier sessions' archives / built without a hit in the window, pipelines added to this session's archive in the window, adds still queued, adds not yet serialized, adds that failed and pipelines not added because the session reached 8192 (both since start) |
 
 **`COMPILE frame=N wait=Nx ms/max queue=Q variants= air=hit/miss pso=hit/miss built= failed=
-build=shader:ms pipeline:ms [dropped=D]`** (with `DXMT_STATS`): a frame whose encode-thread
+build=shader:ms pipeline:ms cause=queued:N,variantq:N,variant:N,building:N,other:N longest=<cause>
+lead:ms queue:ms parked:ms build:ms varq:ms varc:ms depth:N archq:N [dropped=D]`** (with
+`DXMT_STATS`): a frame whose encode-thread
 waits in `GetPipeline` added up to at least `DXMT_COMPILE_WAIT_MS` (2 ms): their count, total
 and longest wait, and the compile queue when the next frame's encoding started. `variants` to
 `build` are the section's fields, counted on all threads while the encode thread was on this
@@ -320,6 +326,23 @@ game; the counts say what was compiling during the hitch, not which draw asked f
 most one line per 200 ms; `dropped` = qualifying frames since the last line that weren't logged
 (`slow` in the section counts them all). The line is written when the encode thread starts the
 next frame. Nothing is skipped: the draw still waits for its pipeline.
+
+`cause` and `longest` (#46): the frame's waits by cause (as `waitcause`), and the timeline of its
+longest wait's pipeline task, ms, `-` where not known:
+
+| Field | Meaning |
+|---|---|
+| `lead` | From the pipeline's submission (on the render thread, when its draw was recorded) to the start of the wait: how much head start the compile had |
+| `queue` | From submission until a worker first started the task |
+| `parked` | Time the task spent parked on its shader variant |
+| `build` | Metal's pipeline build (0 or close to it when Metal's own shader cache has it) |
+| `varq`, `varc` | The variant it was last parked on: its time in the queue, and its compile (AIR cache lookup or airconv, `newLibrary`, `newFunction`) |
+| `depth` | Compile tasks submitted and not finished when the wait started |
+| `archq` | PSO archive adds queued when the wait started (`DXMT_PSO_ARCHIVE=1` only) |
+
+The stamps (#46) cost one clock read per task submission, start, park, build and completion, and
+only with `DXMT_STATS`; a wait also reads the archive's counters once (a unix call) when the
+archives are on.
 
 **PSO archives** (`DXMT_PSO_ARCHIVE=1`, off by default). Metal binary archives
 (`MTLBinaryArchive`), managed on the unix side of the bridge (`src/winemetal/unix/pso_archive.c`,

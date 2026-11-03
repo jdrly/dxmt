@@ -7,6 +7,7 @@
 #include "d3d11_input_layout.hpp"
 #include "sha1/sha1_util.hpp"
 #include "log/log.hpp"
+#include "dxmt_gw2_compile.hpp"
 #include <variant>
 
 struct MTL_COMPILED_SHADER {
@@ -187,6 +188,7 @@ using ShaderVariant =
 
 class ThreadpoolWork {
 public:
+  gw2::CompileTrace compile_trace; // gw2 (#46): stamped by the scheduler and the task
   virtual ~ThreadpoolWork() {}
   virtual ThreadpoolWork *RunThreadpoolWork() = 0;
   virtual bool GetIsDone() = 0;

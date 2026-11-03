@@ -49,7 +49,7 @@ public:
 
   void GetPipeline(MTL_COMPILED_GRAPHICS_PIPELINE *pPipeline) final {
     if (!ready_.load(std::memory_order_acquire)) {
-      gw2::CompileWaitScope wait; // gw2 (#5): the encode thread waits for this compile
+      gw2::CompileWaitScope wait(&compile_trace); // gw2 (#5, #46): the encode thread waits for this compile
       ready_.wait(false, std::memory_order_acquire);
     }
     *pPipeline = {state_};
@@ -100,6 +100,7 @@ public:
     info.immutable_vertex_buffers = (1 << 16) | (1 << 29) | (1 << 30);
     info.immutable_fragment_buffers = (1 << 29) | (1 << 30);
 
+    gw2::compileTraceBuild(compile_trace); // gw2 (#46)
     auto t0 = gw2::compileClock(); // gw2 (#5)
     state_ = device_->GetMTLDevice().newRenderPipelineState(info, err);
     gw2::compilePipelineBuilt(t0, state_ != nullptr); // gw2 (#5)
@@ -158,7 +159,7 @@ public:
 
   void GetPipeline(MTL_COMPILED_COMPUTE_PIPELINE *pPipeline) final {
     if (!ready_.load(std::memory_order_acquire)) {
-      gw2::CompileWaitScope wait; // gw2 (#5): the encode thread waits for this compile
+      gw2::CompileWaitScope wait(&compile_trace); // gw2 (#5, #46): the encode thread waits for this compile
       ready_.wait(false, std::memory_order_acquire);
     }
     *pPipeline = {state_};
@@ -181,6 +182,7 @@ public:
     info.tgsize_is_multiple_of_sgwidth = tgsize_is_multiple_of_sgwidth;
     info.immutable_buffers = (1 << 29) | (1 << 30);
 
+    gw2::compileTraceBuild(compile_trace); // gw2 (#46)
     auto t0 = gw2::compileClock(); // gw2 (#5)
     state_ = device_->GetMTLDevice().newComputePipelineState(info, err);
     gw2::compilePipelineBuilt(t0, state_ != nullptr); // gw2 (#5)
