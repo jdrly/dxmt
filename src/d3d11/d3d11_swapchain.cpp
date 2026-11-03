@@ -12,6 +12,7 @@
 #include "dxmt_gw2_compile.hpp"
 #include "dxmt_gw2_present.hpp"
 #include "dxmt_gw2_map.hpp"
+#include "dxmt_gw2_rebind.hpp"
 #include "dxmt_gw2_stats.hpp"
 #include "dxmt_gw2_timestamp.hpp"
 #include "dxmt_presenter.hpp"
@@ -1047,7 +1048,7 @@ public:
         "DXMT_BG_POLICY={} DXMT_RENDER_THREAD_PRIORITY={} DXMT_PSO_BLEND_HASH={} DXMT_PSO_MRU={} "
         "DXMT_PSO_TOPOLOGY_KEEP={} DXMT_CHUNKS={} DXMT_MAX_FRAME_LATENCY={} DXMT_COMPILE_WAIT_MS={} "
         "DXMT_PSO_ARCHIVE={} DXMT_PSO_ARCHIVE_DIR={} DXMT_PSO_FLUSH_EVERY={} DXMT_PROMOTE_FLUSH_MIN={} "
-        "DXMT_PROMOTE_FLUSH_MS={} DXMT_TIMESTAMP_MODE={} DXMT_MAP_FAST={} cpus={} refresh={}",
+        "DXMT_PROMOTE_FLUSH_MS={} DXMT_TIMESTAMP_MODE={} DXMT_MAP_FAST={} DXMT_SKIP_REBIND={} cpus={} refresh={}",
         gw2::hitchMs(), int(queue.argument_encoding_ctx.presentSplit()), int(display_sync_vsync_), deadline,
         int(cap_limiter_),
         // read as d3d11_resource_helper.cpp and RaiseRenderThreadPriority read them
@@ -1059,6 +1060,7 @@ public:
         gw2::promoteFlushMin(), gw2::promoteFlushMs(), // gw2 (#4): as the immediate context parsed them
         gw2::timestampModeName(gw2::timestampMode()), // gw2 (#24)
         int(gw2::mapFast()),                          // gw2 (#25)
+        int(gw2::skipRebind()),                       // gw2 (#30)
         GetActiveProcessorCount(ALL_PROCESSOR_GROUPS), refresh
     ));
   }

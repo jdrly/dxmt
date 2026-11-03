@@ -29,6 +29,7 @@ dxmt_src = [
   'dxmt_gw2_cmds.cpp',
   'dxmt_gw2_timestamp.cpp',
   'dxmt_gw2_map.cpp',
+  'dxmt_gw2_rebind.cpp',
 ]
 
 dxmt_shaders = [
