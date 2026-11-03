@@ -1,5 +1,5 @@
 // gw2 (#43): host-side test of the logger's split for Wine's debug output (splitLogLine,
-// writeWineLine). The fake below copies ntdll's __wine_dbg_output and append_output
+// forEachLogLine, writeWineLine). The fake below copies ntdll's __wine_dbg_output and append_output
 // (dlls/ntdll/thread.c, CX 26.3): a 1020-byte per-thread buffer that raises STATUS_BUFFER_OVERFLOW
 // for a longer line. Not part of the DLL build; run it on the Mac:
 //
@@ -9,6 +9,7 @@
 #include "log_split.hpp"
 #include <cstdio>
 #include <cstring>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -143,7 +144,8 @@ main() {
   fake_wine::reset();
   auto wine = [&](const std::string &line, std::vector<std::string> *pieces = nullptr) {
     std::string adjusted = prefix + line + "\n";
-    writeWineLine(prefix.c_str(), line, adjusted, [&](const std::string &piece) {
+    bool hasNul = line.find('\0') != std::string::npos;
+    writeWineLine(prefix.c_str(), line, adjusted, hasNul, [&](const std::string &piece) {
       if (pieces)
         pieces->push_back(piece);
       fake_wine::dbg_output(piece.c_str());
@@ -154,7 +156,9 @@ main() {
   {
     std::string line = "hello", adjusted = prefix + line + "\n";
     const std::string *seen = nullptr;
-    writeWineLine(prefix.c_str(), line, adjusted, [&](const std::string &piece) { seen = &piece; });
+    writeWineLine(prefix.c_str(), line, adjusted, false, [&](const std::string &piece) {
+      seen = &piece;
+    });
     CHECK(seen == &adjusted);
   }
 
@@ -183,6 +187,26 @@ main() {
   wine(std::string(5000, 'z'));
   CHECK(!fake_wine::overflow);
   CHECK(fake_wine::out_pos == 0);
+
+  // forEachLogLine gives the lines std::getline gave, and finds the NULs in them
+  for (const std::string &m : {std::string(""), std::string("a"), std::string("a\n"),
+                               std::string("\n"), std::string("\n\n"), std::string("a\n\nb"),
+                               std::string("a\nb\n"), std::string("x\0y\nz", 5),
+                               std::string("\0\n\0", 3)}) {
+    std::vector<std::string> expect, got;
+    std::vector<bool> nuls;
+    std::stringstream stream(m);
+    std::string line;
+    while (std::getline(stream, line, '\n'))
+      expect.push_back(line);
+    forEachLogLine(m, [&](const std::string &l, bool hasNul) {
+      got.push_back(l);
+      nuls.push_back(hasNul);
+    });
+    CHECK(got == expect);
+    for (size_t i = 0; i < got.size(); i++)
+      CHECK(nuls[i] == (got[i].find('\0') != std::string::npos));
+  }
 
   if (failures) {
     std::printf("%d failure(s)\n", failures);

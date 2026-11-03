@@ -8,6 +8,7 @@
  * See <https://github.com/doitsujin/dxvk/blob/master/LICENSE>
  */
 
+#include <cstring>
 #include <iostream>
 #include <utility>
 
@@ -71,30 +72,28 @@ void Logger::emitMsg(LogLevel level, const std::string &message) {
         m_fileStream = std::ofstream(str::topath(path.c_str()).c_str());
     }
 
-    std::stringstream stream(message);
-    std::string line;
+    // gw2 (#43): one pass finds the lines and their NULs (forEachLogLine), and a line is formatted
+    // without stringstreams
+    forEachLogLine(message, [&](const std::string &line, bool hasNul) {
+      std::string adjusted;
+      adjusted.reserve(strlen(prefix) + line.size() + 1);
+      adjusted += prefix;
+      adjusted += line;
+      adjusted += '\n';
 
-    while (std::getline(stream, line, '\n')) {
-      std::stringstream outstream;
-      outstream << prefix << line << std::endl;
-
-      std::string adjusted = outstream.str();
-
-      if (!adjusted.empty()) {
-        // gw2 (#43): Wine raises 0x80000005 for a line over its 1020-byte buffer; a long line (or
-        // one with a NUL) goes in pieces
-        if (m_wineLogOutput)
-          writeWineLine(prefix, line, adjusted, [this](const std::string &piece) {
-            m_wineLogOutput(piece.c_str());
-          });
-        else
-          std::cerr << adjusted;
-      }
+      // Wine raises 0x80000005 for a line over its 1020-byte buffer; a long line (or one with a
+      // NUL) goes in pieces
+      if (m_wineLogOutput)
+        writeWineLine(prefix, line, adjusted, hasNul, [this](const std::string &piece) {
+          m_wineLogOutput(piece.c_str());
+        });
+      else
+        std::cerr << adjusted;
 
       // the file keeps the whole line
       if (m_fileStream)
         m_fileStream << adjusted;
-    }
+    });
   }
 }
 

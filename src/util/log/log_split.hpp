@@ -49,14 +49,34 @@ splitLogLine(const std::string &prefix, const std::string &text, F &&out,
   } while (pos < text.size());
 }
 
+// Calls f(line, hasNul) for each line of `message`, the lines std::getline(stream, line, '\n')
+// gives (none for an empty message, none after a final '\n'). The scan for '\n' also notes a NUL,
+// so the logger needs no separate pass for it.
+template <typename F>
+void
+forEachLogLine(const std::string &message, F &&f) {
+  std::string line;
+  size_t start = 0;
+  while (start < message.size()) {
+    size_t end = start;
+    bool hasNul = false;
+    for (; end < message.size() && message[end] != '\n'; end++)
+      hasNul |= message[end] == '\0';
+    line.assign(message, start, end - start);
+    f(line, hasNul);
+    start = end + 1;
+  }
+}
+
 // Hands Wine one log line: `adjusted` (prefix + line + '\n') itself when it fits and has no NUL,
 // the common case with no copy; otherwise splitLogLine's pieces of `line` with each NUL written as
 // "\0", since a NUL would hide a piece's '\n' from Wine and leave the piece pending in its buffer.
+// `hasNul` comes from forEachLogLine.
 template <typename F>
 void
-writeWineLine(const char *prefix, const std::string &line, const std::string &adjusted, F &&out,
-              size_t maxBytes = kWineLogPieceMax) {
-  if (adjusted.size() <= maxBytes && adjusted.find('\0') == std::string::npos) {
+writeWineLine(const char *prefix, const std::string &line, const std::string &adjusted,
+              bool hasNul, F &&out, size_t maxBytes = kWineLogPieceMax) {
+  if (adjusted.size() <= maxBytes && !hasNul) {
     out(adjusted);
     return;
   }
