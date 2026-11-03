@@ -38,6 +38,7 @@
 #include <format>
 #include <algorithm>
 #include <mutex>
+#include <utility>
 #include <thread>
 
 /**
@@ -183,31 +184,55 @@ bgReasonCode(BgReason r) {
   return "none";
 }
 
-std::atomic<uint64_t> g_bg_presents{0};    // Presents that went through the throttle
-std::atomic<uint64_t> g_bg_throttled{0};   // of them, with the throttle engaged
-std::atomic<uint64_t> g_bg_engaged_ns{0};  // time between Presents while engaged
-std::atomic<uint64_t> g_bg_sleep_ns{0};    // time slept
-std::atomic<uint64_t> g_bg_sleep_max_ns{0};
-std::atomic<uint32_t> g_bg_fps{0};         // the rate in effect at the last Present
-std::atomic<uint32_t> g_bg_reason{0};      // the last reason it engaged for (BgReason)
+// gw2 (#19): one sample per Present, published under one lock after the Present's sleep and
+// drained by the section under the same lock, so a window's counts and sleep belong together
+// (throttled never exceeds presents, and bgsleep averages over the same window's Presents).
+struct BgSample {
+  uint64_t presents = 0;     // Presents that went through the throttle
+  uint64_t throttled = 0;    // of them, with the throttle engaged
+  uint64_t engaged_ns = 0;   // time between Presents while engaged
+  uint64_t sleep_ns = 0;     // time slept
+  uint64_t sleep_max_ns = 0;
+};
+
+dxmt::mutex g_bg_mutex;
+BgSample g_bg_sample;                  // the current window's sums; reset by the section
+uint32_t g_bg_fps = 0;                 // the rate in effect at the last Present (kept across windows)
+BgReason g_bg_reason = BgReason::None; // the last reason it engaged for (kept across windows)
+
+void
+bgPublish(bool throttled, BgReason reason, uint32_t fps, uint64_t engaged_ns, uint64_t sleep_ns) {
+  std::lock_guard<dxmt::mutex> lock(g_bg_mutex);
+  g_bg_sample.presents++;
+  g_bg_sample.engaged_ns += engaged_ns;
+  g_bg_sample.sleep_ns += sleep_ns;
+  g_bg_sample.sleep_max_ns = std::max(g_bg_sample.sleep_max_ns, sleep_ns);
+  g_bg_fps = fps;
+  if (throttled) {
+    g_bg_sample.throttled++;
+    g_bg_reason = reason;
+  }
+}
 
 std::string
 BgSection(double window_ms, uint32_t) {
-  uint64_t presents = g_bg_presents.exchange(0, std::memory_order_relaxed);
-  uint64_t throttled = g_bg_throttled.exchange(0, std::memory_order_relaxed);
-  uint64_t engaged_ns = g_bg_engaged_ns.exchange(0, std::memory_order_relaxed);
-  uint64_t sleep_ns = g_bg_sleep_ns.exchange(0, std::memory_order_relaxed);
-  uint64_t sleep_max_ns = g_bg_sleep_max_ns.exchange(0, std::memory_order_relaxed);
-  uint32_t fps = g_bg_fps.load(std::memory_order_relaxed);
+  BgSample s;
+  uint32_t fps;
+  BgReason reason;
+  {
+    std::lock_guard<dxmt::mutex> lock(g_bg_mutex);
+    s = std::exchange(g_bg_sample, BgSample{});
+    fps = g_bg_fps;
+    reason = g_bg_reason;
+  }
   // Only a window in which the throttle engaged gets a line: it marks that window's STATS as
   // throttled, not game performance.
-  if (!throttled && !engaged_ns && !fps)
+  if (!s.throttled && !s.engaged_ns && !fps)
     return {};
-  double share = window_ms > 0 ? std::min(100.0, engaged_ns / 1e6 / window_ms * 100) : 0;
+  double share = window_ms > 0 ? std::min(100.0, s.engaged_ns / 1e6 / window_ms * 100) : 0;
   return std::format(
-      "throttled={}/{} share={:.0f}% bgsleep={:.1f}/{:.1f} fps={} reason={} policy={}", throttled, presents, share,
-      presents ? sleep_ns / 1e6 / presents : 0.0, sleep_max_ns / 1e6, fps,
-      bgReasonCode(BgReason(g_bg_reason.load(std::memory_order_relaxed))),
+      "throttled={}/{} share={:.0f}% bgsleep={:.1f}/{:.1f} fps={} reason={} policy={}", s.throttled, s.presents,
+      share, s.presents ? s.sleep_ns / 1e6 / s.presents : 0.0, s.sleep_max_ns / 1e6, fps, bgReasonCode(reason),
       bgConfig().policy == BgPolicy::Occlusion ? "occlusion" : "focus"
   );
 }
@@ -1353,20 +1378,15 @@ public:
 
     bool stats = gw2::statsEnabled();
     int64_t t0 = 0;
+    uint64_t engaged_ns = 0;
     if (stats) {
       t0 = gw2::nowNs();
-      g_bg_presents.fetch_add(1, std::memory_order_relaxed);
       // The interval since the previous Present (its sleep included) ran under that Present's
       // decision: engaged time when it throttled.
       if (bg_last_engaged_ && bg_last_ns_)
-        g_bg_engaged_ns.fetch_add(uint64_t(t0 - bg_last_ns_), std::memory_order_relaxed);
+        engaged_ns = uint64_t(t0 - bg_last_ns_);
       bg_last_ns_ = t0;
       bg_last_engaged_ = fps != 0;
-      g_bg_fps.store(fps, std::memory_order_relaxed);
-      if (fps) {
-        g_bg_throttled.fetch_add(1, std::memory_order_relaxed);
-        g_bg_reason.store(uint32_t(code), std::memory_order_relaxed);
-      }
     }
 
     bool slept = false;
@@ -1380,13 +1400,9 @@ public:
       }
     }
 
-    if (stats && slept) {
-      uint64_t ns = uint64_t(gw2::nowNs() - t0);
-      g_bg_sleep_ns.fetch_add(ns, std::memory_order_relaxed);
-      uint64_t prev = g_bg_sleep_max_ns.load(std::memory_order_relaxed);
-      while (ns > prev && !g_bg_sleep_max_ns.compare_exchange_weak(prev, ns, std::memory_order_relaxed))
-        ;
-    }
+    // gw2 (#19): the whole Present, its sleep included, goes into one window's sample.
+    if (stats)
+      bgPublish(fps != 0, code, fps, engaged_ns, slept ? uint64_t(gw2::nowNs() - t0) : 0);
   }
 
   // gw2 (#1): what the throttle decided on, for its transition line.

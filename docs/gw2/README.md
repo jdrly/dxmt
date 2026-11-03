@@ -185,8 +185,11 @@ subresources: a pass that writes one mip or slice while reading another also sho
 
 `BG throttled=T/N share=S% bgsleep=avg/max fps=F reason=R policy=P`, only for a 2 s window in
 which the background throttle engaged. **A `BG` line marks that window's `STATS`, `PACE` and `GPU`
-lines as throttled: they aren't game performance.** From process-wide counters fed by every
-swapchain's throttle on the game's render thread.
+lines as throttled: they aren't game performance.** From one process-wide sample fed by every
+swapchain's throttle on the game's render thread: each Present adds its counts and its sleep under
+one lock after it slept, and the section drains the sample under the same lock (#19), so
+`throttled` never exceeds the Presents and `bgsleep` averages over the same window's Presents. A
+Present falls into the window in which its sleep ended.
 
 | Field | Meaning |
 |---|---|
