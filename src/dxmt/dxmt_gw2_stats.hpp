@@ -12,10 +12,18 @@
 //   Nested entry points (Flush -> Flush1) count once. A thread that presents keeps its time per
 //   Present-to-Present interval (takeThreadInterval); every other thread's time is pooled
 //   (otherDrain), so worker threads never land in the render thread's numbers.
+//   gw2 (#28): that per-thread state (nesting depth, sampler, interval) is an ApiThread, never a
+//   `thread_local`: mingw-GCC's thread_local is emulated TLS (__emutls_get_address ->
+//   pthread_getspecific -> TlsGetValue, GetLastError/SetLastError), about 0.1 us an access under
+//   Rosetta, which cost the render thread 2.3 ms a frame at ~21,000 scopes. A context keeps the
+//   last ApiThread that entered it (ApiThreadCache), checked by thread id; only a miss looks it up
+//   (FlsGetValue). Fiber-local, so a thread that runs D3D11 on several fibers has one block per fiber.
+//   If FlsAlloc or FlsSetValue fails, the thread keeps a block in a thread_local that is never cached.
 // - GPU spans: each command queue's finish thread hands its completed command buffers' GPU
 //   start/end, split-off buffers included, to that queue's GpuCollector; per frame, the union of
 //   those spans and the gap to the previous frame.
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <deque>
@@ -73,9 +81,48 @@ ApiTotals otherDrain();
 // from the top 4 bits: `(draw >> 28) == k`; ApiScope uses k = 0.
 uint32_t sampleDraw();
 
+// gw2 (#28): one thread's API-time state; the free functions above act on the calling thread's.
+// A thread takes a block on its first lookup and releases it when it exits (a fiber-local slot's
+// callback); a later thread may take it again. Blocks are never freed, so a pointer stays valid.
+struct ApiThread {
+  std::atomic<uint32_t> tid = 0; // the owning thread's id, 0 while released; written only by its owner
+                                 // (taking it) and its exit callback
+  std::atomic<bool> released = false; // set by the exit callback; cleared by the next thread taking it
+  bool cacheable = false; // owned through the fiber-local slot (released at exit); owner-only
+  int depth = 0;             // ApiScope nesting
+  uint32_t sample_state = 0; // draw()'s xorshift32 state, seeded from tid on first use
+  bool presenter = false;
+  ThreadInterval interval;
+
+  uint32_t draw();
+  void call(Api api);
+  void add(Api api, uint64_t ns);
+  void reset();
+};
+
+// The calling thread's ApiThread (one fiber-local lookup, FlsGetValue).
+ApiThread &apiThread();
+// At DLL_PROCESS_DETACH by FreeLibrary: frees the fiber-local slot, so its callback can't run after
+// the DLL is gone.
+void apiThreadsDetach();
+
+// gw2 (#28): the last ApiThread that used an object (a device context), so its entry points find
+// the calling thread's block with GetCurrentThreadId and a compare instead of a TLS lookup. Safe to
+// share between threads: a block's tid matches only its live owner (0 once released, and a new
+// owner sets its own), so a stale or racing pointer only costs a miss. Not covered: a thread killed
+// by TerminateThread (no exit callback) keeps its block, and a thread that reuses its id would hit it.
+class ApiThreadCache {
+public:
+  ApiThread &get();
+
+private:
+  std::atomic<ApiThread *> last_ = nullptr;
+};
+
 class ApiScope {
 public:
-  ApiScope(Api api, bool sampled);
+  // cache: where the entry point keeps its last ApiThread (nullptr: look the thread up)
+  ApiScope(Api api, bool sampled, ApiThreadCache *cache = nullptr);
   ~ApiScope();
   ApiScope(const ApiScope &) = delete;
   ApiScope &operator=(const ApiScope &) = delete;
@@ -87,8 +134,15 @@ public:
   draw() const {
     return draw_;
   }
+  // gw2 (#28): a new draw from this scope's thread, for a sampler of a call this scope didn't draw
+  // for (nested); only valid with stats on
+  uint32_t
+  newDraw() const {
+    return thread_->draw();
+  }
 
 private:
+  ApiThread *thread_ = nullptr; // null: stats off
   Api api_;
   int64_t t0_ = 0;
   uint32_t scale_ = 0; // 0: not timed
@@ -98,6 +152,9 @@ private:
 
 #define GW2_API_SCOPE(cat) ::dxmt::gw2::ApiScope gw2_api_scope_(::dxmt::gw2::Api::cat, false)
 #define GW2_API_SAMPLED(cat) ::dxmt::gw2::ApiScope gw2_api_scope_(::dxmt::gw2::Api::cat, true)
+// gw2 (#28): the same, finding the thread through an ApiThreadCache (a context's gw2_api_thread_)
+#define GW2_API_SCOPE_IN(cat, cache) ::dxmt::gw2::ApiScope gw2_api_scope_(::dxmt::gw2::Api::cat, false, &(cache))
+#define GW2_API_SAMPLED_IN(cat, cache) ::dxmt::gw2::ApiScope gw2_api_scope_(::dxmt::gw2::Api::cat, true, &(cache))
 
 int64_t nowNs();
 
