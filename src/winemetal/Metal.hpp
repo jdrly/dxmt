@@ -915,6 +915,18 @@ public:
     fenceOp(WMTRenderCommandUpdateFence, fence, after);
   }
 
+  // gw2 (#32 part 3): the resource goes into state's residency set (Metal 4 has no useResource)
+  void
+  useResource(Resource resource, WMTResourceUsage usage, WMTRenderStages stages) {
+    struct wmtcmd_render_useresource cmd;
+    cmd.type = WMTRenderCommandUseResource;
+    cmd.next.set(nullptr);
+    cmd.resource = resource;
+    cmd.usage = usage;
+    cmd.stages = stages;
+    submit(&cmd);
+  }
+
 private:
   template <typename T>
   void
@@ -983,6 +995,26 @@ private:
       cmd.fence = fence.handle;
       MTL4ComputeCommandEncoder_encodeCommands(handle, state, (const wmtcmd_base *)&cmd);
     }
+  }
+};
+
+// gw2 (#32 part 3): a Metal 4 compute encoder that takes today's blit packets, shaped like
+// BlitCommandEncoder (Metal 4 has no blit encoder)
+class MTL4BlitCommandEncoder : public MTL4ComputeCommandEncoder {
+public:
+  void
+  encodeCommands(const wmtcmd_blit_nop *cmd_head) {
+    encodeBlitCommands(cmd_head);
+  }
+
+  void
+  waitForFence(Fence fence) {
+    MTL4ComputeCommandEncoder::waitForFence(fence, true);
+  }
+
+  void
+  updateFence(Fence fence) {
+    MTL4ComputeCommandEncoder::updateFence(fence, true);
   }
 };
 

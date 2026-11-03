@@ -1,4 +1,5 @@
 #include "dxmt_gw2_mtl4_queue.hpp"
+#include "dxmt_gw2_residency.hpp"
 #include "dxmt_gw2_stats.hpp"
 #include "log/log.hpp"
 #include <algorithm>
@@ -12,6 +13,8 @@ namespace {
 
 // METAL4 window totals (2 s); maxima reset with the window
 std::atomic<uint64_t> g_commits{0}, g_max_buffers{0}, g_max_alloc_bytes{0}, g_slow{0}, g_errors{0};
+// part 3: the replays' counters (WMTMtl4BindingState)
+std::atomic<uint64_t> g_res_adds{0}, g_missed{0}, g_unsupported{0}, g_bytes_overflow{0}, g_blit_barriers{0};
 std::atomic<bool> g_any{false};
 
 void
@@ -26,16 +29,47 @@ metal4Section(double, uint32_t) {
   if (!g_any.load(std::memory_order_relaxed))
     return {};
   return std::format(
-      "commits={} buffers={} allocmb={:.2f} slow={} errors={}", g_commits.exchange(0, std::memory_order_relaxed),
-      g_max_buffers.exchange(0, std::memory_order_relaxed),
+      "commits={} buffers={} allocmb={:.2f} slow={} errors={} resadds={} missed={} unsupported={} bytesover={} "
+      "blitbar={}",
+      g_commits.exchange(0, std::memory_order_relaxed), g_max_buffers.exchange(0, std::memory_order_relaxed),
       g_max_alloc_bytes.exchange(0, std::memory_order_relaxed) / 1e6, g_slow.exchange(0, std::memory_order_relaxed),
-      g_errors.exchange(0, std::memory_order_relaxed)
+      g_errors.exchange(0, std::memory_order_relaxed), g_res_adds.exchange(0, std::memory_order_relaxed),
+      g_missed.exchange(0, std::memory_order_relaxed), g_unsupported.exchange(0, std::memory_order_relaxed),
+      g_bytes_overflow.exchange(0, std::memory_order_relaxed), g_blit_barriers.exchange(0, std::memory_order_relaxed)
   );
 }
 
 SectionRegistrar s_metal4("METAL4", &metal4Section);
 
+// part 3: buffers 31 (Metal's maximum, airconv's [[buffer(n)]] are below it), textures 32 (DXMT binds
+// textures through argument buffers; direct ones are internal passes'), no samplers (the same)
+WMT::Reference<WMT::MTL4ArgumentTable>
+newTable(WMT::Device device) {
+  WMTArgTableInfo info{};
+  info.max_buffers = WMT_MTL4_MAX_BUFFERS;
+  info.max_textures = 32;
+  info.max_samplers = 0;
+  WMT::Error err;
+  auto table = device.newArgumentTable(info, err);
+  if (!table)
+    Logger::warn(std::format(
+        "Metal 4: newArgumentTable failed ({})", err ? err.description().getUTF8String() : std::string("no error")
+    ));
+  return table;
+}
+
 } // namespace
+
+void
+metal4EncodeCounters(const WMTMtl4BindingState &state) {
+  if (!statsEnabled())
+    return;
+  g_res_adds.fetch_add(state.residency_adds, std::memory_order_relaxed);
+  g_missed.fetch_add(state.use_resource_dropped, std::memory_order_relaxed);
+  g_unsupported.fetch_add(state.unsupported, std::memory_order_relaxed);
+  g_bytes_overflow.fetch_add(state.bytes_overflow, std::memory_order_relaxed);
+  g_blit_barriers.fetch_add(state.blit_barriers, std::memory_order_relaxed);
+}
 
 Mtl4Queue::Mtl4Queue(WMT::Device device, uint32_t slots) : device_(device) {
   queue_ = device.newMTL4CommandQueue();
@@ -45,9 +79,18 @@ Mtl4Queue::Mtl4Queue(WMT::Device device, uint32_t slots) : device_(device) {
   slots_.resize(slots);
   for (auto &slot : slots_) {
     slot.allocator = device.newCommandAllocator();
-    if (!slot.allocator)
+    WMT::Error err;
+    slot.residency = device.newResidencySet(256, err);
+    if (!slot.allocator || !slot.residency)
       return; // valid() is false
   }
+  tables_.vertex = newTable(device);
+  tables_.fragment = newTable(device);
+  tables_.object = newTable(device);
+  tables_.mesh = newTable(device);
+  tables_.compute = newTable(device);
+  if (!tables_.vertex || !tables_.fragment || !tables_.object || !tables_.mesh || !tables_.compute)
+    return; // valid() is false
   // a command buffer per slot, and two spare for the present split: a failure here still leaves the
   // device on Metal 3 (nothing was committed yet); later ones are fatal (acquire)
   for (uint32_t i = 0; i < slots + 2; i++) {
@@ -126,6 +169,9 @@ Mtl4Queue::commit(uint64_t seq) {
   if (!commit)
     return;
   s.open = nullptr;
+  residencyBeforeCommit(); // gw2 (#29): the device set's pending adds and removes
+  s.residency.commit();    // what this chunk's packets named so far
+  commit->cmdbuf.useResidencySet(s.residency);
   commit->cmdbuf.end();
   commit->value = ++next_value_;
   s.commits.push_back(commit);
@@ -189,6 +235,9 @@ Mtl4Queue::retire(uint64_t seq) {
   for (auto *commit : s.commits)
     recycle(commit);
   s.commits.clear();
+  // nothing of the chunk runs any more: its allocations may leave (and be freed)
+  s.residency.removeAllAllocations();
+  s.residency.commit();
   // every command buffer that took memory from it has completed (wait), so it may be reset
   uint64_t bytes = s.allocator.reset();
   if (statsEnabled())

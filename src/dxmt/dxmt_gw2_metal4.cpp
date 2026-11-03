@@ -1,4 +1,5 @@
 #include "dxmt_gw2_metal4.hpp"
+#include "dxmt_gw2_lifetime.hpp"
 #include "dxmt_gw2_residency.hpp"
 #include "log/log.hpp"
 #include "util_env.hpp"
@@ -14,8 +15,8 @@ enum class Metal4 { Unset, Off, On, Unsupported, Incomplete };
 
 std::atomic<Metal4> g_metal4{Metal4::Unset};
 
-// gw2 (#32): part 2 of 4 (the bridge, the queue and submission). The encoders (part 3) and present
-// (part 4) follow; the last one sets this.
+// gw2 (#32): part 3 of 4 (the bridge, the queue and submission, the encoders). Present (part 4)
+// follows and sets this.
 constexpr bool kPortComplete = false;
 
 const char *
@@ -75,6 +76,17 @@ metal4AttachQueue(WMT::Device device) {
     Logger::warn(std::format("Metal 4: unavailable ({}), staying on Metal 3", supportReason(support)));
     return;
   }
+  if (env::getEnvVar("DXMT_METALFX_SPATIAL_SWAPCHAIN") == "1") {
+    g_metal4.store(Metal4::Unsupported, std::memory_order_release);
+    Logger::warn("Metal 4: DXMT_METALFX_SPATIAL_SWAPCHAIN=1: MetalFX upscaling stays on Metal 3, staying on Metal 3");
+    return;
+  }
+  if (!lifetime::keepUntilRetired()) {
+    g_metal4.store(Metal4::Unsupported, std::memory_order_release);
+    Logger::warn("Metal 4: needs DXMT_UNRETAINED=1 (the default): Metal 4 command buffers retain nothing, so the "
+                 "chunk must hold what it uses; staying on Metal 3");
+    return;
+  }
   if (!residencyActive()) {
     g_metal4.store(Metal4::Unsupported, std::memory_order_release);
     Logger::warn(std::format(
@@ -87,7 +99,7 @@ metal4AttachQueue(WMT::Device device) {
   if (!kPortComplete) {
     g_metal4.store(Metal4::Incomplete, std::memory_order_release);
     Logger::warn("Metal 4: not yet complete, staying on Metal 3 (DXMT_METAL4=1; the device supports it; this build "
-                 "has the bridge and the queue, jdrly/dxmt #32 part 2 of 4)");
+                 "has the bridge, the queue and the encoders, jdrly/dxmt #32 part 3 of 4)");
     return;
   }
   g_metal4.store(Metal4::On, std::memory_order_release);

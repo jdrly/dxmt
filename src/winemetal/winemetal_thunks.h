@@ -507,7 +507,7 @@ struct unixcall_mtl4_drawable_present {
 struct unixcall_mtl4_new_encoder {
   obj_handle_t cmdbuf;
   struct WMTConstMemoryPointer info;
-  struct WMTConstMemoryPointer state;
+  struct WMTMemoryPointer state;
   obj_handle_t ret;
 };
 

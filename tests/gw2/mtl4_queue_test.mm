@@ -16,6 +16,9 @@
 //   done
 //   $T/mtl4_queue_test_x86_64 && MTL_DEBUG_LAYER=1 $T/mtl4_queue_test_arm64
 //
+// The fill buffer isn't in any set of the test's own: the blit replay puts it into the chunk slot's
+// residency set (part 3), which each commit commits and uses and retire() empties.
+//
 // What it checks:
 // - a ring of 4 slots for 24 chunks, with a finish thread as DXMT's: each chunk fills its own bytes
 //   of a buffer with its sequence number (a blit replay on an MTL4 compute encoder), some chunks
@@ -60,6 +63,9 @@ bool
 statsEnabled() {
   return true;
 }
+// the device set (#29) isn't in this test: the queue's own per-slot sets are
+void
+residencyBeforeCommit() {}
 } // namespace dxmt::gw2
 
 // --- the unix side of the calls this test makes, by bridge slot
@@ -99,6 +105,29 @@ u_endEncoding(void *p) {
   return 0;
 }
 
+static NTSTATUS
+u_newResidencySet(void *p) {
+  auto *params = (unixcall_mtldevice_newresidencyset *)p;
+  MTLResidencySetDescriptor *desc = [MTLResidencySetDescriptor new];
+  desc.initialCapacity = params->init_capacity;
+  NSError *err = nil;
+  params->ret_set = (obj_handle_t)(uintptr_t)CFBridgingRetain(
+      [(id<MTLDevice>)OBJ(params->device) newResidencySetWithDescriptor:desc error:&err]
+  );
+  params->ret_error = 0;
+  return 0;
+}
+static NTSTATUS
+u_removeAllAllocations(void *p) {
+  [(id<MTLResidencySet>)OBJ(((unixcall_generic_obj_noret *)p)->handle) removeAllAllocations];
+  return 0;
+}
+static NTSTATUS
+u_residencyCommit(void *p) {
+  [(id<MTLResidencySet>)OBJ(((unixcall_generic_obj_noret *)p)->handle) commit];
+  return 0;
+}
+
 static NTSTATUS (*g_table[190])(void *);
 
 extern "C" {
@@ -122,6 +151,9 @@ fillTable() {
   g_table[16] = u_signaledValue;
   g_table[33] = u_endEncoding;
   g_table[126] = u_waitUntilSignaledValue;
+  g_table[132] = u_newResidencySet;
+  g_table[135] = u_removeAllAllocations;
+  g_table[136] = u_residencyCommit;
   NTSTATUS (*mtl4[])(void *) = {
       _MTLDevice_metal4Support,
       _MTLDevice_newMTL4CommandQueue,
@@ -154,8 +186,9 @@ fillTable() {
 
 // one chunk's GPU work: fill its 4 bytes of `buffer` with seq
 static void
-encodeFill(Mtl4Commit &commit, id<MTLBuffer> buffer, uint64_t seq, uint32_t slots) {
+encodeFill(Mtl4Queue &queue, Mtl4Commit &commit, id<MTLBuffer> buffer, uint64_t seq, uint32_t slots) {
   WMTMtl4BindingState state{};
+  state.residency_set = queue.residency(seq).handle;
   auto encoder = WMT::MTL4CommandBuffer{commit.cmdbuf.handle}.computeCommandEncoder(&state);
   wmtcmd_blit_fillbuffer fill{};
   fill.type = WMTBlitCommandFillBuffer;
@@ -184,17 +217,11 @@ main() {
                                                    options:MTLResourceStorageModeShared |
                                                            MTLResourceHazardTrackingModeUntracked];
     id<MTLSharedEvent> external = [mtl_device newSharedEvent];
-    MTLResidencySetDescriptor *rd = [MTLResidencySetDescriptor new];
-    NSError *err = nil;
-    id<MTLResidencySet> residency = [mtl_device newResidencySetWithDescriptor:rd error:&err];
-    [residency addAllocation:buffer];
-    [residency commit];
     {
       Mtl4Queue queue(device, kSlots);
       CHECK(queue.valid(), "Mtl4Queue isn't valid");
       if (!queue.valid())
         return 1;
-      queue.queue().addResidencySet(WMT::ResidencySet{(obj_handle_t)(uintptr_t)(__bridge void *)residency});
 
       // the ring: chunk seq may begin once chunk seq - slots + 1 retired (DXMT keeps one slot free)
       std::atomic<uint64_t> committed{0}, retired{0};
@@ -231,13 +258,13 @@ main() {
         if (seq % 3 == 0) {
           // as the present split: the frame's part first, then the rest in a second buffer
           auto &first = queue.begin(seq);
-          encodeFill(first, buffer, seq, kSlots);
+          encodeFill(queue, first, buffer, seq, kSlots);
           queue.commit(seq);
           CHECK(queue.current(seq) == nullptr, "chunk %llu: still open after commit", (unsigned long long)seq);
         }
         auto &commit = queue.begin(seq);
         CHECK(queue.current(seq) == &commit, "chunk %llu: current() isn't the open commit", (unsigned long long)seq);
-        encodeFill(commit, buffer, seq, kSlots);
+        encodeFill(queue, commit, buffer, seq, kSlots);
         if (seq == 10) {
           // the GPU must hold this chunk's commit until the CPU signals `external`
           queue.waitForEvent(WMT::Event{(obj_handle_t)(uintptr_t)(__bridge void *)external}, 1);

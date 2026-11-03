@@ -473,6 +473,12 @@ public:
     return ret;
   }
 
+  // gw2 (#32): queries waiting for the chunk's flush (either kind)
+  bool
+  pending() const {
+    return num_samples_ != 0 || !estimated_.empty();
+  }
+
   // gw2 (#24): a query marked without an encoder of its own (DXMT_TIMESTAMP_MODE estimate/boundary)
   void
   markQuery(TimestampQuery *query, uint64_t position) {

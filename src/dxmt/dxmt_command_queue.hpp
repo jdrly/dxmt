@@ -129,6 +129,20 @@ public:
     statistics.encode_flush_interval += (t2 - t1);
   };
 
+  // gw2 (#32): the same on Metal 4: encoding begins and commits the chunk's command buffers
+  void
+  encodeMetal4(gw2::Mtl4Encoding &encoding, ArgumentEncodingContext &enc) {
+    enc.$$setEncodingContext(chunk_id, frame_);
+    auto &statistics = enc.currentFrameStatistics();
+    auto t0 = clock::now();
+    list_enc.execute(enc);
+    auto t1 = clock::now();
+    readback = enc.flushCommands(encoding, chunk_id, chunk_event_id);
+    auto t2 = clock::now();
+    statistics.encode_prepare_interval += (t1 - t0);
+    statistics.encode_flush_interval += (t2 - t1);
+  }
+
   uint64_t chunk_id;
   uint64_t chunk_event_id;
   uint64_t frame_;

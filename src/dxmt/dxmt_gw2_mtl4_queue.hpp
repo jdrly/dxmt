@@ -11,6 +11,9 @@
 //   MTL4CommitOptions feedback (GPU start and end, error), written into an Mtl4Commit record, and
 //   raises the queue's shared event to the commit's value once written. The finish thread waits on
 //   that event instead of waitUntilCompleted.
+// - Each slot also has a residency set of its own (part 3): the replays put every allocation the
+//   chunk's packets name directly into it (Metal 4 makes nothing resident by itself); each commit
+//   commits it and the command buffer uses it; retire() empties it.
 // - Command buffers and records are recycled (an MTL4CommandBuffer is reusable after completion).
 //
 // Threads: begin/commit/waitForEvent/signalEvent on the encode thread, for the chunk being encoded;
@@ -59,6 +62,16 @@ struct Mtl4Commit {
   }
 };
 
+// The argument tables a queue's Metal 4 encoders bind, one per stage (part 3). Created with the
+// queue and reused by every encoder on the encode thread: Metal 4 snapshots a table at each draw
+// and dispatch.
+struct Mtl4Tables {
+  WMT::Reference<WMT::MTL4ArgumentTable> vertex, fragment, object, mesh, compute;
+};
+
+// part 3: a chunk's binding-state counters, into the METAL4 section (encode thread)
+void metal4EncodeCounters(const WMTMtl4BindingState &state);
+
 class Mtl4Queue {
 public:
   // `slots`: the chunk ring's size. Check the result with valid().
@@ -79,6 +92,12 @@ public:
     return queue_;
   }
 
+  // encode thread
+  Mtl4Tables &
+  tables() {
+    return tables_;
+  }
+
   // --- encode thread, chunk `seq`
 
   // Begins the chunk's next command buffer on its slot's allocator (the first of the chunk, or the
@@ -91,8 +110,16 @@ public:
     return slot(seq).open;
   }
 
-  // Ends and commits the open command buffer of chunk `seq`, with its feedback.
+  // Ends and commits the open command buffer of chunk `seq`, with its feedback; before that, the
+  // device set's and the slot set's pending changes are committed and the command buffer uses the
+  // slot's set.
   void commit(uint64_t seq);
+
+  // The residency set of chunk `seq`'s slot (WMTMtl4BindingState::residency_set)
+  WMT::ResidencySet
+  residency(uint64_t seq) {
+    return slot(seq).residency;
+  }
 
   // Queue-level event operations: they apply to the command buffers committed after (wait) or
   // before (signal) the call.
@@ -117,6 +144,7 @@ public:
 private:
   struct Slot {
     WMT::Reference<WMT::MTL4CommandAllocator> allocator;
+    WMT::Reference<WMT::ResidencySet> residency;
     std::vector<Mtl4Commit *> commits; // committed, in order
     Mtl4Commit *open = nullptr;        // begun, not committed
   };
@@ -136,6 +164,7 @@ private:
   uint64_t next_value_ = 0; // encode thread; the last value committed
   std::atomic<uint64_t> committed_value_{0};
   std::vector<Slot> slots_;
+  Mtl4Tables tables_;
   bool ready_ = false;
 
   std::mutex pool_mutex_;

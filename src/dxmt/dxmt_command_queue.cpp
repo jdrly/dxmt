@@ -492,11 +492,13 @@ CommandQueue::CommitChunkMetal4(CommandChunk &chunk, uint64_t seq) {
     mtl4_->waitForEvent(initializer.event(), chunk.resource_initializer_event_id);
     gw2::lifetime::use(lifetime_id_, seq, initializer.event(), gw2::lifetime::Kind::Event); // gw2 (#31)
   }
-  mtl4_->begin(seq);
-  // jdrly/dxmt #32 part 3 encodes the chunk here. Until the port is complete gw2::metal4Active() is
-  // never true, so no Mtl4Queue exists and this isn't reached.
-  gw2::residencyBeforeCommit(); // gw2 (#29)
-  mtl4_->commit(seq);
+  // the encoders (command buffers begin as they need them; events and the present split commit)
+  gw2::Mtl4Encoding encoding(*mtl4_, seq, [this, seq](uint64_t size) {
+    auto [mapped, buffer, offset] = AllocateArgumentBuffer(seq, size);
+    return std::pair<WMT::Buffer, uint64_t>{buffer, offset};
+  });
+  chunk.encodeMetal4(encoding, argument_encoding_ctx);
+  encoding.commitOpen(); // the rest, if anything is left open
 }
 
 // gw2 (#32): the finish thread's part for a Metal 4 chunk: waits for every commit's feedback, then
