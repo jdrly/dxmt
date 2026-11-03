@@ -18,6 +18,7 @@
 
 #include "dxmt_buffer.hpp"
 #include "dxmt_format.hpp"
+#include "dxmt_gw2_residency.hpp"
 #include "thread.hpp"
 #include "util_likely.hpp"
 #include "util_math.hpp"
@@ -50,6 +51,11 @@ BufferAllocation::BufferAllocation(
   obj_ = device.newBuffer(info_);
   gpuAddress_ = info_.gpu_address;
   mappedMemory_ = info_.memory.get_accessible_or_null();
+  // gw2 (#29): into the device's residency set, except CPU-placed memory (freed with the allocation)
+  if (!flags_.test(BufferAllocationFlag::CpuPlaced)) {
+    obj_handle_t handle = obj_.handle;
+    gw2Resident = gw2::residencyAdd(device, &handle, 1, info_.length);
+  }
 };
 
 BufferAllocation::BufferAllocation(
@@ -74,6 +80,11 @@ BufferAllocation::BufferAllocation(
 
 void
 BufferAllocation::free() {
+  // gw2 (#29): out of the residency set; every chunk that used it has retired (they held references)
+  if (gw2Resident) {
+    obj_handle_t handle = obj_.handle;
+    gw2::residencyRemove(&handle, 1, info_.length);
+  }
   if (placed_buffer) {
     wsi::aligned_free(placed_buffer);
     placed_buffer = nullptr;

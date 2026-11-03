@@ -18,10 +18,12 @@
 
 #include "dxmt_texture.hpp"
 #include "dxmt_format.hpp"
+#include "dxmt_gw2_residency.hpp"
 #include "dxmt_names.hpp"
 #include "dxmt_residency.hpp"
 #include "wsi_platform.hpp"
 #include "log/log.hpp"
+#include <algorithm>
 #include <atomic>
 #include <cassert>
 #include <mutex>
@@ -98,6 +100,23 @@ logDepthView(const Texture *base, const TextureViewDescriptor &descriptor, bool 
     Logger::info(line);
 }
 
+// gw2 (#29): a texture's bytes for RESIDENCY's mb, from its descriptor: every mip level, layer and
+// sample, uncompressed (BC formats by 4x4 block); no Metal call, so an estimate
+uint64_t
+gw2TextureBytes(const WMTTextureInfo &info) {
+  uint64_t texel = MTLGetTexelSize(info.pixel_format);
+  bool bc = IsBlockCompressionFormat(info.pixel_format);
+  uint64_t layers = uint64_t(std::max(info.array_length, 1u)) * std::max<uint32_t>(info.sample_count, 1) *
+                    ((info.type == WMTTextureTypeCube || info.type == WMTTextureTypeCubeArray) ? 6 : 1);
+  uint64_t bytes = 0;
+  for (uint32_t level = 0; level < std::max<uint32_t>(info.mipmap_level_count, 1); level++) {
+    uint64_t w = std::max(info.width >> level, 1u), h = std::max(info.height >> level, 1u),
+             d = std::max(info.depth >> level, 1u);
+    bytes += (bc ? ((w + 3) / 4) * ((h + 3) / 4) : w * h) * d * texel;
+  }
+  return bytes * layers;
+}
+
 } // namespace
 
 void
@@ -167,6 +186,11 @@ TextureAllocation::TextureAllocation(
 
 void
 TextureAllocation::free(){
+  // gw2 (#29): out of the residency set; every chunk that used it has retired (they held references)
+  if (gw2Resident) {
+    obj_handle_t handles[2] = {obj_.handle, buffer_.handle};
+    gw2::residencyRemove(handles, 2, gw2ResidentBytes);
+  }
 #ifdef __i386__
   wsi::aligned_free(mappedMemory);
 #endif
@@ -274,10 +298,29 @@ Texture::allocate(Flags<TextureAllocationFlag> flags) {
     buffer_info.memory.set(wsi::aligned_malloc(bytes_per_image_, DXMT_PAGE_SIZE));
 #endif
     auto buffer = device_.newBuffer(buffer_info);
-    return new TextureAllocation(this, std::move(buffer), buffer_info.memory.get(), info, bytes_per_row_, flags);
+    return gw2EnterResidencySet(
+        new TextureAllocation(this, std::move(buffer), buffer_info.memory.get(), info, bytes_per_row_, flags), info
+    );
   }
   auto texture = flags.test(TextureAllocationFlag::Shared) ? device_.newSharedTexture(info) : device_.newTexture(info);
-  return new TextureAllocation(this, std::move(texture), info, flags);
+  return gw2EnterResidencySet(new TextureAllocation(this, std::move(texture), info, flags), info);
+}
+
+Rc<TextureAllocation>
+Texture::gw2EnterResidencySet(TextureAllocation *allocation, const WMTTextureInfo &info) {
+  // Shared (IOSurface) textures stay out, and on i386 a linear texture's CPU-placed memory (freed with
+  // the allocation). A linear texture enters with its buffer.
+  if (allocation->flags().test(TextureAllocationFlag::Shared))
+    return allocation;
+#ifdef __i386__
+  if (allocation->buffer_)
+    return allocation;
+#endif
+  uint64_t bytes = allocation->buffer_ ? bytes_per_image_ : gw2TextureBytes(info);
+  obj_handle_t handles[2] = {allocation->obj_.handle, allocation->buffer_.handle};
+  allocation->gw2Resident = gw2::residencyAdd(device_, handles, 2, bytes);
+  allocation->gw2ResidentBytes = bytes;
+  return allocation;
 }
 
 Rc<TextureAllocation>
