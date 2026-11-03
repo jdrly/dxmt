@@ -16,7 +16,8 @@
 //   `thread_local`: mingw-GCC's thread_local is emulated TLS (__emutls_get_address ->
 //   pthread_getspecific -> TlsGetValue, GetLastError/SetLastError), about 0.1 us an access under
 //   Rosetta, which cost the render thread 2.3 ms a frame at ~21,000 scopes. A context keeps the
-//   last ApiThread that entered it (ApiThreadCache), checked by thread id; only a miss looks it up.
+//   last ApiThread that entered it (ApiThreadCache), checked by thread id; only a miss looks it up
+//   (FlsGetValue). Fiber-local, so a thread that runs D3D11 on several fibers has one block per fiber.
 // - GPU spans: each command queue's finish thread hands its completed command buffers' GPU
 //   start/end, split-off buffers included, to that queue's GpuCollector; per frame, the union of
 //   those spans and the gap to the previous frame.
@@ -80,11 +81,11 @@ ApiTotals otherDrain();
 uint32_t sampleDraw();
 
 // gw2 (#28): one thread's API-time state; the free functions above act on the calling thread's.
-// One block per thread id, never freed: a thread that gets a dead thread's id (Windows reuses them)
-// takes over its block, reset, so a pointer to a block stays valid and its tid never changes.
+// A thread takes a block on its first lookup and releases it when it exits (a fiber-local slot's
+// callback); a later thread may take it again. Blocks are never freed, so a pointer stays valid.
 struct ApiThread {
-  explicit ApiThread(uint32_t id) : tid(id) {}
-  const uint32_t tid;
+  std::atomic<uint32_t> tid = 0; // the owning thread's id, 0 while released; written only by its owner
+                                 // (taking it) and its exit callback
   int depth = 0;             // ApiScope nesting
   uint32_t sample_state = 0; // draw()'s xorshift32 state, seeded from tid on first use
   bool presenter = false;
@@ -96,14 +97,17 @@ struct ApiThread {
   void reset();
 };
 
-// The calling thread's ApiThread (one emulated-TLS lookup).
+// The calling thread's ApiThread (one fiber-local lookup, FlsGetValue).
 ApiThread &apiThread();
+// At DLL_PROCESS_DETACH by FreeLibrary: frees the fiber-local slot, so its callback can't run after
+// the DLL is gone.
+void apiThreadsDetach();
 
 // gw2 (#28): the last ApiThread that used an object (a device context), so its entry points find
 // the calling thread's block with GetCurrentThreadId and a compare instead of a TLS lookup. Safe to
-// share between threads: a block's tid is immutable, so a stale or racing pointer only costs a miss.
-// Caveat: a new thread that reuses a dead thread's id and hits this cache before its own first
-// lookup uses the dead thread's block without the reset (until that first lookup).
+// share between threads: a block's tid matches only its live owner (0 once released, and a new
+// owner sets its own), so a stale or racing pointer only costs a miss. Not covered: a thread killed
+// by TerminateThread (no exit callback) keeps its block, and a thread that reuses its id would hit it.
 class ApiThreadCache {
 public:
   ApiThread &get();

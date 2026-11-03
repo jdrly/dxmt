@@ -5,7 +5,7 @@
 #include <atomic>
 #include <deque>
 #include <mutex>
-#include <unordered_map>
+#include <vector>
 #include <version.h>
 #include <windows.h>
 
@@ -78,20 +78,61 @@ std::atomic<uint64_t> g_other_calls[kApiCount];
 std::atomic<uint64_t> g_other_ns[kApiCount];
 constexpr uint32_t kSampleEvery = 16;
 
-// gw2 (#28): the only thread_local left on this path, read on a miss (apiThread)
-thread_local ApiThread *t_thread = nullptr;
+// gw2 (#28): ApiThread ownership. A thread takes a block on its first lookup and keeps it in a
+// fiber-local slot whose callback hands it back when the thread exits. A released block has tid 0, so
+// no ApiThreadCache can return it, and it is reset only when the next thread takes it: a block is
+// never reset while its thread lives. Blocks are never freed (a cache may still point at one).
 std::mutex g_threads_mutex;
-std::unordered_map<uint32_t, ApiThread *> g_threads; // by tid; blocks are never freed
+std::vector<ApiThread *> g_free_threads; // released, ready for the next new thread
+std::atomic<DWORD> g_fls = FLS_OUT_OF_INDEXES;
+std::atomic<bool> g_fls_failed = false;
+// only if FlsAlloc failed: the thread's block, never released (and never cached, see get())
+thread_local ApiThread *t_thread = nullptr;
+
+void WINAPI
+releaseThread(void *block) {
+  if (!block)
+    return;
+  auto t = static_cast<ApiThread *>(block);
+  t->tid.store(0, std::memory_order_release);
+  std::lock_guard lock(g_threads_mutex);
+  g_free_threads.push_back(t);
+}
+
+DWORD
+flsIndex() {
+  DWORD fls = g_fls.load(std::memory_order_acquire);
+  if (fls != FLS_OUT_OF_INDEXES || g_fls_failed.load(std::memory_order_relaxed))
+    return fls;
+  std::lock_guard lock(g_threads_mutex);
+  fls = g_fls.load(std::memory_order_relaxed);
+  if (fls == FLS_OUT_OF_INDEXES && !g_fls_failed.load(std::memory_order_relaxed)) {
+    fls = FlsAlloc(releaseThread);
+    if (fls == FLS_OUT_OF_INDEXES) {
+      g_fls_failed.store(true, std::memory_order_relaxed);
+      Logger::warn("GW2 PACE: FlsAlloc failed; API time falls back to a TLS lookup per call");
+    } else {
+      g_fls.store(fls, std::memory_order_release);
+    }
+  }
+  return fls;
+}
 
 ApiThread *
-blockFor(uint32_t tid) {
-  std::lock_guard lock(g_threads_mutex);
-  auto [it, inserted] = g_threads.try_emplace(tid, nullptr);
-  if (inserted)
-    it->second = new ApiThread(tid);
-  else
-    it->second->reset(); // a dead thread's: this thread starts with a fresh state, as a new TLS block did
-  return it->second;
+takeBlock(uint32_t tid) {
+  ApiThread *t = nullptr;
+  {
+    std::lock_guard lock(g_threads_mutex);
+    if (!g_free_threads.empty()) {
+      t = g_free_threads.back();
+      g_free_threads.pop_back();
+    }
+  }
+  if (!t)
+    t = new ApiThread();
+  t->reset(); // an exited thread's state: this thread starts fresh, as a new TLS block did
+  t->tid.store(tid, std::memory_order_release); // from here on, caches return it to this thread only
+  return t;
 }
 } // namespace
 
@@ -107,7 +148,7 @@ uint32_t
 ApiThread::draw() {
   uint32_t x = sample_state;
   if (!x) // seeded from the thread id (Knuth's multiplicative hash), never 0
-    x = (tid * 2654435761u) | 1u;
+    x = (tid.load(std::memory_order_relaxed) * 2654435761u) | 1u;
   x ^= x << 13;
   x ^= x >> 17;
   x ^= x << 5;
@@ -133,20 +174,37 @@ ApiThread::add(Api api, uint64_t ns) {
 
 ApiThread &
 apiThread() {
-  if (auto t = t_thread)
+  DWORD fls = flsIndex();
+  if (fls == FLS_OUT_OF_INDEXES) {
+    if (!t_thread)
+      t_thread = takeBlock(uint32_t(GetCurrentThreadId()));
+    return *t_thread;
+  }
+  if (auto t = static_cast<ApiThread *>(FlsGetValue(fls)))
     return *t;
-  return *(t_thread = blockFor(uint32_t(GetCurrentThreadId())));
+  auto t = takeBlock(uint32_t(GetCurrentThreadId()));
+  FlsSetValue(fls, t);
+  return *t;
 }
 
 ApiThread &
 ApiThreadCache::get() {
   uint32_t tid = uint32_t(GetCurrentThreadId());
   ApiThread *t = last_.load(std::memory_order_acquire);
-  if (t && t->tid == tid)
-    return *t;
+  if (t && t->tid.load(std::memory_order_acquire) == tid)
+    return *t; // tid is set only by the owning thread and cleared when it exits: this thread's
   t = &apiThread();
-  last_.store(t, std::memory_order_release);
+  // without FLS a block is never released, so a dead thread's id could match it: don't cache
+  if (g_fls.load(std::memory_order_relaxed) != FLS_OUT_OF_INDEXES)
+    last_.store(t, std::memory_order_release);
   return *t;
+}
+
+void
+apiThreadsDetach() {
+  DWORD fls = g_fls.exchange(FLS_OUT_OF_INDEXES);
+  if (fls != FLS_OUT_OF_INDEXES)
+    FlsFree(fls); // runs releaseThread for every thread's block: the callback mustn't outlive the DLL
 }
 
 uint32_t

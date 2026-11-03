@@ -24,6 +24,7 @@
 #include "log/log.hpp"
 #include "util_string.hpp"
 #include "dxmt_capture.hpp"
+#include "dxmt_gw2_stats.hpp"
 #include <exception>
 
 namespace dxmt {
@@ -231,6 +232,9 @@ extern "C" HRESULT __stdcall D3D11On12CreateDevice(
 #ifdef _WIN32
 
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {  
+  // gw2 (#28): FreeLibrary (not process exit): free the PACE blocks' fiber-local slot
+  if (reason == DLL_PROCESS_DETACH && !reserved)
+    dxmt::gw2::apiThreadsDetach();
   if (reason != DLL_PROCESS_ATTACH)
     return TRUE;
 
