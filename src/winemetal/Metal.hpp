@@ -10,6 +10,16 @@ namespace WMT {
 
 class String;
 
+#ifdef DXMT_GW2_LIFETIME_CHECK
+// gw2 (#31): DXMT_LIFETIME_CHECK counts this module's own references to each Metal object through
+// this hook: +1 on a retain, +2 on adopting a returned (+1) handle, -1 right before a release, so it
+// sees the release of the last one. Only in a build with -Dgw2_lifetime_check=true (a diagnostic
+// build); otherwise none of it is compiled. Null unless the check installed it
+// (dxmt_gw2_lifetime.cpp). An inline variable, so one per module: only the module that installs it
+// counts.
+inline void (*lifetime_ref_hook)(obj_handle_t handle, int delta) = nullptr;
+#endif
+
 class Object {
 public:
   obj_handle_t handle;
@@ -25,10 +35,18 @@ public:
   void
   retain() {
     NSObject_retain(handle);
+#ifdef DXMT_GW2_LIFETIME_CHECK
+    if (__builtin_expect(lifetime_ref_hook != nullptr, 0))
+      lifetime_ref_hook(handle, 1);
+#endif
   }
 
   void
   release() {
+#ifdef DXMT_GW2_LIFETIME_CHECK
+    if (__builtin_expect(lifetime_ref_hook != nullptr, 0))
+      lifetime_ref_hook(handle, -1);
+#endif
     NSObject_release(handle);
   }
 
@@ -79,6 +97,10 @@ public:
   }
   Reference(obj_handle_t retained) {
     this->handle = retained;
+#ifdef DXMT_GW2_LIFETIME_CHECK
+    if (__builtin_expect(lifetime_ref_hook != nullptr, 0) && retained)
+      lifetime_ref_hook(retained, 2); // gw2 (#31): an adopted reference
+#endif
   }
 
   Reference &
@@ -738,6 +760,12 @@ public:
   CommandBuffer
   commandBuffer() {
     return CommandBuffer{MTLCommandQueue_commandBuffer(handle)};
+  }
+
+  // gw2 (#31): a command buffer that doesn't retain what its commands use (DXMT_UNRETAINED=1)
+  CommandBuffer
+  commandBufferWithUnretainedReferences() {
+    return CommandBuffer{MTLCommandQueue_commandBufferWithUnretainedReferences(handle)};
   }
 
   void

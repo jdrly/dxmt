@@ -17,6 +17,7 @@
  */
 
 #include "dxmt_allocation.hpp"
+#include "dxmt_gw2_lifetime.hpp"
 #include "util_likely.hpp"
 #include <cassert>
 #include <iterator>
@@ -31,8 +32,10 @@ Allocation::incRef() {
 
 void
 Allocation::decRef() {
-  if (refcount_.fetch_sub(1u, std::memory_order_release) == 1u)
+  if (refcount_.fetch_sub(1u, std::memory_order_release) == 1u) {
+    gw2::lifetime::allocationFreed(this); // gw2 (#31): DXMT_LIFETIME_CHECK, before it goes
     this->free();
+  }
 };
 
 AllocationRefTracking::AllocationRefTracking() {

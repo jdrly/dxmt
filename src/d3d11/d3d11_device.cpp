@@ -1,4 +1,5 @@
 #include "com/com_guid.hpp"
+#include "dxmt_gw2_lifetime.hpp"
 #include "dxmt_gw2_stats.hpp"
 #include "d3d11_fence.hpp"
 #include "d3d11_input_layout.hpp"
@@ -64,6 +65,19 @@ public:
     d3d10_ = std::make_unique<MTLD3D10Device>(this, context_.get());
     is_traced_ = !!::GetModuleHandle("dxgitrace.dll");
     format_inspector_.Inspect(GetMTLDevice());
+  }
+
+  // gw2 (#31): the pipeline, depth-stencil and sampler caches go with this device, while the queue
+  // (destroyed after it) may still run chunks that use them. Command buffers that don't retain them
+  // (DXMT_UNRETAINED=1), or the lifetime check that assumes they aren't retained, need every
+  // committed chunk retired first. The immediate context goes first (in the members' own order), so
+  // its promote-flush watchdog can't commit another chunk after the wait.
+  ~MTLD3D11DeviceImpl() {
+    if (!gw2::lifetime::keepUntilRetired())
+      return;
+    d3d10_.reset();
+    context_.reset();
+    device_.queue().WaitCommittedRetired();
   }
 
   HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid,
