@@ -385,9 +385,11 @@ logStartup(const std::string &extra) {
     }
     FreeEnvironmentStringsA(block);
   }
-  Logger::info(str::format(
-      "GW2 fork ", DXMT_VERSION, ": ", extra, " set:", vars.empty() ? std::string(" none") : vars
-  ));
+  // gw2 (#43): two lines, so that neither grows with the other (Wine's 1020-byte line limit)
+  Logger::info(str::format("GW2 fork ", DXMT_VERSION, ": ", extra));
+  Logger::info(
+      str::format("GW2 fork ", DXMT_VERSION, " set:", vars.empty() ? std::string(" none") : vars)
+  );
 }
 
 } // namespace dxmt::gw2
