@@ -35,6 +35,7 @@ GW2 on Mac sets `DXMT_LOG_PATH` to its `work/logs`, so the lines below land in
 | `DXMT_PROMOTE_FLUSH_MS` | 2 | With `DXMT_PROMOTE_FLUSH_MIN`: the longest a held commit waits (the timer at the next pass change, and the watchdog's period) | — |
 | `DXMT_TIMESTAMP_MODE` | `estimate` | How a timestamp query `End` (and a timestamp-disjoint one) is taken. `estimate`: the open pass stays open and nothing is committed; the value is interpolated between the GPU start and end of the command buffer the query lands in, by its position among the chunk's encoders. `boundary`: the pass stays open, but the commit still happens at the next pass change (as `exact`, so `DXMT_PROMOTE_FLUSH_MIN` applies); the value is interpolated the same way. Both keep the values monotonic and make a disjoint query ready only after its chunk's timestamps are resolved; see [TIMESTAMP](#timestamp) | `exact` (or `0`): upstream, a pass split and a commit per timestamp, the value the buffer's GPU end |
 | `DXMT_MAP_FAST` | on | The Map/Unmap fast path for buffers (see [MAP](#map)): the immediate context maps a dynamic or default-usage buffer from fields the buffer sets at creation (no virtual lookup, no reference count), `Unmap` of a buffer returns at once, the end of a page renames under one lock, a buffer that uses up its page within one chunk gets pages twice as large (up to 64 KB, at least two suballocations each), and a default-usage buffer's renames (`UpdateSubresource` of the whole buffer) come from CPU-visible suballocated pages, so an update is a `memcpy` instead of a new Metal buffer written through a unix call. `UpdateSubresource` of such a buffer skips its other virtual calls too. `PACE`'s `map` times one call in 16 and scales it, as `draw` does | `=0`: upstream's Map, Unmap and renames, `map` timed on every call |
+| `DXMT_SKIP_REBIND` | on | A draw's pipeline bind is left out when its render encoder already has that pipeline bound (see [REBIND](#rebind)). Each encoder tracks the pipeline its own command list bound last; a new encoder starts with none, and any other pipeline bind in it (an internal pass's, the tile barrier's) clears it, so the first draw after those always binds. Only the bind is dropped: depth-stencil, rasterizer, blend color, viewports and scissors are separate commands, emitted as before | `=0`: every pipeline change binds, as upstream |
 
 Not switchable: `SetMaximumFrameLatency(0)` means the default, 3 (DXGI's definition; only
 `DXMT_MAX_FRAME_LATENCY` replaces the result). Typeless depth targets without stencil
@@ -89,7 +90,7 @@ Sections: a feature registers a function with `gw2::SectionRegistrar` (`src/dxmt
 
 | Line | When |
 |---|---|
-| `GW2 fork <commit>: DXMT_STATS=1 DXMT_HITCH_MS=… DXMT_PRESENT_SPLIT=… DXMT_DISPLAY_SYNC=… DXMT_PRESENT_DEADLINE=… DXMT_CAP_LIMITER=… DXMT_STENCIL_PFV=… DXMT_DEPTH_PFV=… DXMT_BG_FPS=… DXMT_BG_FPS_MINIMIZED=… DXMT_BG_POLICY=… DXMT_RENDER_THREAD_PRIORITY=… DXMT_PSO_BLEND_HASH=… DXMT_PSO_MRU=… DXMT_PSO_TOPOLOGY_KEEP=… DXMT_CHUNKS=… DXMT_MAX_FRAME_LATENCY=… DXMT_COMPILE_WAIT_MS=… DXMT_PSO_ARCHIVE=… DXMT_PSO_ARCHIVE_DIR=… DXMT_PSO_FLUSH_EVERY=… DXMT_PROMOTE_FLUSH_MIN=… DXMT_PROMOTE_FLUSH_MS=… DXMT_TIMESTAMP_MODE=… DXMT_MAP_FAST=… cpus=… refresh=… set: …` | Once per process, at the first Present: the build, the **effective** value of every switch above (defaults included; `DXMT_PRESENT_DEADLINE=refresh` is one refresh, `DXMT_CHUNKS` is the ring size in effect, `DXMT_MAX_FRAME_LATENCY=unset` leaves the game's value, `DXMT_PSO_ARCHIVE` is `1` when the archives are on, `0` when not asked for, `failed` when asked for but they couldn't start, `DXMT_PSO_ARCHIVE_DIR=default` is the user cache dir, `DXMT_PROMOTE_FLUSH_MIN`/`_MS` as the immediate context parsed them: `MS` is at least 1 and is shown even when `MIN=0` turns it off, `DXMT_TIMESTAMP_MODE` is `exact`, `estimate` or `boundary`, `DXMT_MAP_FAST` is `1` or `0`), the CPUs the game sees, the refresh rate (0 if unknown), then every `DXMT_*`, `WINENCPU` and `WINEMSYNC` variable set (`set: none` if none). A PR that adds a switch adds its effective value here |
+| `GW2 fork <commit>: DXMT_STATS=1 DXMT_HITCH_MS=… DXMT_PRESENT_SPLIT=… DXMT_DISPLAY_SYNC=… DXMT_PRESENT_DEADLINE=… DXMT_CAP_LIMITER=… DXMT_STENCIL_PFV=… DXMT_DEPTH_PFV=… DXMT_BG_FPS=… DXMT_BG_FPS_MINIMIZED=… DXMT_BG_POLICY=… DXMT_RENDER_THREAD_PRIORITY=… DXMT_PSO_BLEND_HASH=… DXMT_PSO_MRU=… DXMT_PSO_TOPOLOGY_KEEP=… DXMT_CHUNKS=… DXMT_MAX_FRAME_LATENCY=… DXMT_COMPILE_WAIT_MS=… DXMT_PSO_ARCHIVE=… DXMT_PSO_ARCHIVE_DIR=… DXMT_PSO_FLUSH_EVERY=… DXMT_PROMOTE_FLUSH_MIN=… DXMT_PROMOTE_FLUSH_MS=… DXMT_TIMESTAMP_MODE=… DXMT_MAP_FAST=… DXMT_SKIP_REBIND=… cpus=… refresh=… set: …` | Once per process, at the first Present: the build, the **effective** value of every switch above (defaults included; `DXMT_PRESENT_DEADLINE=refresh` is one refresh, `DXMT_CHUNKS` is the ring size in effect, `DXMT_MAX_FRAME_LATENCY=unset` leaves the game's value, `DXMT_PSO_ARCHIVE` is `1` when the archives are on, `0` when not asked for, `failed` when asked for but they couldn't start, `DXMT_PSO_ARCHIVE_DIR=default` is the user cache dir, `DXMT_PROMOTE_FLUSH_MIN`/`_MS` as the immediate context parsed them: `MS` is at least 1 and is shown even when `MIN=0` turns it off, `DXMT_TIMESTAMP_MODE` is `exact`, `estimate` or `boundary`, `DXMT_MAP_FAST` and `DXMT_SKIP_REBIND` are `1` or `0`), the CPUs the game sees, the refresh rate (0 if unknown), then every `DXMT_*`, `WINENCPU` and `WINEMSYNC` variable set (`set: none` if none). A PR that adds a switch adds its effective value here |
 | `HITCH frame=… ms=… commit=…x… sync=…x… bgsleep=… dxmt(ms/calls): …` | A Present-to-Present interval of at least `DXMT_HITCH_MS`, logged at the top of the Present that ends it. `frame` is the frame that Present presents (1-based, as the latency fence counts); the interval holds the previous Present and the game's work on this frame. `commit` (waits for a free chunk) and `sync` (Map's waits for the GPU) are ms × count, from the same interval; they overlap the categories they happen in. `bgsleep` is whether the background throttle was on. The categories are as `PACE`'s `dxmt` (`presentwait` is the latency wait) |
 | `SetMaximumFrameLatency(n)` | Every call; 0 is taken as 3 |
 | `SetMaximumFrameLatency(n): DXMT_MAX_FRAME_LATENCY keeps m` | Every call while `DXMT_MAX_FRAME_LATENCY` is set: the game asked for `n`, `m` stays in effect |
@@ -112,6 +113,8 @@ Sections: a feature registers a function with `gw2::SectionRegistrar` (`src/dxmt
 | `Timestamp queries: exact\|estimate\|boundary (DXMT_TIMESTAMP_MODE): …` | Once per process, when the first immediate context is created: the mode in effect and what it does (a warning before it for a value that isn't `exact`, `estimate`, `boundary` or `0`) |
 | `Timestamp queries: the first query End in M mode kept its pass open[ and requested no commit]` | Once per process, the first time `estimate` or `boundary` handles a timestamp or timestamp-disjoint `End` |
 | `Map fast path: on (DXMT_MAP_FAST): …` | Once per device, when `DXMT_MAP_FAST` is on (the default) |
+| `Pipeline binds: skip rebind on (DXMT_SKIP_REBIND): …`, `Pipeline binds: skip rebind off (DXMT_SKIP_REBIND=0): …` | Once per process, when the first encoding context is created |
+| `Pipeline binds: skipped the first bind of a pipeline already bound in its encoder` | Once per process, the first time `DXMT_SKIP_REBIND` leaves a bind out |
 
 ### Render thread priority
 
@@ -490,3 +493,28 @@ uniform upload (`UpdateSubresource` of a default-usage constant buffer per draw)
 game's own `Map(WRITE_DISCARD)` of a dynamic constant buffer; `staging.read` readbacks, whose GPU waits are in
 `STATS`' `sync`. An A/B of `DXMT_MAP_FAST=1` and `=0` compares `MAP`'s `ms` and `PACE`'s `map` per
 call; `renames` falls with growth, `created` should stay near 0 in both.
+
+### REBIND
+
+`REBIND skip= binds= same= samepct= skipped=` (jdrly/dxmt #30). The D3D11 draw path's pipeline
+binds on the encode thread, per frame. A draw binds its pipeline whenever the pipeline state changed
+on the render thread (or a new render encoder started); `same` are the binds whose pipeline the
+render encoder already had bound. Each encoder tracks the pipeline its own command list bound last:
+a new encoder starts with none, and any other pipeline bind encoded into it (a clear or copy pass's,
+the tile barrier's and its restore) clears it. Merging two render passes later only puts the earlier
+pass's commands in front of the later one's, which starts with its own bind, so the tracking stays
+exact. Counted with plain increments on the encode thread and handed over once per chunk; with
+`DXMT_STATS=0` nothing is counted (the skip still acts). Not logged in a window without binds.
+
+| Field | Meaning |
+|---|---|
+| `skip` | `DXMT_SKIP_REBIND` (1 or 0) |
+| `binds` | The draw path's pipeline binds per frame (ordinary, geometry and tessellation pipelines), skipped ones included |
+| `same` | Of those, binds of the pipeline already bound in the encoder, per frame, counted with the skip on or off |
+| `samepct` | `same` as a percentage of `binds` |
+| `skipped` | The binds the skip left out, per frame (`same` with `skip=1`, 0 with `skip=0`) |
+
+Reading it: `ENCODE`'s `pso` counts the binds that reach the command list (internal and compute ones
+included), so with `skip=1` it is lower by `skipped` than with `skip=0` at the same spot. An A/B of
+`DXMT_SKIP_REBIND=1` and `=0` compares `ENCODE pso` and the encode thread's AGX pipeline rows
+(`setRenderPipelineState`) in Time Profiler; nothing should draw differently.
