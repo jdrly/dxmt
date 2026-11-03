@@ -9,7 +9,9 @@ namespace dxmt {
 void d3d11_device_mutex::lock() {
   if (!forced_ && !protected_) // gw2 (#4): forced_
     return;
-  uint32_t tid = dxmt::this_thread::get_id();
+  // gw2 (#28): the Win32 thread id (never 0), not this_thread::get_id(): that is a `thread_local`,
+  // emulated TLS under mingw-GCC (about 0.1 us under Rosetta), and #4 takes this lock on every call
+  uint32_t tid = uint32_t(GetCurrentThreadId());
   uint32_t expected = 0;
   while(!owner_.compare_exchange_weak(expected, tid, std::memory_order_acquire)) {
     if (unlikely(expected == tid))

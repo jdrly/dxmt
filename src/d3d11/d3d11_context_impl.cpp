@@ -1323,7 +1323,7 @@ public:
   void
   STDMETHODCALLTYPE
   Draw(UINT VertexCount, UINT StartVertexLocation) override {
-    GW2_API_SAMPLED(Draw);
+    GW2_API_SAMPLED_IN(Draw, gw2_api_thread_);
     if (unlikely(!VertexCount))
       return;
     std::lock_guard<mutex_t> lock(mutex);
@@ -1357,7 +1357,7 @@ public:
   void
   STDMETHODCALLTYPE
   DrawIndexed(UINT IndexCount, UINT StartIndexLocation, INT BaseVertexLocation) override {
-    GW2_API_SAMPLED(Draw);
+    GW2_API_SAMPLED_IN(Draw, gw2_api_thread_);
     if (unlikely(!IndexCount))
       return;
     std::lock_guard<mutex_t> lock(mutex);
@@ -1401,7 +1401,7 @@ public:
   STDMETHODCALLTYPE
   DrawInstanced(UINT VertexCountPerInstance, UINT InstanceCount, UINT StartVertexLocation, UINT StartInstanceLocation)
       override {
-    GW2_API_SAMPLED(Draw);
+    GW2_API_SAMPLED_IN(Draw, gw2_api_thread_);
     if (unlikely(!VertexCountPerInstance || !InstanceCount))
       return;
     std::lock_guard<mutex_t> lock(mutex);
@@ -1441,7 +1441,7 @@ public:
       UINT IndexCountPerInstance, UINT InstanceCount, UINT StartIndexLocation, INT BaseVertexLocation,
       UINT StartInstanceLocation
   ) override {
-    GW2_API_SAMPLED(Draw);
+    GW2_API_SAMPLED_IN(Draw, gw2_api_thread_);
     if (unlikely(!IndexCountPerInstance || !InstanceCount))
       return;
     std::lock_guard<mutex_t> lock(mutex);
@@ -1644,7 +1644,7 @@ public:
   void
   STDMETHODCALLTYPE
   DrawIndexedInstancedIndirect(ID3D11Buffer *pBufferForArgs, UINT AlignedByteOffsetForArgs) override {
-    GW2_API_SAMPLED(Draw);
+    GW2_API_SAMPLED_IN(Draw, gw2_api_thread_);
     std::lock_guard<mutex_t> lock(mutex);
 
     WMTPrimitiveType Primitive;
@@ -1687,7 +1687,7 @@ public:
   void
   STDMETHODCALLTYPE
   DrawInstancedIndirect(ID3D11Buffer *pBufferForArgs, UINT AlignedByteOffsetForArgs) override {
-    GW2_API_SAMPLED(Draw);
+    GW2_API_SAMPLED_IN(Draw, gw2_api_thread_);
     std::lock_guard<mutex_t> lock(mutex);
 
     WMTPrimitiveType Primitive;
@@ -1866,7 +1866,7 @@ public:
   void
   STDMETHODCALLTYPE
   DrawAuto() override {
-    GW2_API_SAMPLED(Draw);
+    GW2_API_SAMPLED_IN(Draw, gw2_api_thread_);
     std::lock_guard<mutex_t> lock(mutex);
 
     EmitST([](ArgumentEncodingContext &enc) { enc.setCompatibilityFlag(FeatureCompatibility::UnsupportedDrawAuto); });
@@ -1875,7 +1875,7 @@ public:
   void
   STDMETHODCALLTYPE
   Dispatch(UINT ThreadGroupCountX, UINT ThreadGroupCountY, UINT ThreadGroupCountZ) override {
-    GW2_API_SAMPLED(Dispatch);
+    GW2_API_SAMPLED_IN(Dispatch, gw2_api_thread_);
     std::lock_guard<mutex_t> lock(mutex);
 
     if (!PreDispatch())
@@ -1891,7 +1891,7 @@ public:
   void
   STDMETHODCALLTYPE
   DispatchIndirect(ID3D11Buffer *pBufferForArgs, UINT AlignedByteOffsetForArgs) override {
-    GW2_API_SAMPLED(Dispatch);
+    GW2_API_SAMPLED_IN(Dispatch, gw2_api_thread_);
     std::lock_guard<mutex_t> lock(mutex);
 
     if (!PreDispatch())
@@ -4333,6 +4333,9 @@ public:
 
   // gw2 (#25): DXMT_MAP_FAST, cached
   const bool gw2_map_fast_ = gw2::mapFast();
+
+  // gw2 (#28): the last thread that entered this context, for its PACE scopes (no TLS per call)
+  gw2::ApiThreadCache gw2_api_thread_;
 
   // gw2 (#4): the speculative commit's bookkeeping, for CMDS and DXMT_PROMOTE_FLUSH_MIN. The
   // immediate context publishes gw2_front_ at each commit; a deferred context's never is.

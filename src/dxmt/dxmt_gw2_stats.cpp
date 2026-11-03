@@ -5,6 +5,7 @@
 #include <atomic>
 #include <deque>
 #include <mutex>
+#include <unordered_map>
 #include <version.h>
 #include <windows.h>
 
@@ -75,54 +76,109 @@ const char *const kApiNames[kApiCount] = {"present", "map", "flush", "create", "
 namespace {
 std::atomic<uint64_t> g_other_calls[kApiCount];
 std::atomic<uint64_t> g_other_ns[kApiCount];
-thread_local bool t_presenter = false;
-thread_local int t_depth = 0;
-thread_local uint32_t t_sample_state = 0; // sampleDraw's xorshift32 state, seeded per thread
-thread_local ThreadInterval t_interval;
 constexpr uint32_t kSampleEvery = 16;
+
+// gw2 (#28): the only thread_local left on this path, read on a miss (apiThread)
+thread_local ApiThread *t_thread = nullptr;
+std::mutex g_threads_mutex;
+std::unordered_map<uint32_t, ApiThread *> g_threads; // by tid; blocks are never freed
+
+ApiThread *
+blockFor(uint32_t tid) {
+  std::lock_guard lock(g_threads_mutex);
+  auto [it, inserted] = g_threads.try_emplace(tid, nullptr);
+  if (inserted)
+    it->second = new ApiThread(tid);
+  else
+    it->second->reset(); // a dead thread's: this thread starts with a fresh state, as a new TLS block did
+  return it->second;
+}
 } // namespace
 
+void
+ApiThread::reset() {
+  depth = 0;
+  sample_state = 0;
+  presenter = false;
+  interval = {};
+}
+
 uint32_t
-sampleDraw() {
-  uint32_t x = t_sample_state;
+ApiThread::draw() {
+  uint32_t x = sample_state;
   if (!x) // seeded from the thread id (Knuth's multiplicative hash), never 0
-    x = (uint32_t(GetCurrentThreadId()) * 2654435761u) | 1u;
+    x = (tid * 2654435761u) | 1u;
   x ^= x << 13;
   x ^= x >> 17;
   x ^= x << 5;
-  t_sample_state = x;
+  sample_state = x;
   return x;
 }
 
 void
-apiAdd(Api api, uint64_t ns) {
-  if (t_presenter)
-    t_interval.api.ns[(unsigned)api] += ns;
-  else
-    g_other_ns[(unsigned)api].fetch_add(ns, std::memory_order_relaxed);
-}
-
-void
-apiCall(Api api) {
-  if (t_presenter)
-    t_interval.api.calls[(unsigned)api]++;
+ApiThread::call(Api api) {
+  if (presenter)
+    interval.api.calls[(unsigned)api]++;
   else
     g_other_calls[(unsigned)api].fetch_add(1, std::memory_order_relaxed);
 }
 
 void
+ApiThread::add(Api api, uint64_t ns) {
+  if (presenter)
+    interval.api.ns[(unsigned)api] += ns;
+  else
+    g_other_ns[(unsigned)api].fetch_add(ns, std::memory_order_relaxed);
+}
+
+ApiThread &
+apiThread() {
+  if (auto t = t_thread)
+    return *t;
+  return *(t_thread = blockFor(uint32_t(GetCurrentThreadId())));
+}
+
+ApiThread &
+ApiThreadCache::get() {
+  uint32_t tid = uint32_t(GetCurrentThreadId());
+  ApiThread *t = last_.load(std::memory_order_acquire);
+  if (t && t->tid == tid)
+    return *t;
+  t = &apiThread();
+  last_.store(t, std::memory_order_release);
+  return *t;
+}
+
+uint32_t
+sampleDraw() {
+  return apiThread().draw();
+}
+
+void
+apiAdd(Api api, uint64_t ns) {
+  apiThread().add(api, ns);
+}
+
+void
+apiCall(Api api) {
+  apiThread().call(api);
+}
+
+void
 waitAdd(Wait wait, uint64_t ns) {
-  if (!t_presenter)
+  auto &t = apiThread();
+  if (!t.presenter)
     return;
-  t_interval.wait_ns[(unsigned)wait] += ns;
-  t_interval.wait_count[(unsigned)wait]++;
+  t.interval.wait_ns[(unsigned)wait] += ns;
+  t.interval.wait_count[(unsigned)wait]++;
 }
 
 ThreadInterval
 takeThreadInterval() {
-  t_presenter = true;
-  ThreadInterval out = t_interval;
-  t_interval = {};
+  auto &t = apiThread();
+  t.presenter = true;
+  ThreadInterval out = t.interval;
+  t.interval = {};
   return out;
 }
 
@@ -136,15 +192,17 @@ otherDrain() {
   return t;
 }
 
-ApiScope::ApiScope(Api api, bool sampled) : api_(api) {
+ApiScope::ApiScope(Api api, bool sampled, ApiThreadCache *cache) : api_(api) {
   if (!statsEnabled())
     return;
-  if (t_depth++ > 0)
+  ApiThread &t = cache ? cache->get() : apiThread();
+  thread_ = &t;
+  if (t.depth++ > 0)
     return; // nested: the outer scope counts
   outer_ = true;
-  apiCall(api);
+  t.call(api);
   if (sampled) {
-    draw_ = sampleDraw();
+    draw_ = t.draw();
     if ((draw_ >> 28) != 0)
       return;
   }
@@ -153,12 +211,12 @@ ApiScope::ApiScope(Api api, bool sampled) : api_(api) {
 }
 
 ApiScope::~ApiScope() {
-  if (!statsEnabled())
+  if (!thread_)
     return;
-  t_depth--;
+  thread_->depth--;
   if (!outer_ || !scale_)
     return;
-  apiAdd(api_, uint64_t(nowNs() - t0_) * scale_);
+  thread_->add(api_, uint64_t(nowNs() - t0_) * scale_);
 }
 
 // --- GPU spans

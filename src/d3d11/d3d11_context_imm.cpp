@@ -246,7 +246,7 @@ public:
       D3D11_MAPPED_SUBRESOURCE *pMappedResource) override {
     // gw2 (#25): DXMT_MAP_FAST times Map and Unmap 1 call in 16, as Draw is (each timed call is two
     // clock syscalls in Wine)
-    gw2::ApiScope gw2_api_scope_(gw2::Api::Map, gw2_map_fast_);
+    gw2::ApiScope gw2_api_scope_(gw2::Api::Map, gw2_map_fast_, &gw2_api_thread_);
     std::lock_guard<d3d11_device_mutex> lock(mutex);
 
     if (unlikely(!pResource))
@@ -416,7 +416,7 @@ public:
   void
   STDMETHODCALLTYPE
   Unmap(ID3D11Resource *pResource, UINT Subresource) override {
-    gw2::ApiScope gw2_api_scope_(gw2::Api::Map, gw2_map_fast_); // gw2 (#25): as Map
+    gw2::ApiScope gw2_api_scope_(gw2::Api::Map, gw2_map_fast_, &gw2_api_thread_); // gw2 (#25): as Map
     std::lock_guard<d3d11_device_mutex> lock(mutex);
 
     if (unlikely(!pResource))
@@ -658,7 +658,7 @@ public:
   void
   STDMETHODCALLTYPE
   Flush1(D3D11_CONTEXT_TYPE Type, HANDLE hEvent) override {
-    GW2_API_SCOPE(Flush);
+    GW2_API_SCOPE_IN(Flush, gw2_api_thread_);
     std::lock_guard<d3d11_device_mutex> lock(mutex);
 
     if (ctx_state.has_dirty_op_since_last_event || promote_flush || gw2_ts_uncommitted_) { // gw2 (#24)

@@ -12,10 +12,16 @@
 //   Nested entry points (Flush -> Flush1) count once. A thread that presents keeps its time per
 //   Present-to-Present interval (takeThreadInterval); every other thread's time is pooled
 //   (otherDrain), so worker threads never land in the render thread's numbers.
+//   gw2 (#28): that per-thread state (nesting depth, sampler, interval) is an ApiThread, never a
+//   `thread_local`: mingw-GCC's thread_local is emulated TLS (__emutls_get_address ->
+//   pthread_getspecific -> TlsGetValue, GetLastError/SetLastError), about 0.1 us an access under
+//   Rosetta, which cost the render thread 2.3 ms a frame at ~21,000 scopes. A context keeps the
+//   last ApiThread that entered it (ApiThreadCache), checked by thread id; only a miss looks it up.
 // - GPU spans: each command queue's finish thread hands its completed command buffers' GPU
 //   start/end, split-off buffers included, to that queue's GpuCollector; per frame, the union of
 //   those spans and the gap to the previous frame.
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <deque>
@@ -73,9 +79,43 @@ ApiTotals otherDrain();
 // from the top 4 bits: `(draw >> 28) == k`; ApiScope uses k = 0.
 uint32_t sampleDraw();
 
+// gw2 (#28): one thread's API-time state; the free functions above act on the calling thread's.
+// One block per thread id, never freed: a thread that gets a dead thread's id (Windows reuses them)
+// takes over its block, reset, so a pointer to a block stays valid and its tid never changes.
+struct ApiThread {
+  explicit ApiThread(uint32_t id) : tid(id) {}
+  const uint32_t tid;
+  int depth = 0;             // ApiScope nesting
+  uint32_t sample_state = 0; // draw()'s xorshift32 state, seeded from tid on first use
+  bool presenter = false;
+  ThreadInterval interval;
+
+  uint32_t draw();
+  void call(Api api);
+  void add(Api api, uint64_t ns);
+  void reset();
+};
+
+// The calling thread's ApiThread (one emulated-TLS lookup).
+ApiThread &apiThread();
+
+// gw2 (#28): the last ApiThread that used an object (a device context), so its entry points find
+// the calling thread's block with GetCurrentThreadId and a compare instead of a TLS lookup. Safe to
+// share between threads: a block's tid is immutable, so a stale or racing pointer only costs a miss.
+// Caveat: a new thread that reuses a dead thread's id and hits this cache before its own first
+// lookup uses the dead thread's block without the reset (until that first lookup).
+class ApiThreadCache {
+public:
+  ApiThread &get();
+
+private:
+  std::atomic<ApiThread *> last_ = nullptr;
+};
+
 class ApiScope {
 public:
-  ApiScope(Api api, bool sampled);
+  // cache: where the entry point keeps its last ApiThread (nullptr: look the thread up)
+  ApiScope(Api api, bool sampled, ApiThreadCache *cache = nullptr);
   ~ApiScope();
   ApiScope(const ApiScope &) = delete;
   ApiScope &operator=(const ApiScope &) = delete;
@@ -87,8 +127,15 @@ public:
   draw() const {
     return draw_;
   }
+  // gw2 (#28): a new draw from this scope's thread, for a sampler of a call this scope didn't draw
+  // for (nested); only valid with stats on
+  uint32_t
+  newDraw() const {
+    return thread_->draw();
+  }
 
 private:
+  ApiThread *thread_ = nullptr; // null: stats off
   Api api_;
   int64_t t0_ = 0;
   uint32_t scale_ = 0; // 0: not timed
@@ -98,6 +145,9 @@ private:
 
 #define GW2_API_SCOPE(cat) ::dxmt::gw2::ApiScope gw2_api_scope_(::dxmt::gw2::Api::cat, false)
 #define GW2_API_SAMPLED(cat) ::dxmt::gw2::ApiScope gw2_api_scope_(::dxmt::gw2::Api::cat, true)
+// gw2 (#28): the same, finding the thread through an ApiThreadCache (a context's gw2_api_thread_)
+#define GW2_API_SCOPE_IN(cat, cache) ::dxmt::gw2::ApiScope gw2_api_scope_(::dxmt::gw2::Api::cat, false, &(cache))
+#define GW2_API_SAMPLED_IN(cat, cache) ::dxmt::gw2::ApiScope gw2_api_scope_(::dxmt::gw2::Api::cat, true, &(cache))
 
 int64_t nowNs();
 
