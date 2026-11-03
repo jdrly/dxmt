@@ -136,6 +136,7 @@ logEarly(const Early &early, uint64_t total) {
   ));
 }
 
+#ifdef DXMT_GW2_LIFETIME_CHECK
 // lifetime_ref_hook (Metal.hpp): +1 a retain, +2 an adopted (+1 returned) handle, -1 a release
 void
 refHook(obj_handle_t handle, int delta) {
@@ -180,10 +181,11 @@ refHook(obj_handle_t handle, int delta) {
   }
   logEarly(early, total);
 }
+#endif
 
 std::string
 lifecheckSection(double, uint32_t) {
-  if (!g_check)
+  if (!check())
     return {};
   auto &s = state();
   std::lock_guard lock(s.mutex);
@@ -198,19 +200,24 @@ lifecheckSection(double, uint32_t) {
 
 gw2::SectionRegistrar g_lifecheck_section("LIFECHECK", lifecheckSection);
 
+} // namespace
+
+// only in the diagnostic build: DXMT_LIFETIME_CHECK=1 is ignored otherwise (attachQueue warns)
+extern const bool g_check = kBuilt && readCheck();
+
+#ifdef DXMT_GW2_LIFETIME_CHECK
+namespace {
 struct HookInstaller {
   HookInstaller() {
     if (g_check)
       WMT::lifetime_ref_hook = &refHook;
   }
 };
-
 } // namespace
-
-extern const bool g_check = readCheck();
 
 // after g_check: same translation unit, initialised in order
 HookInstaller g_hook_installer;
+#endif
 
 bool
 unretained() {
@@ -223,9 +230,17 @@ unretainedState() {
   return unretained() ? "1" : "0";
 }
 
+bool
+keepUntilRetired() {
+  static const bool on = unretained() || check();
+  return on;
+}
+
 const char *
 checkState() {
-  return g_check ? "1" : "0";
+  if (g_check)
+    return "1";
+  return !kBuilt && readCheck() ? "unbuilt" : "0";
 }
 
 uint32_t
@@ -238,7 +253,15 @@ attachQueue() {
     );
   else
     Logger::info("Command buffers: retained references (DXMT_UNRETAINED=0), as upstream");
-  if (!g_check)
+  if (!kBuilt && readCheck()) {
+    static std::atomic<bool> warned{false};
+    if (!warned.exchange(true))
+      Logger::warn(
+          "Lifetime check: DXMT_LIFETIME_CHECK=1 ignored: this build doesn't have it (a diagnostic build: meson "
+          "-Dgw2_lifetime_check=true)"
+      );
+  }
+  if (!check())
     return id;
   auto &s = state();
   bool first;

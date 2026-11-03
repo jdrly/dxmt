@@ -1,6 +1,8 @@
 option('native_llvm_path', type : 'string', value: '/usr/local/opt/llvm@15')
 option('build_airconv_for_windows', type : 'boolean', value : false)
 option('dxmt_debug', type : 'boolean', value : false)
+# gw2 (#31): build DXMT_LIFETIME_CHECK in (a diagnostic build); without it the check and its hooks compile out
+option('gw2_lifetime_check', type : 'boolean', value : false)
 option('dxmt_native', type : 'boolean', value : false, deprecated : true)
 option('wine_build_path', type : 'string')
 option('wine_install_path', type : 'string')

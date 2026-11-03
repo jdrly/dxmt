@@ -202,7 +202,7 @@ CommandQueue::~CommandQueue() {
   // split-off ones were committed earlier on this queue and complete before their chunk's last.
   // gw2 (#31): the same with DXMT_UNRETAINED=1 (the command buffers retain nothing at all) and with
   // DXMT_LIFETIME_CHECK=1 (whose stamps assume it).
-  if (gw2::residencyActive() || unretained_ || gw2::lifetime::check()) {
+  if (gw2::residencyActive() || gw2::lifetime::keepUntilRetired()) {
     for (unsigned i = 0; i < kCommandChunkCountMax; i++) {
       auto &cmdbuf = chunks[i].attached_cmdbuf;
       if (!cmdbuf)

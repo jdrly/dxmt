@@ -73,7 +73,7 @@ public:
   // committed chunk retired first. The immediate context goes first (in the members' own order), so
   // its promote-flush watchdog can't commit another chunk after the wait.
   ~MTLD3D11DeviceImpl() {
-    if (!gw2::lifetime::unretained() && !gw2::lifetime::check())
+    if (!gw2::lifetime::keepUntilRetired())
       return;
     d3d10_.reset();
     context_.reset();

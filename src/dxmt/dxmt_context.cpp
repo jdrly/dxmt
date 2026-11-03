@@ -1072,7 +1072,10 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer &cmdbuf, uint64_t seqI
   // gw2 (#31): DXMT_LIFETIME_CHECK stamps everything this chunk's command buffers use
   using LtKind = gw2::lifetime::Kind;
   using LtEncoder = gw2::lifetime::Encoder;
-  const bool lt_on = gw2::lifetime::check();
+  const bool lt_on = gw2::lifetime::check(); // a compile-time false without the diagnostic build
+  // gw2 (#31): DXMT_UNRETAINED=1 or the check: the chunk holds what a retained command buffer would;
+  // both off, today's path (the encoder data releases them here, the command buffer holds them)
+  const bool keep = gw2::lifetime::keepUntilRetired();
   const uint32_t lt_queue = queue_.LifetimeId();
   auto lt = [&](obj_handle_t object, LtKind kind) { gw2::lifetime::use(lt_queue, seqId, object, kind); };
   if (lt_on) {
@@ -1358,8 +1361,10 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer &cmdbuf, uint64_t seqI
       // gw2 (#31): the drawable (its texture is the pass's attachment) and the presenter (the present
       // pass's pipelines and gamma table) stay held until the chunk retires: Metal 4 and
       // DXMT_UNRETAINED=1 don't retain them, and Core Animation is no guarantee before the GPU is done
-      queue_.KeepUntilRetired(seqId, WMT::Reference<WMT::MetalDrawable>(drawable));
-      queue_.KeepUntilRetired(seqId, std::move(data->presenter));
+      if (keep) {
+        queue_.KeepUntilRetired(seqId, WMT::Reference<WMT::MetalDrawable>(drawable));
+        queue_.KeepUntilRetired(seqId, std::move(data->presenter));
+      }
       data->~PresentData();
       break;
     }
@@ -1473,7 +1478,8 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer &cmdbuf, uint64_t seqI
         lt(data->scaler->scaler(), LtKind::Scaler);
         lt(data->scaler->fence(), LtKind::Fence);
       }
-      queue_.KeepUntilRetired(seqId, std::move(data->scaler)); // gw2 (#31): its scaler and fence
+      if (keep)
+        queue_.KeepUntilRetired(seqId, std::move(data->scaler)); // gw2 (#31): its scaler and fence
       data->~SpatialUpscaleData();
       break;
     }
@@ -1481,7 +1487,8 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer &cmdbuf, uint64_t seqI
       auto data = static_cast<SignalEventData *>(current);
       cmdbuf.encodeSignalEvent(data->event, data->value);
       lt(data->event, LtKind::Event); // gw2 (#31)
-      queue_.KeepUntilRetired(seqId, std::move(data->event)); // gw2 (#31): an ID3D11Fence may go first
+      if (keep)
+        queue_.KeepUntilRetired(seqId, std::move(data->event)); // gw2 (#31): an ID3D11Fence may go first
       data->~SignalEventData();
       break;
     }
@@ -1489,7 +1496,8 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer &cmdbuf, uint64_t seqI
       auto data = static_cast<WaitForEventData *>(current);
       cmdbuf.encodeWaitForEvent(data->event, data->value);
       lt(data->event, LtKind::Event); // gw2 (#31)
-      queue_.KeepUntilRetired(seqId, std::move(data->event)); // gw2 (#31)
+      if (keep)
+        queue_.KeepUntilRetired(seqId, std::move(data->event)); // gw2 (#31)
       data->~WaitForEventData();
       break;
     }
@@ -1521,7 +1529,8 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer &cmdbuf, uint64_t seqI
         lt(data->scaler->scaler(), LtKind::Scaler);
         lt(data->scaler->fence(), LtKind::Fence);
       }
-      queue_.KeepUntilRetired(seqId, std::move(data->scaler)); // gw2 (#31)
+      if (keep)
+        queue_.KeepUntilRetired(seqId, std::move(data->scaler)); // gw2 (#31)
       data->~TemporalUpscaleData();
       break;
     }

@@ -22,10 +22,15 @@
 // - Device teardown: with DXMT_UNRETAINED=1 or DXMT_LIFETIME_CHECK=1 the D3D11 device waits for
 //   every committed chunk before its caches go, and the queue for its command buffers.
 //
+// The keep lists and the teardown waits act only with DXMT_UNRETAINED=1 or the check on; with both
+// off, the retained command buffers hold those objects as upstream (keepUntilRetired()).
+//
 // DXMT_LIFETIME_CHECK=1 checks it, as d9mt's D9MT_LIFETIME_CHECK: every object a chunk uses is
 // stamped with the chunk's sequence on the encode thread, and the release of DXMT's last reference
-// to it before the GPU completed that chunk is logged (`LIFETIME`, once per object type). Off: one
-// load and a predictable branch at each stamp site, no call.
+// to it before the GPU completed that chunk is logged (`LIFETIME`, once per object type). It exists
+// only in a diagnostic build (meson -Dgw2_lifetime_check=true, DXMT_GW2_LIFETIME_CHECK): otherwise
+// check() is a compile-time false, every stamp site and the Metal.hpp reference hook compile out,
+// and DXMT_LIFETIME_CHECK=1 is ignored with a warning.
 
 #include "winemetal.h"
 #include <cstdint>
@@ -55,16 +60,27 @@ enum class Kind : uint8_t {
 
 enum class Encoder : uint8_t { Render, Compute, Blit };
 
-// DXMT_LIFETIME_CHECK=1, read once when the DLL loads
+#ifdef DXMT_GW2_LIFETIME_CHECK
+inline constexpr bool kBuilt = true;
+#else
+inline constexpr bool kBuilt = false;
+#endif
+
+// DXMT_LIFETIME_CHECK=1 in a diagnostic build, read once when the DLL loads; false otherwise
 extern const bool g_check;
 
+// a compile-time false without the diagnostic build
 inline bool
 check() {
-  return g_check;
+  return kBuilt && g_check;
 }
 
 // DXMT_UNRETAINED=1: the chunks' command buffers don't retain what they use
 bool unretained();
+
+// DXMT_UNRETAINED=1 or the check: DXMT itself holds what the retained command buffers would hold
+// (the keep lists, the teardown waits). False: today's path.
+bool keepUntilRetired();
 
 // A command queue starts (its id for the stamps; 0 with the check off) and logs the command
 // buffer mode once.
@@ -77,7 +93,7 @@ void detachQueue(uint32_t queue);
 void completedSlow(uint32_t queue, uint64_t seq);
 inline void
 completed(uint32_t queue, uint64_t seq) {
-  if (__builtin_expect(g_check, 0))
+  if (check())
     completedSlow(queue, seq);
 }
 
@@ -85,7 +101,7 @@ completed(uint32_t queue, uint64_t seq) {
 void useSlow(uint32_t queue, uint64_t seq, obj_handle_t object, Kind kind);
 inline void
 use(uint32_t queue, uint64_t seq, obj_handle_t object, Kind kind) {
-  if (__builtin_expect(g_check, 0) && object)
+  if (check() && object)
     useSlow(queue, seq, object, kind);
 }
 
@@ -93,7 +109,7 @@ use(uint32_t queue, uint64_t seq, obj_handle_t object, Kind kind) {
 void useAllocationSlow(uint32_t queue, uint64_t seq, Allocation *allocation);
 inline void
 useAllocation(uint32_t queue, uint64_t seq, Allocation *allocation) {
-  if (__builtin_expect(g_check, 0))
+  if (check())
     useAllocationSlow(queue, seq, allocation);
 }
 
@@ -105,11 +121,11 @@ void useCommands(uint32_t queue, uint64_t seq, const wmtcmd_base *head, Encoder 
 void allocationFreedSlow(Allocation *allocation);
 inline void
 allocationFreed(Allocation *allocation) {
-  if (__builtin_expect(g_check, 0))
+  if (check())
     allocationFreedSlow(allocation);
 }
 
-// For the startup line: "1" or "0"
+// For the startup line: "1" or "0"; checkState() also "unbuilt" (asked for, not in this build)
 const char *unretainedState();
 const char *checkState();
 

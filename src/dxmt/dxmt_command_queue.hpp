@@ -143,8 +143,9 @@ private:
   // and, with DXMT_STATS on, reads its GPU timestamps. reset() keeps the capacity.
   std::vector<WMT::Reference<WMT::CommandBuffer>> split_cmdbufs;
   // gw2 (#31): what the chunk's command buffers use that nothing else holds until the chunk retires
-  // (CommandQueue::KeepUntilRetired): Metal references (the drawable, events) owned here, and the
-  // presenter and MetalFX scalers. Released in reset(), on the finish thread once the GPU is done.
+  // (CommandQueue::KeepUntilRetired, with DXMT_UNRETAINED=1 or the check; empty otherwise): Metal
+  // references (the drawable, events) owned here, and the presenter and MetalFX scalers. Released in
+  // reset(), on the finish thread once the GPU is done.
   std::vector<obj_handle_t> keep_objects;
   std::vector<Rc<Presenter>> keep_presenters;
   std::vector<Rc<SpatialScaler>> keep_spatial_scalers;
@@ -255,7 +256,8 @@ public:
     return unretained_ ? commandQueue.commandBufferWithUnretainedReferences() : commandQueue.commandBuffer();
   }
 
-  // gw2 (#31): chunk `seq` (being encoded, encode thread only) holds these until it retires
+  // gw2 (#31): chunk `seq` (being encoded, encode thread only) holds these until it retires; called
+  // only with gw2::lifetime::keepUntilRetired() (DXMT_UNRETAINED=1 or the check)
   template <typename T>
   void
   KeepUntilRetired(uint64_t seq, WMT::Reference<T> &&object) {
