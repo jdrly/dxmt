@@ -137,8 +137,9 @@ public:
 private:
   CommandQueue *queue;
   WMT::Reference<WMT::CommandBuffer> attached_cmdbuf;
-  // gw2 (#3): the buffers the present split committed before attached_cmdbuf, kept (with
-  // DXMT_STATS on) until the chunk completes so the finish thread can read their GPU timestamps
+  // gw2 (#3, #10): the buffers the present split committed before attached_cmdbuf (one per Present
+  // in the chunk), kept until the chunk completes: the finish thread checks each for a GPU error
+  // and, with DXMT_STATS on, reads its GPU timestamps. reset() keeps the capacity.
   std::vector<WMT::Reference<WMT::CommandBuffer>> split_cmdbufs;
   
   CommandList<ArgumentEncodingContext> list_enc;
@@ -168,6 +169,12 @@ private:
   uint32_t EncodingThread();
 
   uint32_t WaitForFinishThread();
+
+  // gw2 (#10): a GPU error in a split-off buffer of chunk `seq`; finish thread only
+  void ReportSplitError(CommandChunk &chunk, uint64_t seq, size_t index, WMT::CommandBuffer cmdbuf);
+  uint64_t split_errors_ = 0;        // all of them, logged or not
+  uint64_t split_errors_logged_ = 0; // split_errors_ at the last line
+  clock::time_point split_error_last_line_{};
 
   std::atomic_uint64_t ready_for_encode = 1; // we start from 1, so 0 is always coherent
   std::atomic_uint64_t ready_for_commit = 1;
@@ -229,7 +236,8 @@ public:
     return commandQueue.commandBuffer();
   }
 
-  // gw2 (#3): a buffer the present split committed off chunk `seq`, for the GPU line
+  // gw2 (#3, #10): a buffer the present split committed off chunk `seq`, for the finish thread's
+  // error check and the GPU line
   void
   KeepSplitCommandBuffer(uint64_t seq, WMT::CommandBuffer cmdbuf) {
     chunks[seq % chunk_count_].split_cmdbufs.emplace_back(cmdbuf);

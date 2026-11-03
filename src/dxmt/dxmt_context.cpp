@@ -1262,8 +1262,8 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer &cmdbuf, uint64_t seqI
       if (present_split_ && encoder_count - encoder_index > 0) {
         gw2::residencyBeforeCommit(); // gw2 (#29)
         cmdbuf.commit();
-        if (gw2::statsEnabled())
-          queue_.KeepSplitCommandBuffer(seqId, cmdbuf); // gw2 (#3): its GPU span counts for the frame
+        // gw2 (#3, #10): the finish thread checks it for a GPU error; its GPU span counts for the frame
+        queue_.KeepSplitCommandBuffer(seqId, cmdbuf);
         cmdbuf = queue_.CreateCommandBuffer();
         // gw2 (#24): the timestamps estimated after this point read the present's buffer
         if (readbacks.timestamp_estimate)
