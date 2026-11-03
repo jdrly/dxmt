@@ -40,7 +40,7 @@ bump(std::atomic<uint64_t> Counts::*field, uint64_t v = 1) {
 }
 
 std::atomic<uint64_t> g_shader_max_ns, g_pso_max_ns;
-std::atomic<uint64_t> g_wait_n, g_wait_ns, g_wait_max_ns, g_slow_frames;
+std::atomic<uint64_t> g_wait_max_ns, g_slow_frames; // wait count and time: the per-cause counters (#46)
 
 // gw2 (#46): waits by what the pipeline was doing when the wait started
 enum WaitCause { CauseQueued, CauseVariantQueued, CauseVariant, CauseBuilding, CauseOther, CauseCount };
@@ -196,18 +196,32 @@ archiveSection() {
   return text;
 }
 
+// The window's waits, drained once per cause (#46): `wait=` is their sum, so it always equals the
+// `waitcause=` breakdown, whatever window a wait finishing during the drain lands in.
+struct WaitWindow {
+  uint64_t n[CauseCount], ns[CauseCount], total_n = 0, total_ns = 0, archbusy = 0;
+};
+
+WaitWindow
+drainWaits() {
+  WaitWindow w;
+  for (int c = 0; c < CauseCount; c++) {
+    w.n[c] = g_cause_n[c].exchange(0, std::memory_order_relaxed);
+    w.ns[c] = g_cause_ns[c].exchange(0, std::memory_order_relaxed);
+    w.total_n += w.n[c];
+    w.total_ns += w.ns[c];
+  }
+  w.archbusy = g_archbusy.exchange(0, std::memory_order_relaxed);
+  return w;
+}
+
 // " waitcause=queued:N/ms,variantq:…,variant:…,building:…[,other:…] archbusy=N" (#46), window totals;
 // empty in a window without waits
 std::string
-windowCauses() {
-  uint64_t n[CauseCount], ns[CauseCount], total = 0;
-  for (int c = 0; c < CauseCount; c++) {
-    n[c] = g_cause_n[c].exchange(0, std::memory_order_relaxed);
-    ns[c] = g_cause_ns[c].exchange(0, std::memory_order_relaxed);
-    total += n[c];
-  }
-  auto archbusy = g_archbusy.exchange(0, std::memory_order_relaxed);
-  if (!total)
+windowCauses(const WaitWindow &w) {
+  auto &n = w.n;
+  auto &ns = w.ns;
+  if (!w.total_n)
     return {};
   std::string text = " waitcause=";
   for (int c = 0; c < CauseCount; c++) {
@@ -216,7 +230,7 @@ windowCauses() {
     text += std::format("{}{}:{}/{:.1f}", c ? "," : "", kCauseNames[c], n[c], ns[c] / 1e6);
   }
   if (psoArchiveOn())
-    text += std::format(" archbusy={}", archbusy);
+    text += std::format(" archbusy={}", w.archbusy);
   return text;
 }
 
@@ -226,13 +240,14 @@ section(double, uint32_t) {
   auto queue_now = std::max<int64_t>(0, g_queue.load(std::memory_order_relaxed));
   auto queue_max = g_queue_max.exchange(queue_now, std::memory_order_relaxed);
   auto &w = g_window;
+  auto waits = drainWaits();
   return std::format(
       "variants={} air={}/{} pso={}/{} built={} failed={} build=shader:{:.0f}/{:.1f} pipeline:{:.0f}/{:.1f} "
       "queue={}/{} threads={} wait={}x {:.1f}/{:.1f} slow={}{}{}",
       x(w.variants), x(w.air_hit), x(w.air_miss), x(w.pso_hit), x(w.pso_miss), x(w.built), x(w.failed),
       x(w.shader_ns) / 1e6, x(g_shader_max_ns) / 1e6, x(w.pso_ns) / 1e6, x(g_pso_max_ns) / 1e6, queue_now,
-      queue_max, g_threads.load(std::memory_order_relaxed), x(g_wait_n), x(g_wait_ns) / 1e6, x(g_wait_max_ns) / 1e6,
-      x(g_slow_frames), windowCauses(), archiveSection()
+      queue_max, g_threads.load(std::memory_order_relaxed), waits.total_n, waits.total_ns / 1e6,
+      x(g_wait_max_ns) / 1e6, x(g_slow_frames), windowCauses(waits), archiveSection()
   );
 }
 
@@ -404,8 +419,6 @@ CompileWaitScope::~CompileWaitScope() {
   if (!t0_)
     return;
   uint64_t ns = nowNs() - t0_;
-  g_wait_n.fetch_add(1, std::memory_order_relaxed);
-  g_wait_ns.fetch_add(ns, std::memory_order_relaxed);
   atomicMax(g_wait_max_ns, ns);
   g_cause_n[cause_].fetch_add(1, std::memory_order_relaxed);
   g_cause_ns[cause_].fetch_add(ns, std::memory_order_relaxed);
