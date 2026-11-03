@@ -2,6 +2,7 @@
 #include "dxmt_gw2_stats.hpp"
 #include "log/log.hpp"
 #include <algorithm>
+#include <cstdlib>
 #include <format>
 #include <thread>
 
@@ -47,6 +48,17 @@ Mtl4Queue::Mtl4Queue(WMT::Device device, uint32_t slots) : device_(device) {
     if (!slot.allocator)
       return; // valid() is false
   }
+  // a command buffer per slot, and two spare for the present split: a failure here still leaves the
+  // device on Metal 3 (nothing was committed yet); later ones are fatal (acquire)
+  for (uint32_t i = 0; i < slots + 2; i++) {
+    auto record = std::make_unique<Mtl4Commit>();
+    record->cmdbuf = device.newMTL4CommandBuffer();
+    if (!record->cmdbuf)
+      return; // valid() is false
+    free_.push_back(record.get());
+    records_.push_back(std::move(record));
+  }
+  ready_ = true;
   g_any.store(true, std::memory_order_relaxed);
 }
 
@@ -73,6 +85,15 @@ Mtl4Queue::acquire() {
   }
   auto record = std::make_unique<Mtl4Commit>();
   record->cmdbuf = device_.newMTL4CommandBuffer();
+  if (!record->cmdbuf) {
+    // Earlier chunks may still be on the GPU and this one can't be encoded or committed: stop the
+    // process rather than commit nothing and wait for it, or free what the GPU still uses.
+    Logger::err(std::format(
+        "Metal 4: newCommandBuffer failed after {} command buffers; DXMT can't continue on Metal 4, aborting",
+        records_.size()
+    ));
+    std::abort();
+  }
   std::lock_guard lock(pool_mutex_);
   records_.push_back(std::move(record));
   return records_.back().get();

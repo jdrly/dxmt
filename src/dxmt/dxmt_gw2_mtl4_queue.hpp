@@ -68,10 +68,10 @@ public:
   Mtl4Queue(const Mtl4Queue &) = delete;
   Mtl4Queue &operator=(const Mtl4Queue &) = delete;
 
-  // the queue, its event and every slot's allocator were created
+  // the queue, its event, every slot's allocator and the first command buffers were created
   bool
   valid() const {
-    return queue_ && event_ && !slots_.empty() && slots_.back().allocator;
+    return ready_;
   }
 
   WMT::MTL4CommandQueue
@@ -136,6 +136,7 @@ private:
   uint64_t next_value_ = 0; // encode thread; the last value committed
   std::atomic<uint64_t> committed_value_{0};
   std::vector<Slot> slots_;
+  bool ready_ = false;
 
   std::mutex pool_mutex_;
   std::vector<std::unique_ptr<Mtl4Commit>> records_; // every record, for stable addresses
