@@ -14,6 +14,7 @@
 //
 // Everything is counted only with DXMT_STATS on, except what the archive needs.
 
+#include <atomic>
 #include <cstdint>
 #include <string>
 
@@ -35,16 +36,36 @@ void compileThreads(uint64_t threads);
 // The encode thread (or whichever thread encodes chunks), before encoding a chunk of `frame`.
 void compileEncodeFrame(uint64_t frame);
 
-// Around a wait in GetPipeline for a pipeline that isn't ready yet.
+// gw2 (#46): a compile task's timeline, stamped by the scheduler (submit, run, parked, done) and by
+// the pipeline tasks (build), with DXMT_STATS only; the encode thread reads it when it has to wait
+// for the task. A task submitted while the stats were off stays `None` and isn't classified.
+struct CompileTrace {
+  enum State : uint8_t { None = 0, Queued, Running, Parked, Building, Done };
+  std::atomic<uint8_t> state{None};
+  std::atomic<int64_t> submit_ns{0}, start_ns{0}, build_ns{0}, done_ns{0}, parked_at_ns{0}, parked_ns{0};
+  std::atomic<const CompileTrace *> dep{nullptr}; // what it was last parked on (a shader variant)
+};
+void compileTraceSubmit(CompileTrace &t);
+void compileTraceRun(CompileTrace &t);                           // a worker starts or resumes it
+void compileTraceParked(CompileTrace &t, const CompileTrace *dep); // it returned a dependency
+void compileTraceBuild(CompileTrace &t);                         // the Metal pipeline build starts
+void compileTraceDone(CompileTrace &t);
+
+// Around a wait in GetPipeline for a pipeline that isn't ready yet; with the pipeline's trace, the
+// wait is classified by what the pipeline was doing when it started (#46).
 class CompileWaitScope {
 public:
-  CompileWaitScope();
+  explicit CompileWaitScope(const CompileTrace *trace = nullptr);
   ~CompileWaitScope();
   CompileWaitScope(const CompileWaitScope &) = delete;
   CompileWaitScope &operator=(const CompileWaitScope &) = delete;
 
 private:
   int64_t t0_ = 0;
+  const CompileTrace *trace_ = nullptr;
+  int cause_ = 0;
+  int64_t depth_ = 0;
+  int64_t archq_ = -1;
 };
 
 // The switches as parsed (once), for the code and the startup line.

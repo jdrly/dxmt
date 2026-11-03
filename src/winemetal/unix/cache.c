@@ -1,4 +1,5 @@
 #import <Foundation/Foundation.h>
+#include <string.h>
 #include "sqlite3.h"
 #define WINEMETAL_API
 #include "../winemetal_thunks.h"
@@ -237,12 +238,41 @@ _WMTSetMetalShaderCachePath(void *obj) {
   return 0;
 }
 
+/* gw2 (#46): the path Metal uses (fixed at its first device creation) */
+int
+_WMTGetMetalShaderCachePath(void *obj) {
+  struct unixcall_getmetalcachepath *params = obj;
+  @autoreleasepool {
+    NSString *path = MTLGetShaderCachePath();
+    const char *utf8 = path ? path.UTF8String : NULL;
+    size_t len = utf8 ? strlen(utf8) : 0;
+    char *buf = params->buf.ptr;
+    if (buf && params->size) {
+      size_t n = len < params->size - 1 ? len : params->size - 1;
+      if (n)
+        memcpy(buf, utf8, n);
+      buf[n] = 0;
+    }
+    params->ret_length = len;
+  }
+  return 0;
+}
+
 #else
 
 int
 _WMTSetMetalShaderCachePath(void *obj) {
   struct unixcall_setmetalcachepath *params = obj;
   params->ret_success = 0;
+  return 0;
+}
+
+int
+_WMTGetMetalShaderCachePath(void *obj) {
+  struct unixcall_getmetalcachepath *params = obj;
+  if (params->buf.ptr && params->size)
+    ((char *)params->buf.ptr)[0] = 0;
+  params->ret_length = 0;
   return 0;
 }
 

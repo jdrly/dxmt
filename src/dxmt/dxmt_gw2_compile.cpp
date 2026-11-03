@@ -40,7 +40,12 @@ bump(std::atomic<uint64_t> Counts::*field, uint64_t v = 1) {
 }
 
 std::atomic<uint64_t> g_shader_max_ns, g_pso_max_ns;
-std::atomic<uint64_t> g_wait_n, g_wait_ns, g_wait_max_ns, g_slow_frames;
+std::atomic<uint64_t> g_wait_max_ns, g_slow_frames; // wait count and time: the per-cause counters (#46)
+
+// gw2 (#46): waits by what the pipeline was doing when the wait started
+enum WaitCause { CauseQueued, CauseVariantQueued, CauseVariant, CauseBuilding, CauseOther, CauseCount };
+constexpr const char *kCauseNames[CauseCount] = {"queued", "variantq", "variant", "building", "other"};
+std::atomic<uint64_t> g_cause_n[CauseCount], g_cause_ns[CauseCount], g_archbusy;
 std::atomic<int64_t> g_queue;
 std::atomic<uint64_t> g_queue_max, g_threads;
 
@@ -48,6 +53,13 @@ std::atomic<uint64_t> g_queue_max, g_threads;
 
 thread_local uint64_t t_frame = ~0ull;
 thread_local uint64_t t_wait_n = 0, t_wait_ns = 0, t_wait_max_ns = 0;
+// gw2 (#46): the frame's waits by cause, and its longest wait's timeline (ns; -1 = not known)
+thread_local uint64_t t_cause_n[CauseCount];
+struct LongestWait {
+  int cause = CauseOther;
+  int64_t lead = -1, queue = -1, parked = -1, build = -1, varq = -1, varc = -1, depth = 0, archq = -1;
+};
+thread_local LongestWait t_longest;
 thread_local int64_t t_last_line_ns = 0;
 thread_local uint64_t t_dropped = 0;
 
@@ -57,6 +69,23 @@ waitLineMs() {
 }
 
 constexpr int64_t kLineIntervalNs = 200'000'000; // at most 5 COMPILE frame lines per second
+
+// " cause=queued:N,… longest=<cause> lead:… queue:… parked:… build:… varq:… varc:… depth:… archq:…"
+// (#46): the frame's waits by cause and the timeline of its longest wait, ms; "-" where unknown
+std::string
+frameCauses() {
+  std::string text = " cause=";
+  for (int c = 0; c < CauseCount; c++)
+    text += std::format("{}{}:{}", c ? "," : "", kCauseNames[c], t_cause_n[c]);
+  auto ms = [](int64_t ns) { return ns < 0 ? std::string("-") : std::format("{:.1f}", ns / 1e6); };
+  auto &l = t_longest;
+  text += std::format(
+      " longest={} lead:{} queue:{} parked:{} build:{} varq:{} varc:{} depth:{} archq:{}", kCauseNames[l.cause],
+      ms(l.lead), ms(l.queue), ms(l.parked), ms(l.build), ms(l.varq), ms(l.varc), l.depth,
+      l.archq < 0 ? std::string("-") : std::to_string(l.archq)
+  );
+  return text;
+}
 
 void
 finishFrame() {
@@ -78,10 +107,10 @@ finishFrame() {
     if (now - t_last_line_ns >= kLineIntervalNs) {
       Logger::info(std::format(
           "COMPILE frame={} wait={}x {:.1f}/{:.1f} queue={} variants={} air={}/{} pso={}/{} built={} failed={} "
-          "build=shader:{:.0f} pipeline:{:.0f}{}",
+          "build=shader:{:.0f} pipeline:{:.0f}{}{}",
           t_frame, t_wait_n, ms, t_wait_max_ns / 1e6, std::max<int64_t>(0, g_queue.load(std::memory_order_relaxed)),
           variants, air_hit, air_miss, pso_hit, pso_miss, built, failed, shader_ns / 1e6, pso_ns / 1e6,
-          t_dropped ? std::format(" dropped={}", t_dropped) : std::string()
+          frameCauses(), t_dropped ? std::format(" dropped={}", t_dropped) : std::string()
       ));
       t_last_line_ns = now;
       t_dropped = 0;
@@ -90,6 +119,9 @@ finishFrame() {
     }
   }
   t_wait_n = t_wait_ns = t_wait_max_ns = 0;
+  for (auto &n : t_cause_n)
+    n = 0;
+  t_longest = {};
 }
 
 // --- PSO archives
@@ -164,19 +196,58 @@ archiveSection() {
   return text;
 }
 
+// The window's waits, drained once per cause (#46): `wait=` is their sum, so it always equals the
+// `waitcause=` breakdown, whatever window a wait finishing during the drain lands in.
+struct WaitWindow {
+  uint64_t n[CauseCount], ns[CauseCount], total_n = 0, total_ns = 0, archbusy = 0;
+};
+
+WaitWindow
+drainWaits() {
+  WaitWindow w;
+  for (int c = 0; c < CauseCount; c++) {
+    w.n[c] = g_cause_n[c].exchange(0, std::memory_order_relaxed);
+    w.ns[c] = g_cause_ns[c].exchange(0, std::memory_order_relaxed);
+    w.total_n += w.n[c];
+    w.total_ns += w.ns[c];
+  }
+  w.archbusy = g_archbusy.exchange(0, std::memory_order_relaxed);
+  return w;
+}
+
+// " waitcause=queued:N/ms,variantq:…,variant:…,building:…[,other:…] archbusy=N" (#46), window totals;
+// empty in a window without waits
+std::string
+windowCauses(const WaitWindow &w) {
+  auto &n = w.n;
+  auto &ns = w.ns;
+  if (!w.total_n)
+    return {};
+  std::string text = " waitcause=";
+  for (int c = 0; c < CauseCount; c++) {
+    if (c == CauseOther && !n[c])
+      continue;
+    text += std::format("{}{}:{}/{:.1f}", c ? "," : "", kCauseNames[c], n[c], ns[c] / 1e6);
+  }
+  if (psoArchiveOn())
+    text += std::format(" archbusy={}", w.archbusy);
+  return text;
+}
+
 std::string
 section(double, uint32_t) {
   auto x = [](std::atomic<uint64_t> &v) { return v.exchange(0, std::memory_order_relaxed); };
   auto queue_now = std::max<int64_t>(0, g_queue.load(std::memory_order_relaxed));
   auto queue_max = g_queue_max.exchange(queue_now, std::memory_order_relaxed);
   auto &w = g_window;
+  auto waits = drainWaits();
   return std::format(
       "variants={} air={}/{} pso={}/{} built={} failed={} build=shader:{:.0f}/{:.1f} pipeline:{:.0f}/{:.1f} "
-      "queue={}/{} threads={} wait={}x {:.1f}/{:.1f} slow={}{}",
+      "queue={}/{} threads={} wait={}x {:.1f}/{:.1f} slow={}{}{}",
       x(w.variants), x(w.air_hit), x(w.air_miss), x(w.pso_hit), x(w.pso_miss), x(w.built), x(w.failed),
       x(w.shader_ns) / 1e6, x(g_shader_max_ns) / 1e6, x(w.pso_ns) / 1e6, x(g_pso_max_ns) / 1e6, queue_now,
-      queue_max, g_threads.load(std::memory_order_relaxed), x(g_wait_n), x(g_wait_ns) / 1e6, x(g_wait_max_ns) / 1e6,
-      x(g_slow_frames), archiveSection()
+      queue_max, g_threads.load(std::memory_order_relaxed), waits.total_n, waits.total_ns / 1e6,
+      x(g_wait_max_ns) / 1e6, x(g_slow_frames), windowCauses(waits), archiveSection()
   );
 }
 
@@ -253,18 +324,139 @@ compileEncodeFrame(uint64_t frame) {
   t_frame = frame;
 }
 
-CompileWaitScope::CompileWaitScope() {
-  if (statsEnabled())
-    t0_ = nowNs();
+// --- gw2 (#46): compile task timelines (relaxed: each field has one writer at a time, and the
+// encode thread reads them only to classify and report, after the task's done flag for the end)
+
+void
+compileTraceSubmit(CompileTrace &t) {
+  if (!statsEnabled()) {
+    t.state.store(CompileTrace::None, std::memory_order_relaxed);
+    return;
+  }
+  t.start_ns.store(0, std::memory_order_relaxed);
+  t.build_ns.store(0, std::memory_order_relaxed);
+  t.done_ns.store(0, std::memory_order_relaxed);
+  t.parked_ns.store(0, std::memory_order_relaxed);
+  t.parked_at_ns.store(0, std::memory_order_relaxed);
+  t.dep.store(nullptr, std::memory_order_relaxed);
+  t.submit_ns.store(nowNs(), std::memory_order_relaxed);
+  t.state.store(CompileTrace::Queued, std::memory_order_release);
+}
+
+void
+compileTraceRun(CompileTrace &t) {
+  auto s = t.state.load(std::memory_order_acquire);
+  if (s == CompileTrace::None)
+    return;
+  auto now = nowNs();
+  if (!t.start_ns.load(std::memory_order_relaxed))
+    t.start_ns.store(now, std::memory_order_relaxed);
+  if (s == CompileTrace::Parked)
+    t.parked_ns.fetch_add(now - t.parked_at_ns.load(std::memory_order_relaxed), std::memory_order_relaxed);
+  t.state.store(CompileTrace::Running, std::memory_order_release);
+}
+
+void
+compileTraceParked(CompileTrace &t, const CompileTrace *dep) {
+  if (t.state.load(std::memory_order_acquire) == CompileTrace::None)
+    return;
+  t.parked_at_ns.store(nowNs(), std::memory_order_relaxed);
+  t.dep.store(dep, std::memory_order_relaxed);
+  t.state.store(CompileTrace::Parked, std::memory_order_release);
+}
+
+void
+compileTraceBuild(CompileTrace &t) {
+  if (t.state.load(std::memory_order_acquire) == CompileTrace::None)
+    return;
+  t.build_ns.store(nowNs(), std::memory_order_relaxed);
+  t.state.store(CompileTrace::Building, std::memory_order_release);
+}
+
+void
+compileTraceDone(CompileTrace &t) {
+  if (t.state.load(std::memory_order_acquire) == CompileTrace::None)
+    return;
+  t.done_ns.store(nowNs(), std::memory_order_relaxed);
+  t.state.store(CompileTrace::Done, std::memory_order_release);
+}
+
+CompileWaitScope::CompileWaitScope(const CompileTrace *trace) {
+  if (!statsEnabled())
+    return;
+  t0_ = nowNs();
+  trace_ = trace;
+  cause_ = CauseOther;
+  if (trace) {
+    switch (trace->state.load(std::memory_order_acquire)) {
+    case CompileTrace::Queued:
+      cause_ = CauseQueued;
+      break;
+    case CompileTrace::Running:
+    case CompileTrace::Parked: {
+      auto dep = trace->dep.load(std::memory_order_relaxed);
+      cause_ = dep && dep->state.load(std::memory_order_acquire) == CompileTrace::Queued ? CauseVariantQueued
+                                                                                         : CauseVariant;
+      break;
+    }
+    case CompileTrace::Building:
+      cause_ = CauseBuilding;
+      break;
+    default:
+      break;
+    }
+  }
+  depth_ = std::max<int64_t>(0, g_queue.load(std::memory_order_relaxed));
+  if (psoArchiveOn()) {
+    // a wait is rare (a few a second at most) and the encode thread is about to block anyway
+    WMTPSOArchiveStats s = {};
+    WMTPSOArchiveQuery(&s);
+    archq_ = int64_t(s.queued);
+  }
 }
 
 CompileWaitScope::~CompileWaitScope() {
   if (!t0_)
     return;
   uint64_t ns = nowNs() - t0_;
-  g_wait_n.fetch_add(1, std::memory_order_relaxed);
-  g_wait_ns.fetch_add(ns, std::memory_order_relaxed);
   atomicMax(g_wait_max_ns, ns);
+  g_cause_n[cause_].fetch_add(1, std::memory_order_relaxed);
+  g_cause_ns[cause_].fetch_add(ns, std::memory_order_relaxed);
+  if (archq_ > 0)
+    g_archbusy.fetch_add(1, std::memory_order_relaxed);
+  t_cause_n[cause_]++;
+  if (ns > t_wait_max_ns) {
+    // the longest wait of the frame: its pipeline is done now, so its stamps are final
+    LongestWait l;
+    l.cause = cause_;
+    l.depth = depth_;
+    l.archq = archq_;
+    if (trace_ && trace_->state.load(std::memory_order_acquire) != CompileTrace::None) {
+      auto submit = trace_->submit_ns.load(std::memory_order_relaxed);
+      auto start = trace_->start_ns.load(std::memory_order_relaxed);
+      auto build = trace_->build_ns.load(std::memory_order_relaxed);
+      auto done = trace_->done_ns.load(std::memory_order_relaxed);
+      if (submit) {
+        l.lead = t0_ - submit;
+        if (start)
+          l.queue = start - submit;
+      }
+      l.parked = trace_->parked_ns.load(std::memory_order_relaxed);
+      if (build && done >= build)
+        l.build = done - build;
+      if (auto dep = trace_->dep.load(std::memory_order_relaxed);
+          dep && dep->state.load(std::memory_order_acquire) != CompileTrace::None) {
+        auto dsub = dep->submit_ns.load(std::memory_order_relaxed);
+        auto dstart = dep->start_ns.load(std::memory_order_relaxed);
+        auto ddone = dep->done_ns.load(std::memory_order_relaxed);
+        if (dsub && dstart)
+          l.varq = dstart - dsub;
+        if (dstart && ddone >= dstart)
+          l.varc = ddone - dstart;
+      }
+    }
+    t_longest = l;
+  }
   t_wait_n++;
   t_wait_ns += ns;
   t_wait_max_ns = std::max(t_wait_max_ns, ns);

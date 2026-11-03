@@ -93,7 +93,7 @@ public:
 
   void GetPipeline(MTL_COMPILED_TESSELLATION_MESH_PIPELINE *pPipeline) final {
     if (!ready_.load(std::memory_order_acquire)) {
-      gw2::CompileWaitScope wait; // gw2 (#5): the encode thread waits for this compile
+      gw2::CompileWaitScope wait(&compile_trace); // gw2 (#5, #46): the encode thread waits for this compile
       ready_.wait(false, std::memory_order_acquire);
     }
     *pPipeline = {state_rasterization_, hull_reflection.NumOutputElement,
@@ -177,6 +177,7 @@ public:
 
     {
       std::lock_guard<dxmt::mutex> lock(ts_global_mutex);
+      gw2::compileTraceBuild(compile_trace); // gw2 (#46)
       auto t0 = gw2::compileClock(); // gw2 (#5)
       state_rasterization_ =
           device_->GetMTLDevice().newRenderPipelineState(info, err);
