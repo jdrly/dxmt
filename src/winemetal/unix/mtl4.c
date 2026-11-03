@@ -435,14 +435,19 @@ set_buffer_offset(struct WMTMtl4BindingState *state, unsigned stage, uint64_t of
   set_address(state, stage, index, base ? base + offset : 0);
 }
 
-/* Set*Bytes: a copy into the bytes buffer (256-byte aligned, as constant buffers want), bound */
-static void
+/* Set*Bytes: a copy into the bytes buffer (256-byte aligned, as constant buffers want), bound.
+   False: it doesn't fit; the caller stops the replay here (resume) for a new bytes buffer. */
+static bool
 set_bytes(struct replay *r, unsigned stage, const void *bytes, uint64_t length, unsigned index) {
   struct WMTMtl4BindingState *state = r->state;
-  uint64_t offset = (state->bytes_offset + 255) & ~255ull;
-  if (!state->bytes_buffer || offset + length > state->bytes_end) {
+  if (!state->bytes_buffer) {
     state->bytes_overflow++;
-    return;
+    return true; /* skipped: nothing to resume into */
+  }
+  uint64_t offset = (state->bytes_offset + 255) & ~255ull;
+  if (offset + length > state->bytes_end) {
+    state->bytes_needed = length + 256;
+    return false;
   }
   id<MTLBuffer> buffer = (id<MTLBuffer>)state->bytes_buffer;
   memcpy((char *)[buffer contents] + offset, bytes, length);
@@ -451,6 +456,7 @@ set_bytes(struct replay *r, unsigned stage, const void *bytes, uint64_t length, 
   if (index < WMT_MTL4_MAX_BUFFERS)
     state->buffer_base[stage][index] = 0; /* an offset at this index has no buffer to move in */
   set_address(state, stage, index, [buffer gpuAddress] + offset);
+  return true;
 }
 
 static inline void
@@ -497,6 +503,7 @@ NTSTATUS
 _MTL4RenderCommandEncoder_encodeCommands(void *obj) {
   struct unixcall_mtl4_encode *params = obj;
   struct WMTMtl4BindingState *state = params->state.ptr;
+  state->resume.ptr = NULL;
   const struct wmtcmd_base *next = params->cmd_head.ptr;
   struct replay replay = {.state = state}, *r = &replay;
   id<MTL4RenderCommandEncoder> encoder = (id<MTL4RenderCommandEncoder>)params->encoder;
@@ -554,7 +561,10 @@ _MTL4RenderCommandEncoder_encodeCommands(void *obj) {
     }
     case WMTRenderCommandSetFragmentBytes: {
       struct wmtcmd_render_setbytes *body = (struct wmtcmd_render_setbytes *)next;
-      set_bytes(r, F, body->bytes.ptr, body->length, body->index);
+      if (!set_bytes(r, F, body->bytes.ptr, body->length, body->index)) {
+        state->resume.ptr = (void *)next;
+        return STATUS_SUCCESS;
+      }
       break;
     }
     case WMTRenderCommandSetFragmentTexture: {
@@ -851,6 +861,7 @@ NTSTATUS
 _MTL4ComputeCommandEncoder_encodeCommands(void *obj) {
   struct unixcall_mtl4_encode *params = obj;
   struct WMTMtl4BindingState *state = params->state.ptr;
+  state->resume.ptr = NULL;
   const struct wmtcmd_base *next = params->cmd_head.ptr;
   struct replay replay = {.state = state}, *r = &replay;
   id<MTL4ComputeCommandEncoder> encoder = (id<MTL4ComputeCommandEncoder>)params->encoder;
@@ -909,7 +920,10 @@ _MTL4ComputeCommandEncoder_encodeCommands(void *obj) {
       break;
     case WMTComputeCommandSetBytes: {
       struct wmtcmd_compute_setbytes *body = (struct wmtcmd_compute_setbytes *)next;
-      set_bytes(r, C, body->bytes.ptr, body->length, body->index);
+      if (!set_bytes(r, C, body->bytes.ptr, body->length, body->index)) {
+        state->resume.ptr = (void *)next;
+        return STATUS_SUCCESS;
+      }
       break;
     }
     case WMTComputeCommandSetTexture: {

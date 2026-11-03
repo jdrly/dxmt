@@ -1,4 +1,5 @@
 #include "dxmt_gw2_mtl4_encoding.hpp"
+#include <algorithm>
 #include <cstring>
 
 namespace dxmt::gw2 {
@@ -53,19 +54,38 @@ Mtl4Encoding::prepare(Kind kind) {
     state_.tables[WMTMtl4TableCompute] = tables.compute.handle;
   }
   state_.flags = 0;
-  if (state_.bytes_end - state_.bytes_offset < kBytesReserve) {
-    auto [buffer, offset] = bytes_(kBytesArena);
-    state_.bytes_buffer = buffer.handle;
-    state_.bytes_offset = offset;
-    state_.bytes_end = offset + kBytesArena;
-  }
+  if (state_.bytes_end - state_.bytes_offset < kBytesReserve)
+    newArena(kBytesArena);
+}
+
+void
+Mtl4Encoding::newArena(uint64_t size) {
+  size = std::max(size, kBytesArena);
+  auto [buffer, offset] = bytes_(size);
+  state_.bytes_buffer = buffer.handle;
+  state_.bytes_offset = offset;
+  state_.bytes_end = offset + size;
+}
+
+void
+Mtl4Encoding::refill(void *context, WMTMtl4BindingState *state) {
+  auto *self = static_cast<Mtl4Encoding *>(context);
+  self->newArena(state->bytes_needed);
+}
+
+template <typename Encoder>
+Encoder
+Mtl4Encoding::withRefill(Encoder encoder) {
+  encoder.refill = &Mtl4Encoding::refill;
+  encoder.refill_context = this;
+  return encoder;
 }
 
 WMT::MTL4RenderCommandEncoder
 Mtl4Encoding::renderCommandEncoder(WMTRenderPassInfo &info) {
   auto &commit = open();
   prepare(Kind::Render);
-  return WMT::MTL4CommandBuffer{commit.cmdbuf.handle}.renderCommandEncoder(info, &state_);
+  return withRefill(WMT::MTL4CommandBuffer{commit.cmdbuf.handle}.renderCommandEncoder(info, &state_));
 }
 
 WMT::MTL4ComputeCommandEncoder
@@ -73,7 +93,7 @@ Mtl4Encoding::computeCommandEncoder(bool) {
   // a Metal 4 compute encoder's dispatches may run concurrently, as DXMT's concurrent Metal 3 ones
   auto &commit = open();
   prepare(Kind::Compute);
-  return WMT::MTL4CommandBuffer{commit.cmdbuf.handle}.computeCommandEncoder(&state_);
+  return withRefill(WMT::MTL4CommandBuffer{commit.cmdbuf.handle}.computeCommandEncoder(&state_));
 }
 
 WMT::MTL4BlitCommandEncoder
@@ -83,7 +103,7 @@ Mtl4Encoding::blitCommandEncoder() {
   WMT::MTL4BlitCommandEncoder encoder;
   encoder.handle = MTL4CommandBuffer_computeCommandEncoder(commit.cmdbuf.handle, &state_);
   encoder.state = &state_;
-  return encoder;
+  return withRefill(encoder);
 }
 
 void

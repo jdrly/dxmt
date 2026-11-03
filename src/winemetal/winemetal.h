@@ -2342,15 +2342,21 @@ struct WMTMtl4BindingState {
      by itself. The caller commits the set before the commit that needs it and empties it once the
      work retired. 0: no set; UseResource then counts in use_resource_dropped. */
   obj_handle_t residency_set;
+  /* gw2 (#32 part 3): a Set*Bytes that didn't fit between bytes_offset and bytes_end (with a bytes
+     buffer set) stops the replay at that packet: resume is set to it and bytes_needed to what it
+     needs. The caller gives the state a new bytes buffer, clears resume and calls again from it, so
+     no update is skipped. Cleared (0) when the replay reached the end. */
+  struct WMTMemoryPointer resume;
+  uint64_t bytes_needed;
   uint32_t flags;
   /* counters, for the caller's statistics; it resets them */
   uint32_t use_resource_dropped; /* UseResource packets without a residency set (a miss) */
   uint32_t unsupported;          /* packets the replay can't encode on Metal 4 (skipped) */
-  uint32_t bytes_overflow;       /* Set*Bytes without space (skipped) */
+  uint32_t bytes_overflow;       /* Set*Bytes with no bytes buffer at all (skipped) */
   uint32_t blit_barriers;        /* barriers between dependent copies (see encodeBlitCommands) */
   uint32_t residency_adds;       /* allocations added to residency_set (repeats within a call skipped) */
 };
-STATIC_ASSERT(sizeof(struct WMTMtl4BindingState) == 1080); /* the same on i386 and x86_64 */
+STATIC_ASSERT(sizeof(struct WMTMtl4BindingState) == 1096); /* the same on i386 and x86_64 */
 #define WMT_MTL4_NO_ATTACHMENT_RESIDENCY 0x1u
 
 /* written by the commit's feedback handler (on a Metal thread) into the caller's memory: first the

@@ -143,6 +143,7 @@ Sections: a feature registers a function with `gw2::SectionRegistrar` (`src/dxmt
 | `Metal 4: on (DXMT_METAL4=1): this device's chunks go to an MTL4CommandQueue, with N command allocators (one per chunk slot) and commit feedback` | Once per device (command queue), when it takes the Metal 4 path |
 | `Metal 4: newCommandBuffer failed after N command buffers; DXMT can't continue on Metal 4, aborting` | Error, on the Metal 4 path, when Metal returns no command buffer after the queue's first ones (one per slot and two spares, made with the queue): the process aborts, since earlier chunks may still be on the GPU |
 | `Residency: the residency set is attached to this device's Metal 4 queue too (DXMT_METAL4)` | Once per device, on the Metal 4 path, after the usual `Residency:` line |
+| `Metal 4: chunk S's completion event not signalled after 1 s; still waiting` | Warning, on the Metal 4 path: the finish thread waits for a chunk's completion event (after its commits) over a second |
 | `Metal 4: chunk S not complete after 1 s (its command buffer's value V, the queue event at E); still waiting` | Warning, on the Metal 4 path, the first 8 times the finish thread waits over a second for a chunk (a GPU hang or a very long frame); counted in [METAL4](#metal4)'s `slow`. Metal 3's `waitUntilCompleted` blocks the same way without a line |
 
 ### Render thread priority
@@ -735,11 +736,18 @@ branches off), on Metal 4 into a `gw2::Mtl4Encoding` with the same encoder and e
 
 - Command buffers begin when an encoder needs one, on the chunk slot's allocator; a queue-level
   event (`SignalEvent`, `WaitForEvent`, the chunk's own completion event) commits the open buffer
-  and signals or waits at the queue, which is where Metal 4 has them.
+  and signals or waits at the queue, which is where Metal 4 has them. The chunk's completion event
+  is its last queue operation, so the finish thread waits for it as well as for every commit's
+  feedback before it retires the chunk: a chunk without a command buffer, or with queue waits after
+  its last one, is covered too (`Metal 4: chunk S's completion event not signalled after 1 s; still
+  waiting` if it takes long).
 - Render, compute and blit encoders replay today's packets (part 1) through one binding state: the
   queue's argument tables (render: vertex, fragment, object, mesh; compute: one; created with the
   queue, reused by every encoder), and a bytes arena from the argument-buffer ring for `Set*Bytes`
-  (at least 64 KB free before each encoder).
+  (at least 64 KB free before each encoder). A replay that fills the arena stops at the `Set*Bytes`
+  that didn't fit; the encoder gets a new arena (at least as large as that packet needs) and the
+  replay resumes there, so no update is skipped (a `ClearView` with 1,025 rects, one 256-byte slot
+  each, takes several arenas). The arenas stay in the ring until the chunk retires.
 - **Residency** (the issue's prerequisite): Metal 4 makes nothing resident by itself, not even what
   an encoder names directly. Besides the device's set (#29), each chunk slot has a residency set,
   committed with every commit and used by its command buffers, emptied when the chunk retires. The
@@ -771,5 +779,5 @@ branches off), on Metal 4 into a `gw2::Mtl4Encoding` with the same encoder and e
 | `resadds` | Allocations the replays added to the chunks' residency sets (repeats within one replay call left out) |
 | `missed` | `UseResource` packets with no residency set to take them: a resource the GPU may read as zeros or fault on. Must stay 0 |
 | `unsupported` | Packets the replays couldn't encode on Metal 4 (skipped). Must stay 0 |
-| `bytesover` | `Set*Bytes` that didn't fit the chunk's bytes arena (skipped). Must stay 0 |
+| `bytesover` | `Set*Bytes` with no bytes arena to go to (skipped). Must stay 0 |
 | `blitbar` | Barriers the blit replay put between consecutive copies |

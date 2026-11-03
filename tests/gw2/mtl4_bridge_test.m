@@ -393,6 +393,41 @@ test_replay(struct mtl4 *m) {
     replay(_MTL4ComputeCommandEncoder_encodeCommands, enc, &compute_state, &c);
     [(id<MTL4ComputeCommandEncoder>)enc endEncoding];
   }
+  /* part 3: a bytes arena with room for two Set*Bytes and four in the stream: the replay stops at the
+     third (resume), gets a new arena and goes on, as Metal.hpp's encoders do; out2[k] = 100 * k */
+  id<MTLBuffer> out2 = resident_buffer(m, 64);
+  int resumes = 0;
+  {
+    obj_handle_t enc = compute_encoder(m, &compute_state);
+    id<MTLBuffer> small = resident_buffer(m, 512);
+    compute_state.bytes_buffer = H(small), compute_state.bytes_offset = 0, compute_state.bytes_end = 512;
+    static uint32_t bases[4] = {0, 100, 200, 300};
+    struct chain c = {0};
+    struct wmtcmd_compute_setpso *p = chain_add(&c, sizeof(*p), WMTComputeCommandSetPSO);
+    p->pso = H(cs_fill), p->threadgroup_size = (struct WMTSize){1, 1, 1};
+    for (int k = 0; k < 4; k++) {
+      struct wmtcmd_compute_setbuffer *b = chain_add(&c, sizeof(*b), WMTComputeCommandSetBuffer);
+      b->buffer = H(out2), b->offset = 4 * k, b->index = 0;
+      struct wmtcmd_compute_setbytes *sb = chain_add(&c, sizeof(*sb), WMTComputeCommandSetBytes);
+      sb->bytes.ptr = &bases[k], sb->length = 4, sb->index = 1;
+      struct wmtcmd_compute_dispatch *d = chain_add(&c, sizeof(*d), WMTComputeCommandDispatchThreads);
+      d->size = (struct WMTSize){1, 1, 1};
+    }
+    struct unixcall_mtl4_encode e = {.encoder = enc};
+    e.state.ptr = &compute_state;
+    e.cmd_head.ptr = c.head;
+    _MTL4ComputeCommandEncoder_encodeCommands(&e);
+    while (compute_state.resume.ptr && resumes < 8) {
+      resumes++;
+      CHECK(compute_state.bytes_needed >= 4, "bytes_needed=%llu", (unsigned long long)compute_state.bytes_needed);
+      id<MTLBuffer> more = resident_buffer(m, 512);
+      compute_state.bytes_buffer = H(more), compute_state.bytes_offset = 0, compute_state.bytes_end = 512;
+      e.cmd_head.ptr = compute_state.resume.ptr;
+      compute_state.resume.ptr = NULL;
+      _MTL4ComputeCommandEncoder_encodeCommands(&e);
+    }
+    [(id<MTL4ComputeCommandEncoder>)enc endEncoding];
+  }
   struct WMTMtl4CommitFeedback fb;
   if (commit_and_wait(m, &fb, "replay")) {
     const uint8_t *px = readback.contents;
@@ -414,6 +449,10 @@ test_replay(struct mtl4 *m) {
     for (uint32_t i = 0; i < 64; i++)
       computed &= o[i] == (1000 + i) * 2;
     CHECK(computed, "compute replay: out[1]=%u, want %u", o[1], (1000 + 1) * 2);
+    const uint32_t *o2 = out2.contents;
+    CHECK(resumes == 1 && o2[0] == 0 && o2[1] == 100 && o2[2] == 200 && o2[3] == 300,
+          "bytes resume: %d resumes, out2 = %u %u %u %u (want 1 resume, 0 100 200 300)", resumes, o2[0], o2[1], o2[2],
+          o2[3]);
   }
   if (m->chunk) {
     CHECK(render_state.use_resource_dropped == 0, "use_resource_dropped=%u, want 0 with a residency set",

@@ -10,7 +10,8 @@
 // - Every encoder replays today's packets (src/winemetal/unix/mtl4.c) through one binding state:
 //   the queue's argument tables for its kind (render: vertex, fragment, object, mesh; compute: one;
 //   blit: none), the chunk slot's residency set, and a bytes arena from the argument-buffer ring
-//   for Set*Bytes (at least 64 KB free before each encoder; the ring frees it after the chunk).
+//   for Set*Bytes (at least 64 KB free before each encoder; a replay that fills it stops at the
+//   Set*Bytes that didn't fit and resumes with a new arena; the ring frees them after the chunk).
 // - The binding state's counters go to the METAL4 section when the chunk is done.
 
 #include "Metal.hpp"
@@ -71,6 +72,10 @@ public:
 private:
   enum class Kind { Render, Compute, Blit };
   void prepare(Kind kind);
+  // a new bytes arena of at least `size` (the old one stays with the chunk until it retires)
+  void newArena(uint64_t size);
+  static void refill(void *context, WMTMtl4BindingState *state);
+  template <typename Encoder> Encoder withRefill(Encoder encoder);
 
   Mtl4Queue &queue_;
   uint64_t seq_;
