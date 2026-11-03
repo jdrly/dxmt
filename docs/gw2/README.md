@@ -8,7 +8,8 @@ GW2 on Mac sets `DXMT_LOG_PATH` to its `work/logs`, so the lines below land in
 
 Every line also goes to Wine's debug output (stderr), cut there into pieces of at most 900 bytes,
 because Wine raises `0x80000005` (`STATUS_BUFFER_OVERFLOW`) for a line over its 1020-byte buffer
-(#43). A continuation starts with the level prefix and `... `; the log file keeps whole lines.
+(#43). A continuation starts with the level prefix and `... `, and there a NUL byte is written as
+`\0`; the log file keeps whole lines and their bytes.
 
 ## Switches
 

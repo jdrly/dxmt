@@ -1,7 +1,7 @@
-// gw2 (#43): host-side test of the logger's split for Wine's debug output (splitLogLine). The fake
-// below copies ntdll's __wine_dbg_output and append_output (dlls/ntdll/thread.c, CX 26.3): a
-// 1020-byte per-thread buffer that raises STATUS_BUFFER_OVERFLOW for a longer line. Not part of
-// the DLL build; run it on the Mac:
+// gw2 (#43): host-side test of the logger's split for Wine's debug output (splitLogLine,
+// writeWineLine). The fake below copies ntdll's __wine_dbg_output and append_output
+// (dlls/ntdll/thread.c, CX 26.3): a 1020-byte per-thread buffer that raises STATUS_BUFFER_OVERFLOW
+// for a longer line. Not part of the DLL build; run it on the Mac:
 //
 //   clang++ -std=c++20 -Isrc/util/log tests/gw2/log_split_test.cpp -o /tmp/log_split_test \
 //     && /tmp/log_split_test
@@ -138,6 +138,51 @@ main() {
 
   // a tiny limit still makes progress and never exceeds it
   run(std::string(50, 'b'), 16);
+
+  // writeWineLine, as Logger::emitMsg calls it, through the fake with its buffer kept between calls
+  fake_wine::reset();
+  auto wine = [&](const std::string &line, std::vector<std::string> *pieces = nullptr) {
+    std::string adjusted = prefix + line + "\n";
+    writeWineLine(prefix.c_str(), line, adjusted, [&](const std::string &piece) {
+      if (pieces)
+        pieces->push_back(piece);
+      fake_wine::dbg_output(piece.c_str());
+    });
+  };
+
+  // a short line is passed as is (the same string, no copy)
+  {
+    std::string line = "hello", adjusted = prefix + line + "\n";
+    const std::string *seen = nullptr;
+    writeWineLine(prefix.c_str(), line, adjusted, [&](const std::string &piece) { seen = &piece; });
+    CHECK(seen == &adjusted);
+  }
+
+  // the review's case: a NUL would hide the first piece's '\n', leave 207 bytes pending in Wine's
+  // buffer and overflow it with the next piece. NULs are written as "\0" instead.
+  {
+    std::string line = std::string(200, 'x') + std::string(1, '\0') + std::string(1600, 'y');
+    fake_wine::reset(); // the fake reproduces it: unescaped pieces overflow
+    splitLogLine(prefix, line, [](const std::string &piece) { fake_wine::dbg_output(piece.c_str()); });
+    CHECK(fake_wine::overflow);
+    fake_wine::reset();
+    std::vector<std::string> pieces;
+    wine(line, &pieces);
+    CHECK(!fake_wine::overflow);
+    CHECK(fake_wine::out_pos == 0);
+    CHECK(pieces.size() == 3);
+    CHECK(fake_wine::written.find(std::string(200, 'x') + "\\0y") != std::string::npos);
+    wine(line); // again, with whatever the first call left
+    CHECK(!fake_wine::overflow);
+    CHECK(fake_wine::out_pos == 0);
+  }
+
+  // a short line with a NUL is escaped too, and a long one without goes in pieces
+  wine(std::string("a") + '\0' + "b");
+  CHECK(fake_wine::written.find(prefix + "a\\0b\n") != std::string::npos);
+  wine(std::string(5000, 'z'));
+  CHECK(!fake_wine::overflow);
+  CHECK(fake_wine::out_pos == 0);
 
   if (failures) {
     std::printf("%d failure(s)\n", failures);

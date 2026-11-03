@@ -81,9 +81,10 @@ void Logger::emitMsg(LogLevel level, const std::string &message) {
       std::string adjusted = outstream.str();
 
       if (!adjusted.empty()) {
-        // gw2 (#43): Wine raises 0x80000005 for a line over its 1020-byte buffer; hand it pieces
+        // gw2 (#43): Wine raises 0x80000005 for a line over its 1020-byte buffer; a long line (or
+        // one with a NUL) goes in pieces
         if (m_wineLogOutput)
-          splitLogLine(prefix, line, [this](const std::string &piece) {
+          writeWineLine(prefix, line, adjusted, [this](const std::string &piece) {
             m_wineLogOutput(piece.c_str());
           });
         else

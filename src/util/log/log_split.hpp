@@ -2,9 +2,9 @@
 
 // gw2 (#43): Wine's __wine_dbg_output buffers a line per thread in 1020 bytes (ntdll's
 // debug_info::output) and raises STATUS_BUFFER_OVERFLOW (0x80000005) for a longer one. The logger
-// therefore hands Wine every line in pieces of at most kWineLogPieceMax bytes, each ending in '\n';
-// continuations carry the level prefix and kWineLogContinuation. Header-only, so that
-// tests/gw2/log_split_test.cpp builds it on the host.
+// therefore hands Wine a longer line in pieces of at most kWineLogPieceMax bytes, each ending in
+// '\n'; continuations carry the level prefix and kWineLogContinuation (writeWineLine).
+// Header-only, so that tests/gw2/log_split_test.cpp builds it on the host.
 
 #include <cstddef>
 #include <string>
@@ -47,6 +47,28 @@ splitLogLine(const std::string &prefix, const std::string &text, F &&out,
     pos += len;
     first = false;
   } while (pos < text.size());
+}
+
+// Hands Wine one log line: `adjusted` (prefix + line + '\n') itself when it fits and has no NUL,
+// the common case with no copy; otherwise splitLogLine's pieces of `line` with each NUL written as
+// "\0", since a NUL would hide a piece's '\n' from Wine and leave the piece pending in its buffer.
+template <typename F>
+void
+writeWineLine(const char *prefix, const std::string &line, const std::string &adjusted, F &&out,
+              size_t maxBytes = kWineLogPieceMax) {
+  if (adjusted.size() <= maxBytes && adjusted.find('\0') == std::string::npos) {
+    out(adjusted);
+    return;
+  }
+  std::string text;
+  text.reserve(line.size());
+  for (char c : line) {
+    if (c == '\0')
+      text += "\\0";
+    else
+      text += c;
+  }
+  splitLogLine(prefix, text, out, maxBytes);
 }
 
 } // namespace dxmt
