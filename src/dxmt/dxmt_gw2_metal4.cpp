@@ -1,4 +1,5 @@
 #include "dxmt_gw2_metal4.hpp"
+#include "dxmt_gw2_residency.hpp"
 #include "log/log.hpp"
 #include "util_env.hpp"
 #include <atomic>
@@ -13,8 +14,8 @@ enum class Metal4 { Unset, Off, On, Unsupported, Incomplete };
 
 std::atomic<Metal4> g_metal4{Metal4::Unset};
 
-// gw2 (#32): part 1 of 4 (the bridge). The parts that follow make the queue, the encoders and present
-// use it; the last one sets this.
+// gw2 (#32): part 2 of 4 (the bridge, the queue and submission). The encoders (part 3) and present
+// (part 4) follow; the last one sets this.
 constexpr bool kPortComplete = false;
 
 const char *
@@ -74,13 +75,28 @@ metal4AttachQueue(WMT::Device device) {
     Logger::warn(std::format("Metal 4: unavailable ({}), staying on Metal 3", supportReason(support)));
     return;
   }
+  if (!residencyActive()) {
+    g_metal4.store(Metal4::Unsupported, std::memory_order_release);
+    Logger::warn(std::format(
+        "Metal 4: needs the residency set (DXMT_RESIDENCY_SET={}: Metal 4 encoders have no useResource), staying "
+        "on Metal 3",
+        residencySetState()
+    ));
+    return;
+  }
   if (!kPortComplete) {
     g_metal4.store(Metal4::Incomplete, std::memory_order_release);
     Logger::warn("Metal 4: not yet complete, staying on Metal 3 (DXMT_METAL4=1; the device supports it; this build "
-                 "has the bridge only, jdrly/dxmt #32 part 1 of 4)");
+                 "has the bridge and the queue, jdrly/dxmt #32 part 2 of 4)");
     return;
   }
   g_metal4.store(Metal4::On, std::memory_order_release);
+}
+
+void
+metal4Failed(const char *what) {
+  g_metal4.store(Metal4::Unsupported, std::memory_order_release);
+  Logger::warn(std::format("Metal 4: unavailable ({} failed), staying on Metal 3", what));
 }
 
 } // namespace dxmt::gw2

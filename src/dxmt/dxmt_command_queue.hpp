@@ -27,6 +27,7 @@
 #include "dxmt_context.hpp"
 #include "dxmt_counter.hpp"
 #include "dxmt_gw2_lifetime.hpp"
+#include "dxmt_gw2_mtl4_queue.hpp"
 #include "dxmt_gw2_stats.hpp"
 #include "dxmt_occlusion_query.hpp"
 #include "dxmt_resource_initializer.hpp"
@@ -188,6 +189,15 @@ private:
 
   // gw2 (#10): a GPU error in a split-off buffer of chunk `seq`; finish thread only
   void ReportSplitError(CommandChunk &chunk, uint64_t seq, size_t index, WMT::CommandBuffer cmdbuf);
+  // gw2 (#32): the same for Metal 4, from a commit's feedback (`count`: the chunk's split-off buffers)
+  void ReportSplitError(CommandChunk &chunk, uint64_t seq, size_t index, size_t count, WMT::Error error);
+  // gw2 (#10, #32): whether a split error gets its line (the first 8, then one a second), and how
+  // many weren't logged since the last one
+  bool SplitErrorLine(uint64_t &not_logged);
+
+  // gw2 (#32): Metal 4 (mtl4_): the encode thread's commit of a chunk, the finish thread's wait
+  void CommitChunkMetal4(CommandChunk &chunk, uint64_t seq);
+  void FinishChunkMetal4(CommandChunk &chunk, uint64_t seq);
   uint64_t split_errors_ = 0;        // all of them, logged or not
   uint64_t split_errors_logged_ = 0; // split_errors_ at the last line
   clock::time_point split_error_last_line_{};
@@ -231,6 +241,9 @@ private:
   dxmt::thread finishThread;
   WMT::Device device;
   WMT::Reference<WMT::CommandQueue> commandQueue;
+  // gw2 (#32): DXMT_METAL4=1: the Metal 4 queue, allocators and commits; null on Metal 3. Set in the
+  // constructor, before any chunk; destroyed after the threads stopped (it waits for the GPU first).
+  std::unique_ptr<gw2::Mtl4Queue> mtl4_;
 
   obj_handle_t shared_event_listener;
   dxmt::thread event_listener_thread;
@@ -282,6 +295,10 @@ public:
 
   // gw2 (#31): DXMT_LIFETIME_CHECK's id of this queue
   uint32_t LifetimeId() const { return lifetime_id_; }
+
+  // gw2 (#32): this queue's Metal 4 submission, or null on Metal 3 (encode thread: begin/commit for
+  // the chunk being encoded)
+  gw2::Mtl4Queue *Metal4() { return mtl4_.get(); }
 
   // gw2 (#31): blocks until the finish thread has retired every chunk committed so far (device
   // teardown with DXMT_UNRETAINED=1 or DXMT_LIFETIME_CHECK=1, before the device's caches go)

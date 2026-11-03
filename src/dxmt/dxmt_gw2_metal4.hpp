@@ -24,6 +24,11 @@ bool metal4Active();
 const char *metal4State();
 
 // A command queue on `device` is being created: decide once per process and log the decision.
+// Metal 4 needs the residency set (DXMT_RESIDENCY_SET): Metal 4 encoders have no useResource.
 void metal4AttachQueue(WMT::Device device);
+
+// The queue's Metal 4 objects couldn't be created (gw2::Mtl4Queue::valid()): this process stays on
+// Metal 3, with a warning naming `what`.
+void metal4Failed(const char *what);
 
 } // namespace dxmt::gw2

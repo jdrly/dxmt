@@ -42,6 +42,10 @@ const char *residencySetState();
 // attach it to `queue` if it is on the set's device, and log the state once for this queue.
 void residencyAttachQueue(WMT::Device device, WMT::CommandQueue queue);
 
+// gw2 (#32): attaches the set to a Metal 4 queue on `device` (DXMT_METAL4), with a line. False if the
+// set isn't active on that device: the caller then stays on Metal 3.
+bool residencyAttachMtl4Queue(WMT::Device device, WMT::MTL4CommandQueue queue);
+
 // Adds `count` Metal allocations (one DXMT allocation's buffer and/or texture; null handles are
 // skipped) made on `device`. Returns false (nothing added) when the set is off or on another
 // device; the caller then keeps useResource for them. `bytes` is for RESIDENCY's mb (counted only

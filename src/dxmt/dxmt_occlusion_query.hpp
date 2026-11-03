@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Metal.hpp"
+#include "dxmt_gw2_mtl4_queue.hpp"
 #include "dxmt_gw2_timestamp.hpp"
 #include "dxmt_gw2_stats.hpp"
 #include "rc/util_rc_ptr.hpp"
@@ -276,6 +277,17 @@ public:
       cmdbuf_(cmdbuf),
       frame_(frame) {}
 
+  // gw2 (#32): Metal 4: the value is the commit's GPU end from its feedback, which the finish thread
+  // has waited for before the chunk's readbacks go
+  TimestampReadbackCBuf(
+      WMT::Device device, const gw2::Mtl4Commit *commit, uint64_t num_samples, TimestampQueryList &&queries,
+      uint64_t frame
+  ) :
+      queries_(std::move(queries)),
+      num_samples_(num_samples),
+      mtl4_(commit),
+      frame_(frame) {}
+
   ~TimestampReadbackCBuf() {
     // TODO: small_vector opt
     std::vector<uint64_t> results(num_samples_);
@@ -288,7 +300,8 @@ public:
     */
     // gw2 (#24): the thread_local is shared with TimestampEstimateReadback
     uint64_t &latest_ts_on_finish_thread = gw2::timestampLatest();
-    latest_ts_on_finish_thread = std::max(cmdbuf_.gpuEndTime(), latest_ts_on_finish_thread);
+    latest_ts_on_finish_thread =
+        std::max(mtl4_ ? mtl4_->gpuEndNs() : cmdbuf_.gpuEndTime(), latest_ts_on_finish_thread); // gw2 (#32)
     std::fill(results.begin(), results.end(), latest_ts_on_finish_thread);
     for (const auto &[query, sample_index] : queries_) {
       query->issue(results[sample_index]);
@@ -312,6 +325,7 @@ private:
   TimestampQueryList queries_;
   uint64_t num_samples_;
   WMT::CommandBuffer cmdbuf_;
+  const gw2::Mtl4Commit *mtl4_ = nullptr; // gw2 (#32)
   uint64_t frame_;
 };
 
@@ -334,6 +348,15 @@ public:
       positions_(positions),
       frame_(frame) {
     segments_.push_back(Segment{WMT::Reference<WMT::CommandBuffer>(cmdbuf), 0});
+  }
+
+  // gw2 (#32): Metal 4: the times come from the commits' feedback
+  TimestampEstimateReadback(const gw2::Mtl4Commit *commit, uint64_t positions, TimestampQueryList &&queries,
+                            uint64_t frame) :
+      queries_(std::move(queries)),
+      positions_(positions),
+      frame_(frame) {
+    segments_.push_back(Segment{{}, 0, commit});
   }
 
   ~TimestampEstimateReadback() {
@@ -365,6 +388,11 @@ public:
   split(WMT::CommandBuffer cmdbuf, uint64_t position) {
     segments_.push_back(Segment{WMT::Reference<WMT::CommandBuffer>(cmdbuf), position});
   }
+  // gw2 (#32): the same on Metal 4, the next commit of the chunk
+  void
+  split(const gw2::Mtl4Commit *commit, uint64_t position) {
+    segments_.push_back(Segment{{}, position, commit});
+  }
 
   TimestampEstimateReadback(const TimestampEstimateReadback &) = delete;
   TimestampEstimateReadback(TimestampEstimateReadback &&) = delete;
@@ -373,6 +401,7 @@ private:
   struct Segment {
     WMT::Reference<WMT::CommandBuffer> cmdbuf;
     uint64_t begin;
+    const gw2::Mtl4Commit *mtl4 = nullptr; // gw2 (#32): Metal 4, instead of cmdbuf
     uint64_t gpu_start = 0;
     uint64_t gpu_end = 0;
     bool resolved = false;
@@ -381,6 +410,12 @@ private:
     resolve() {
       if (resolved)
         return;
+      if (mtl4) { // gw2 (#32): written before the finish thread let the readbacks go
+        gpu_start = mtl4->gpuStartNs();
+        gpu_end = mtl4->gpuEndNs();
+        resolved = true;
+        return;
+      }
       auto status = cmdbuf.status();
       if (status >= WMTCommandBufferStatusCommitted && status <= WMTCommandBufferStatusScheduled)
         cmdbuf.waitUntilCompleted();
@@ -426,6 +461,18 @@ public:
     return ret;
   }
 
+  // gw2 (#32): the same for a Metal 4 chunk, reading `commit`'s feedback
+  std::unique_ptr<TimestampReadback>
+  flush(const gw2::Mtl4Commit *commit, uint64_t frame) {
+    if (num_samples_ == 0)
+      return {};
+
+    auto ret = std::make_unique<TimestampReadback>(device_, commit, num_samples_, std::move(queries_), frame);
+    num_samples_ = 0;
+    queries_ = {};
+    return ret;
+  }
+
   // gw2 (#24): a query marked without an encoder of its own (DXMT_TIMESTAMP_MODE estimate/boundary)
   void
   markQuery(TimestampQuery *query, uint64_t position) {
@@ -439,6 +486,17 @@ public:
       return {};
 
     auto ret = std::make_unique<TimestampEstimateReadback>(cmdbuf, positions, std::move(estimated_), frame);
+    estimated_ = {};
+    return ret;
+  }
+
+  // gw2 (#32): the same for a Metal 4 chunk's first commit
+  std::unique_ptr<TimestampEstimateReadback>
+  flushEstimated(const gw2::Mtl4Commit *commit, uint64_t positions, uint64_t frame) {
+    if (estimated_.empty())
+      return {};
+
+    auto ret = std::make_unique<TimestampEstimateReadback>(commit, positions, std::move(estimated_), frame);
     estimated_ = {};
     return ret;
   }
