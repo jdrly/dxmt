@@ -14,7 +14,7 @@ GW2 on Mac sets `DXMT_LOG_PATH` to its `work/logs`, so the lines below land in
 | `DXMT_HITCH_MS` | 50 | A `HITCH` line for a Present-to-Present interval (game's render thread) at least this long; `0` turns them off | — |
 | `DXMT_PRESENT_SPLIT` | on | Commit the frame's command buffer before `nextDrawable` and present from a new one | the present in the frame's last buffer |
 | `DXMT_DISPLAY_SYNC` | on | A present with a sync interval uses `CAMetalLayer`'s vsync (`displaySyncEnabled`); a minimum duration only for intervals over one refresh, half a refresh short | DXMT's own pacing (minimum duration of exactly one refresh, display sync off) |
-| `DXMT_PRESENT_DEADLINE` | one refresh | A present without a minimum duration goes out with `presentDrawable:atTime:` now + the deadline, so macOS can raise the GPU clock; `=<ms>` sets it | `=0`: a plain `presentDrawable:` |
+| `DXMT_PRESENT_DEADLINE` | one refresh | A present without a minimum duration goes out with `presentDrawable:atTime:` now + the deadline, so macOS can raise the GPU clock; `=<ms>` sets it. The control file's `present_deadline` replaces it while the game runs ([Control file](#control-file)) | `=0`: a plain `presentDrawable:` |
 | `DXMT_STENCIL_PFV` | off | `=1` keeps `PixelFormatView` (no lossless compression) on typeless depth-stencil targets with a stencil plane | — |
 | `DXMT_BG_FPS` | 30 | Present sleeps to this rate while another process's window is in the foreground | `=0`: no throttle |
 | `DXMT_BG_FPS_MINIMIZED` | 10 | The same while GW2's window is minimized | `=0`: no throttle |
@@ -36,6 +36,7 @@ GW2 on Mac sets `DXMT_LOG_PATH` to its `work/logs`, so the lines below land in
 | `DXMT_TIMESTAMP_MODE` | `estimate` | How a timestamp query `End` (and a timestamp-disjoint one) is taken. `estimate`: the open pass stays open and nothing is committed; the value is interpolated between the GPU start and end of the command buffer the query lands in, by its position among the chunk's encoders. `boundary`: the pass stays open, but the commit still happens at the next pass change (as `exact`, so `DXMT_PROMOTE_FLUSH_MIN` applies); the value is interpolated the same way. Both keep the values monotonic and make a disjoint query ready only after its chunk's timestamps are resolved; see [TIMESTAMP](#timestamp) | `exact` (or `0`): upstream, a pass split and a commit per timestamp, the value the buffer's GPU end |
 | `DXMT_MAP_FAST` | on | The Map/Unmap fast path for buffers (see [MAP](#map)): the immediate context maps a dynamic or default-usage buffer from fields the buffer sets at creation (no virtual lookup, no reference count), `Unmap` of a buffer returns at once, the end of a page renames under one lock, a buffer that uses up its page within one chunk gets pages twice as large (up to 64 KB, at least two suballocations each), and a default-usage buffer's renames (`UpdateSubresource` of the whole buffer) come from CPU-visible suballocated pages, so an update is a `memcpy` instead of a new Metal buffer written through a unix call. `UpdateSubresource` of such a buffer skips its other virtual calls too. `PACE`'s `map` times one call in 16 and scales it, as `draw` does | `=0`: upstream's Map, Unmap and renames, `map` timed on every call |
 | `DXMT_SKIP_REBIND` | on | A draw's pipeline bind is left out when its render encoder already has that pipeline bound (see [REBIND](#rebind)). Each encoder tracks the pipeline its own command list bound last; a new encoder starts with none, and any other pipeline bind in it (an internal pass's, the tile barrier's) clears it, so the first draw after those always binds. Only the bind is dropped: depth-stencil, rasterizer, blend color, viewports and scissors are separate commands, emitted as before | `=0`: every pipeline change binds, as upstream |
+| `DXMT_CONTROL` | off | `=<path>`: the control file (see [Control file](#control-file)). A thread reads it once a second, never the render thread; its keys change settings while the game runs, for A/B minutes within one start. Today's key: `present_deadline`, which replaces `DXMT_PRESENT_DEADLINE` while the file sets it | unset: no thread, no file access, every setting from its variable |
 
 Not switchable: `SetMaximumFrameLatency(0)` means the default, 3 (DXGI's definition; only
 `DXMT_MAX_FRAME_LATENCY` replaces the result). Typeless depth targets without stencil
@@ -90,7 +91,7 @@ Sections: a feature registers a function with `gw2::SectionRegistrar` (`src/dxmt
 
 | Line | When |
 |---|---|
-| `GW2 fork <commit>: DXMT_STATS=1 DXMT_HITCH_MS=… DXMT_PRESENT_SPLIT=… DXMT_DISPLAY_SYNC=… DXMT_PRESENT_DEADLINE=… DXMT_CAP_LIMITER=… DXMT_STENCIL_PFV=… DXMT_DEPTH_PFV=… DXMT_BG_FPS=… DXMT_BG_FPS_MINIMIZED=… DXMT_BG_POLICY=… DXMT_RENDER_THREAD_PRIORITY=… DXMT_PSO_BLEND_HASH=… DXMT_PSO_MRU=… DXMT_PSO_TOPOLOGY_KEEP=… DXMT_CHUNKS=… DXMT_MAX_FRAME_LATENCY=… DXMT_COMPILE_WAIT_MS=… DXMT_PSO_ARCHIVE=… DXMT_PSO_ARCHIVE_DIR=… DXMT_PSO_FLUSH_EVERY=… DXMT_PROMOTE_FLUSH_MIN=… DXMT_PROMOTE_FLUSH_MS=… DXMT_TIMESTAMP_MODE=… DXMT_MAP_FAST=… DXMT_SKIP_REBIND=… cpus=… refresh=… set: …` | Once per process, at the first Present: the build, the **effective** value of every switch above (defaults included; `DXMT_PRESENT_DEADLINE=refresh` is one refresh, `DXMT_CHUNKS` is the ring size in effect, `DXMT_MAX_FRAME_LATENCY=unset` leaves the game's value, `DXMT_PSO_ARCHIVE` is `1` when the archives are on, `0` when not asked for, `failed` when asked for but they couldn't start, `DXMT_PSO_ARCHIVE_DIR=default` is the user cache dir, `DXMT_PROMOTE_FLUSH_MIN`/`_MS` as the immediate context parsed them: `MS` is at least 1 and is shown even when `MIN=0` turns it off, `DXMT_TIMESTAMP_MODE` is `exact`, `estimate` or `boundary`, `DXMT_MAP_FAST` and `DXMT_SKIP_REBIND` are `1` or `0`), the CPUs the game sees, the refresh rate (0 if unknown), then every `DXMT_*`, `WINENCPU` and `WINEMSYNC` variable set (`set: none` if none). A PR that adds a switch adds its effective value here |
+| `GW2 fork <commit>: DXMT_STATS=1 DXMT_HITCH_MS=… DXMT_PRESENT_SPLIT=… DXMT_DISPLAY_SYNC=… DXMT_PRESENT_DEADLINE=… DXMT_CAP_LIMITER=… DXMT_STENCIL_PFV=… DXMT_DEPTH_PFV=… DXMT_BG_FPS=… DXMT_BG_FPS_MINIMIZED=… DXMT_BG_POLICY=… DXMT_RENDER_THREAD_PRIORITY=… DXMT_PSO_BLEND_HASH=… DXMT_PSO_MRU=… DXMT_PSO_TOPOLOGY_KEEP=… DXMT_CHUNKS=… DXMT_MAX_FRAME_LATENCY=… DXMT_COMPILE_WAIT_MS=… DXMT_PSO_ARCHIVE=… DXMT_PSO_ARCHIVE_DIR=… DXMT_PSO_FLUSH_EVERY=… DXMT_PROMOTE_FLUSH_MIN=… DXMT_PROMOTE_FLUSH_MS=… DXMT_TIMESTAMP_MODE=… DXMT_MAP_FAST=… DXMT_SKIP_REBIND=… DXMT_CONTROL=… cpus=… refresh=… set: …` | Once per process, at the first Present: the build, the **effective** value of every switch above (defaults included; `DXMT_PRESENT_DEADLINE=refresh` is one refresh, `DXMT_CHUNKS` is the ring size in effect, `DXMT_MAX_FRAME_LATENCY=unset` leaves the game's value, `DXMT_PSO_ARCHIVE` is `1` when the archives are on, `0` when not asked for, `failed` when asked for but they couldn't start, `DXMT_PSO_ARCHIVE_DIR=default` is the user cache dir, `DXMT_PROMOTE_FLUSH_MIN`/`_MS` as the immediate context parsed them: `MS` is at least 1 and is shown even when `MIN=0` turns it off, `DXMT_TIMESTAMP_MODE` is `exact`, `estimate` or `boundary`, `DXMT_MAP_FAST` and `DXMT_SKIP_REBIND` are `1` or `0`, `DXMT_CONTROL` is the path or `off`), the CPUs the game sees, the refresh rate (0 if unknown), then every `DXMT_*`, `WINENCPU` and `WINEMSYNC` variable set (`set: none` if none). A PR that adds a switch adds its effective value here |
 | `HITCH frame=… ms=… commit=…x… sync=…x… bgsleep=… dxmt(ms/calls): …` | A Present-to-Present interval of at least `DXMT_HITCH_MS`, logged at the top of the Present that ends it. `frame` is the frame that Present presents (1-based, as the latency fence counts); the interval holds the previous Present and the game's work on this frame. `commit` (waits for a free chunk) and `sync` (Map's waits for the GPU) are ms × count, from the same interval; they overlap the categories they happen in. `bgsleep` is whether the background throttle was on. The categories are as `PACE`'s `dxmt` (`presentwait` is the latency wait) |
 | `SetMaximumFrameLatency(n)` | Every call; 0 is taken as 3 |
 | `SetMaximumFrameLatency(n): DXMT_MAX_FRAME_LATENCY keeps m` | Every call while `DXMT_MAX_FRAME_LATENCY` is set: the game asked for `n`, `m` stays in effect |
@@ -518,3 +519,39 @@ Reading it: `ENCODE`'s `pso` counts the binds that reach the command list (inter
 included), so with `skip=1` it is lower by `skipped` than with `skip=0` at the same spot. An A/B of
 `DXMT_SKIP_REBIND=1` and `=0` compares `ENCODE pso` and the encode thread's AGX pipeline rows
 (`setRenderPipelineState`) in Time Profiler; nothing should draw differently.
+
+### Control file
+
+`DXMT_CONTROL=<path>` (jdrly/dxmt #7) names a text file that changes settings while the game runs,
+so one start can alternate settings minute by minute. The path is opened as `DXMT_LOG_PATH`'s is: a
+unix path works. A thread of its own (`dxmt-control`, lowest priority) reads the file when the first
+swapchain is created and then once a second; it publishes each key as an atomic that the owning code
+reads where it already uses the setting (one relaxed load per Present). The render thread never
+touches the file. The poll thread never calls the logger either (it would hold the logger's lock
+while Wine writes, and the render thread's own lines would wait for it): it queues its `Control:`
+lines, at most 32 between two Presents, and the render thread logs them at its next Present with a
+`try_lock` that never waits; a line that misses it goes out at the Present after.
+
+The file is the whole state: one `key=value` per line, spaces around either ignored; blank lines
+and lines starting with `#` are skipped; the last valid line of a key wins. A key that is missing,
+a value that isn't understood, or a file that can't be read leaves the setting at its environment
+value. Replace the file atomically (write a temporary file, then `mv` it over the path): a reader
+that catches a half-written file takes the missing key as its default for that second.
+
+| Key | Values | Replaces |
+|---|---|---|
+| `present_deadline` | `refresh` (one refresh), `<ms>` (0 < ms ≤ 1000, decimals allowed), `0` (off: a plain `presentDrawable:`), `default` (the same as leaving the key out) | `DXMT_PRESENT_DEADLINE` |
+
+For example, the deadline A/B of #7 with one start: `DXMT_CONTROL=/tmp/dxmt-control` set, then each
+minute `print present_deadline=8 > /tmp/c.new && mv /tmp/c.new /tmp/dxmt-control` with `default`,
+`8`, `12` and `0` in turn.
+
+| Line | When |
+|---|---|
+| `Control: polling <path> once a second (DXMT_CONTROL); keys: present_deadline=refresh\|<ms>\|0\|default` | Once per process, when the first swapchain is created with `DXMT_CONTROL` set |
+| `Control: reading <path>` | The first read that succeeds, and the first one after the file couldn't be read |
+| `Control: <path> can't be read; every key at its default` | Warning: the first read that fails, and the first one after a read succeeded |
+| `Control: unknown key "<key>" (line "<line>"); ignored` | Warning, once per key |
+| `Control: present_deadline=<value> isn't refresh, default, 0 or a number of ms up to 1000; ignored (the line counts as missing)` | Warning, once per value; `Control: present_deadline without =value; ignored` once for a bare key |
+| `Control: N lines dropped (more than 32 between two Presents)` | Warning, when the poll thread's queue was full |
+| `Present deadline: <new> from frame N (was <old>; <source>)` | At the Present whose deadline setting differs from the previous Present's: `refresh`, `off` or `<ms> ms`. `frame` is the frame that Present presents (1-based, as `HITCH` counts), the first one with the new setting. `source` is `DXMT_CONTROL present_deadline`, or `DXMT_PRESENT_DEADLINE, the control file doesn't set it` when the setting returns to the variable's. The `Present pacing:` line then follows with the new `deadline`, and `STATS`' `deadline` has it from that window |
