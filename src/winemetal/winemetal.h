@@ -2254,7 +2254,9 @@ WINEMETAL_API void WMTPSOArchiveQuery(struct WMTPSOArchiveStats *stats);
  * MTL4*_encodeCommands calls replay them on Metal 4 encoders, with buffer and texture bindings going
  * into argument tables (WMTMtl4BindingState). Every Metal 4 object here is created +1 (new*) or
  * autoreleased like its Metal 3 counterpart (the encoders); the caller keeps what the GPU uses
- * alive until the work retires: a Metal 4 command buffer retains nothing.
+ * alive until the work retires: a Metal 4 command buffer retains nothing. Everything the GPU uses,
+ * pipeline states included (they are MTLAllocations), must be in a residency set on the queue or
+ * the command buffer: Metal 4 has no useResource.
  */
 
 /* why a device can't take the Metal 4 path; 0 = it can */

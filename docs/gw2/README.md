@@ -679,7 +679,7 @@ with them.
 | `Set*BufferOffset` | `setAddress:` at the index's kept address + the new offset |
 | `SetFragmentTexture`, compute `SetTexture` | `setTexture:` with the texture's `gpuResourceID` |
 | `SetFragmentBytes`, compute `SetBytes` | a copy into the encoder's bytes buffer (256-byte aligned) and `setAddress:` |
-| `UseResource` | nothing: residency sets make resources resident. Counted (`use_resource_dropped`): a resource the sets miss would read as zeros or fault |
+| `UseResource` | nothing: residency sets make resources resident. Counted (`use_resource_dropped`): a resource the sets miss would read as zeros or fault. Pipeline states are allocations too and must be in a set on Metal 4 (Apple, WWDC25; d9mt adds every pipeline it builds): part 3 adds DXMT's |
 | `WaitForFence`, `UpdateFence` | `waitForFence:beforeEncoderStages:`, `updateFence:afterEncoderStages:` (render stages as given, `Dispatch` for compute, `Blit` for copies) |
 | render and compute `MemoryBarrier` | `barrierAfterEncoderStages:beforeEncoderStages:` with device visibility |
 | indexed and indirect draws and dispatches | the buffers' GPU addresses (index buffer: address + offset, length − offset) |

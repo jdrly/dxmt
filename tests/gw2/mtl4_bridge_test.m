@@ -18,7 +18,8 @@
 //    DXMT's), Set*Bytes, an indexed draw at an index buffer offset, a dropped UseResource. A fence
 //    orders it before a blit replay (texture readback, then a fill and a dependent copy) on an MTL4
 //    compute encoder; a compute replay runs two dispatches with a barrier between them. Everything
-//    is resident through one residency set on the queue. One commit with feedback and a shared
+//    is resident through one residency set on the queue, the pipelines included (on Metal 4 they
+//    are allocations that need residency too). One commit with feedback and a shared
 //    event; the pixels and buffers are checked.
 // 2. Probe (the issue's question, with --metallibs <copy of a DXMT shaders_*.db> [--limit n]):
 //    airconv's metallibs (GW2's own shaders, from DXMT's shader cache) load; their vertex and kernel
@@ -155,8 +156,15 @@ commit_and_wait(struct mtl4 *m, struct WMTMtl4CommitFeedback *fb, const char *wh
   p.feedback.ptr = fb;
   _MTL4CommandQueue_commit(&p);
   bool done = [event waitUntilSignaledValue:1 timeoutMS:10000];
-  CHECK(done, "%s: the commit's event wasn't signalled in 10 s", what);
-  CHECK(atomic_load((_Atomic uint64_t *)&fb->done) == 1, "%s: feedback not done when the event was", what);
+  if (!done) {
+    /* the GPU work and the feedback handler may still run: reading the feedback, resetting the
+       allocator or releasing anything they use would race them, so stop here without cleanup */
+    printf("FAIL %s: the commit's event wasn't signalled in 10 s; exiting without cleanup\n", what);
+    fflush(stdout);
+    _Exit(EXIT_FAILURE);
+  }
+  CHECK(atomic_load_explicit((_Atomic uint64_t *)&fb->done, memory_order_acquire) == 1,
+        "%s: feedback not done when the event was", what);
   CHECK(!fb->error, "%s: GPU error %s", what, fb->error ? [((NSError *)fb->error).description UTF8String] : "");
   CHECK(fb->gpu_start > 0 && fb->gpu_end >= fb->gpu_start, "%s: GPU times %f-%f", what, fb->gpu_start, fb->gpu_end);
   struct unixcall_generic_obj_uint64_ret reset = {.handle = m->allocator};
@@ -209,6 +217,10 @@ test_replay(struct mtl4 *m) {
   CHECK(cs_fill && cs_double, "compute pipelines: %s", err.description.UTF8String);
   if (!pso || !cs_fill || !cs_double)
     return;
+  /* Metal 4: pipelines are allocations too and must be resident (Apple, WWDC25 254; d9mt #63) */
+  [m->residency addAllocation:pso];
+  [m->residency addAllocation:cs_fill];
+  [m->residency addAllocation:cs_double];
 
   /* resources: everything the GPU touches is in the residency set (Metal 4 has no useResource) */
   id<MTLBuffer> argbuf = resident_buffer(m, 4096);
@@ -400,6 +412,10 @@ test_replay(struct mtl4 *m) {
       [(id)render_state.tables[i] release];
   }
   [(id)compute_state.tables[0] release];
+  [m->residency removeAllocation:pso];
+  [m->residency removeAllocation:cs_fill];
+  [m->residency removeAllocation:cs_double];
+  [m->residency commit];
   [pso release];
   [cs_fill release];
   [cs_double release];
@@ -525,7 +541,12 @@ probe_metallibs(struct mtl4 *m, const char *db_path, int limit) {
   CHECK(libs > 0 && !lib_fail, "airconv metallibs load");
   CHECK(dev_ok > 0 && !dev_fail, "device-built pipelines from airconv metallibs");
 
-  /* bind every device-built pipeline on Metal 4 encoders through the replay, and commit */
+  /* bind every device-built pipeline on Metal 4 encoders through the replay, and commit; the
+     pipelines are resident like any allocation (commit_and_wait commits the set) */
+  for (id pso in render_psos)
+    [m->residency addAllocation:pso];
+  for (id pso in compute_psos)
+    [m->residency addAllocation:pso];
   begin(m);
   struct WMTMtl4BindingState state;
   memset(&state, 0, sizeof(state));
@@ -561,6 +582,11 @@ probe_metallibs(struct mtl4 *m, const char *db_path, int limit) {
   commit_and_wait(m, &fb, "probe bind");
   printf("probe: bound %lu render and %lu compute pipelines (device-built, airconv's AIR) on Metal 4 encoders: %s\n",
          (unsigned long)render_psos.count, (unsigned long)compute_psos.count, fb.error ? "GPU error" : "ok");
+  for (id pso in render_psos)
+    [m->residency removeAllocation:pso];
+  for (id pso in compute_psos)
+    [m->residency removeAllocation:pso];
+  [m->residency commit];
   [compiler release];
   [position_only release];
   [own release];
