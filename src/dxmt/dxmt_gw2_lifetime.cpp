@@ -24,9 +24,10 @@ readCheck() {
   return env::getEnvVar("DXMT_LIFETIME_CHECK") == "1";
 }
 
+// gw2 (#31): on by default (the lifetime check found no early release); =0 restores [queue commandBuffer]
 bool
 readUnretained() {
-  return env::getEnvVar("DXMT_UNRETAINED") == "1";
+  return env::getEnvVar("DXMT_UNRETAINED") != "0";
 }
 
 const char *
@@ -248,8 +249,8 @@ attachQueue() {
   uint32_t id = g_next_queue.fetch_add(1, std::memory_order_relaxed);
   if (unretained())
     Logger::info(
-        "Command buffers: unretained references (DXMT_UNRETAINED=1): a chunk's command buffers don't retain what "
-        "they use; DXMT holds it until the finish thread retires the chunk"
+        "Command buffers: unretained references (DXMT_UNRETAINED=1, the default): a chunk's command buffers don't "
+        "retain what they use; DXMT holds it until the finish thread retires the chunk"
     );
   else
     Logger::info("Command buffers: retained references (DXMT_UNRETAINED=0), as upstream");

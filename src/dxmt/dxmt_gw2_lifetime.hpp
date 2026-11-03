@@ -75,7 +75,8 @@ check() {
   return kBuilt && g_check;
 }
 
-// DXMT_UNRETAINED=1: the chunks' command buffers don't retain what they use
+// DXMT_UNRETAINED=1 (the default; =0 is upstream's retained [queue commandBuffer]): the chunks'
+// command buffers don't retain what they use
 bool unretained();
 
 // DXMT_UNRETAINED=1 or the check: DXMT itself holds what the retained command buffers would hold
