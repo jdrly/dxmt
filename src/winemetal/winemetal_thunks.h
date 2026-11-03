@@ -480,6 +480,51 @@ struct unixcall_wmt_pso_archive_query {
   struct WMTMemoryPointer stats;
 };
 
+/* gw2 (#32): Metal 4 (slots 155-189). Only 64-bit fields and WMTMemoryPointers, so the 32-bit and
+   64-bit layouts match and both tables use the same function. */
+struct unixcall_mtl4_new_argtable {
+  obj_handle_t device;
+  struct WMTConstMemoryPointer info;
+  obj_handle_t ret_error;
+  obj_handle_t ret;
+};
+
+struct unixcall_mtl4_queue_commit {
+  obj_handle_t queue;
+  struct WMTConstMemoryPointer cmdbufs;
+  uint64_t count;
+  struct WMTMemoryPointer feedback;
+  obj_handle_t event;
+  uint64_t event_value;
+};
+
+struct unixcall_mtl4_drawable_present {
+  obj_handle_t drawable;
+  uint64_t mode;
+  double value;
+};
+
+struct unixcall_mtl4_new_encoder {
+  obj_handle_t cmdbuf;
+  struct WMTConstMemoryPointer info;
+  struct WMTConstMemoryPointer state;
+  obj_handle_t ret;
+};
+
+struct unixcall_mtl4_encode {
+  obj_handle_t encoder;
+  struct WMTMemoryPointer state;
+  struct WMTConstMemoryPointer cmd_head;
+};
+
+struct unixcall_mtl4_barrier {
+  obj_handle_t encoder;
+  uint64_t scope;
+  uint64_t after_stages;
+  uint64_t before_stages;
+  uint64_t visibility;
+};
+
 #pragma pack(pop)
 
 #endif
