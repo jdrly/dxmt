@@ -2348,6 +2348,9 @@ struct WMTMtl4BindingState {
      no update is skipped. Cleared (0) when the replay reached the end. */
   struct WMTMemoryPointer resume;
   uint64_t bytes_needed;
+  /* the compute pipeline's threadgroup size (its SetPSO packet's), for the dispatches after it, also
+     across calls (a resumed replay); zeroed when a compute encoder is created */
+  struct WMTSize threadgroup_size;
   uint32_t flags;
   /* counters, for the caller's statistics; it resets them */
   uint32_t use_resource_dropped; /* UseResource packets without a residency set (a miss) */
@@ -2356,7 +2359,7 @@ struct WMTMtl4BindingState {
   uint32_t blit_barriers;        /* barriers between dependent copies (see encodeBlitCommands) */
   uint32_t residency_adds;       /* allocations added to residency_set (repeats within a call skipped) */
 };
-STATIC_ASSERT(sizeof(struct WMTMtl4BindingState) == 1096); /* the same on i386 and x86_64 */
+STATIC_ASSERT(sizeof(struct WMTMtl4BindingState) == 1120); /* the same on i386 and x86_64 */
 #define WMT_MTL4_NO_ATTACHMENT_RESIDENCY 0x1u
 
 /* written by the commit's feedback handler (on a Metal thread) into the caller's memory: first the

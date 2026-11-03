@@ -297,6 +297,8 @@ _MTL4CommandBuffer_computeCommandEncoder(void *obj) {
   struct unixcall_mtl4_new_encoder *params = obj;
   struct WMTMtl4BindingState *state = params->state.ptr;
   id<MTL4ComputeCommandEncoder> encoder = [(id<MTL4CommandBuffer>)params->cmdbuf computeCommandEncoder];
+  if (state)
+    state->threadgroup_size = (struct WMTSize){0, 0, 0}; /* no pipeline yet */
   if (encoder && state && state->tables[WMTMtl4TableCompute])
     [encoder setArgumentTable:(id<MTL4ArgumentTable>)state->tables[WMTMtl4TableCompute]];
   params->ret = (obj_handle_t)encoder;
@@ -495,6 +497,12 @@ resident_attachments(struct WMTMtl4BindingState *state, const struct WMTRenderPa
     resident_texture(r, info->stencil.texture);
   }
   resident_buffer(r, info->visibility_buffer);
+}
+
+/* the compute pipeline's threadgroup size, kept in the state across replay calls */
+static inline MTLSize
+state_threadgroup(const struct WMTMtl4BindingState *state) {
+  return MTLSizeMake(state->threadgroup_size.width, state->threadgroup_size.height, state->threadgroup_size.depth);
 }
 
 /* --- the replays */
@@ -867,8 +875,7 @@ _MTL4ComputeCommandEncoder_encodeCommands(void *obj) {
   id<MTL4ComputeCommandEncoder> encoder = (id<MTL4ComputeCommandEncoder>)params->encoder;
   struct buffer_cache bound = {0}, indirect = {0};
   enum { C = WMTMtl4TableCompute };
-  /* as the Metal 3 replay: a pipeline's threadgroup size holds until the next pipeline (in one call) */
-  MTLSize threadgroup_size = {0, 0, 0};
+  /* a pipeline's threadgroup size holds until the next pipeline, across calls (state_threadgroup) */
   while (next) {
     switch ((enum WMTComputeCommandType)next->type) {
     default:
@@ -879,13 +886,13 @@ _MTL4ComputeCommandEncoder_encodeCommands(void *obj) {
     case WMTComputeCommandDispatch: {
       struct wmtcmd_compute_dispatch *body = (struct wmtcmd_compute_dispatch *)next;
       [encoder dispatchThreadgroups:MTLSizeMake(body->size.width, body->size.height, body->size.depth)
-              threadsPerThreadgroup:threadgroup_size];
+              threadsPerThreadgroup:state_threadgroup(state)];
       break;
     }
     case WMTComputeCommandDispatchThreads: {
       struct wmtcmd_compute_dispatch *body = (struct wmtcmd_compute_dispatch *)next;
       [encoder dispatchThreads:MTLSizeMake(body->size.width, body->size.height, body->size.depth)
-          threadsPerThreadgroup:threadgroup_size];
+          threadsPerThreadgroup:state_threadgroup(state)];
       break;
     }
     case WMTComputeCommandDispatchIndirect: {
@@ -894,15 +901,14 @@ _MTL4ComputeCommandEncoder_encodeCommands(void *obj) {
                                                           r, &indirect, body->indirect_args_buffer,
                                                           body->indirect_args_offset
                                                       )
-                                threadsPerThreadgroup:threadgroup_size];
+                                threadsPerThreadgroup:state_threadgroup(state)];
       break;
     }
     case WMTComputeCommandSetPSO: {
       struct wmtcmd_compute_setpso *body = (struct wmtcmd_compute_setpso *)next;
       resident_object(r, body->pso);
       [encoder setComputePipelineState:(id<MTLComputePipelineState>)body->pso];
-      threadgroup_size = MTLSizeMake(body->threadgroup_size.width, body->threadgroup_size.height,
-                                     body->threadgroup_size.depth);
+      state->threadgroup_size = body->threadgroup_size;
       break;
     }
     case WMTComputeCommandSetBuffer: {
