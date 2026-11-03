@@ -2,6 +2,7 @@ winemetal_unix_src = [
   'winemetal_unix.c',
   'cache.c',
   'pso_archive.c',
+  'mtl4.c', # gw2 (#32)
 ]
 
 if wine_build_path != ''

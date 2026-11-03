@@ -21,6 +21,7 @@
 #include "dxmt_gw2_compile.hpp"
 #include "dxmt_gw2_present.hpp"
 #include "dxmt_gw2_residency.hpp"
+#include "dxmt_gw2_metal4.hpp"
 #include "dxmt_gw2_stats.hpp"
 #include "Metal.hpp"
 #include "dxmt_statistics.hpp"
@@ -167,6 +168,8 @@ CommandQueue::CommandQueue(WMT::Device device) :
   event = device.newSharedEvent();
   // gw2 (#29): the device's residency set on this queue (DXMT_RESIDENCY_SET); logs once per queue
   gw2::residencyAttachQueue(device, commandQueue);
+  // gw2 (#32): DXMT_METAL4, decided once per process; with it unset or 0 this does nothing
+  gw2::metal4AttachQueue(device);
 
   // gw2 (#8): the ring and the frame latency in effect, once per device
   g_ring_chunks.store(chunk_count_, std::memory_order_relaxed);

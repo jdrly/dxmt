@@ -1441,3 +1441,239 @@ MTLCommandQueue_commandBufferWithUnretainedReferences(obj_handle_t queue) {
   UNIX_CALL(154, &params);
   return params.ret;
 }
+
+// gw2 (#32): Metal 4, slots 155-178 of the jdrly/dxmt reservation 155-189
+WINEMETAL_API enum WMTMetal4Support
+MTLDevice_metal4Support(obj_handle_t device) {
+  struct unixcall_generic_obj_uint64_ret params;
+  params.handle = device;
+  params.ret = WMTMetal4NoOS;
+  UNIX_CALL(155, &params);
+  return (enum WMTMetal4Support)params.ret;
+}
+
+WINEMETAL_API obj_handle_t
+MTLDevice_newMTL4CommandQueue(obj_handle_t device) {
+  struct unixcall_generic_obj_obj_ret params;
+  params.handle = device;
+  params.ret = 0;
+  UNIX_CALL(156, &params);
+  return params.ret;
+}
+
+WINEMETAL_API obj_handle_t
+MTLDevice_newCommandAllocator(obj_handle_t device) {
+  struct unixcall_generic_obj_obj_ret params;
+  params.handle = device;
+  params.ret = 0;
+  UNIX_CALL(157, &params);
+  return params.ret;
+}
+
+WINEMETAL_API obj_handle_t
+MTLDevice_newMTL4CommandBuffer(obj_handle_t device) {
+  struct unixcall_generic_obj_obj_ret params;
+  params.handle = device;
+  params.ret = 0;
+  UNIX_CALL(158, &params);
+  return params.ret;
+}
+
+WINEMETAL_API obj_handle_t
+MTLDevice_newArgumentTable(obj_handle_t device, const struct WMTArgTableInfo *info, obj_handle_t *err_out) {
+  struct unixcall_mtl4_new_argtable params;
+  params.device = device;
+  WMT_MEMPTR_SET(params.info, info);
+  params.ret_error = 0;
+  params.ret = 0;
+  UNIX_CALL(159, &params);
+  if (err_out)
+    *err_out = params.ret_error;
+  return params.ret;
+}
+
+WINEMETAL_API uint64_t
+MTL4CommandAllocator_reset(obj_handle_t allocator) {
+  struct unixcall_generic_obj_uint64_ret params;
+  params.handle = allocator;
+  params.ret = 0;
+  UNIX_CALL(160, &params);
+  return params.ret;
+}
+
+WINEMETAL_API void
+MTL4CommandBuffer_beginCommandBuffer(obj_handle_t cmdbuf, obj_handle_t allocator) {
+  struct unixcall_generic_obj_obj_noret params;
+  params.handle = cmdbuf;
+  params.arg = allocator;
+  UNIX_CALL(161, &params);
+}
+
+WINEMETAL_API void
+MTL4CommandBuffer_endCommandBuffer(obj_handle_t cmdbuf) {
+  struct unixcall_generic_obj_noret params;
+  params.handle = cmdbuf;
+  UNIX_CALL(162, &params);
+}
+
+WINEMETAL_API void
+MTL4CommandBuffer_useResidencySet(obj_handle_t cmdbuf, obj_handle_t residency_set) {
+  struct unixcall_generic_obj_obj_noret params;
+  params.handle = cmdbuf;
+  params.arg = residency_set;
+  UNIX_CALL(163, &params);
+}
+
+WINEMETAL_API void
+MTL4CommandQueue_commit(
+    obj_handle_t queue, const obj_handle_t *cmdbufs, uint64_t count, struct WMTMtl4CommitFeedback *feedback,
+    obj_handle_t event, uint64_t event_value
+) {
+  struct unixcall_mtl4_queue_commit params;
+  params.queue = queue;
+  WMT_MEMPTR_SET(params.cmdbufs, cmdbufs);
+  params.count = count;
+  WMT_MEMPTR_SET(params.feedback, feedback);
+  params.event = event;
+  params.event_value = event_value;
+  UNIX_CALL(164, &params);
+}
+
+WINEMETAL_API void
+MTL4CommandQueue_waitForDrawable(obj_handle_t queue, obj_handle_t drawable) {
+  struct unixcall_generic_obj_obj_noret params;
+  params.handle = queue;
+  params.arg = drawable;
+  UNIX_CALL(165, &params);
+}
+
+WINEMETAL_API void
+MTL4CommandQueue_signalDrawable(obj_handle_t queue, obj_handle_t drawable) {
+  struct unixcall_generic_obj_obj_noret params;
+  params.handle = queue;
+  params.arg = drawable;
+  UNIX_CALL(166, &params);
+}
+
+WINEMETAL_API void
+MTL4CommandQueue_signalEvent(obj_handle_t queue, obj_handle_t event, uint64_t value) {
+  struct unixcall_generic_obj_obj_uint64_noret params;
+  params.handle = queue;
+  params.arg0 = event;
+  params.arg1 = value;
+  UNIX_CALL(167, &params);
+}
+
+WINEMETAL_API void
+MTL4CommandQueue_waitForEvent(obj_handle_t queue, obj_handle_t event, uint64_t value) {
+  struct unixcall_generic_obj_obj_uint64_noret params;
+  params.handle = queue;
+  params.arg0 = event;
+  params.arg1 = value;
+  UNIX_CALL(168, &params);
+}
+
+WINEMETAL_API void
+MTL4CommandQueue_addResidencySet(obj_handle_t queue, obj_handle_t residency_set) {
+  struct unixcall_generic_obj_obj_noret params;
+  params.handle = queue;
+  params.arg = residency_set;
+  UNIX_CALL(169, &params);
+}
+
+WINEMETAL_API void
+MTL4CommandQueue_removeResidencySet(obj_handle_t queue, obj_handle_t residency_set) {
+  struct unixcall_generic_obj_obj_noret params;
+  params.handle = queue;
+  params.arg = residency_set;
+  UNIX_CALL(170, &params);
+}
+
+WINEMETAL_API obj_handle_t
+MetalLayer_residencySet(obj_handle_t layer) {
+  struct unixcall_generic_obj_obj_ret params;
+  params.handle = layer;
+  params.ret = 0;
+  UNIX_CALL(171, &params);
+  return params.ret;
+}
+
+WINEMETAL_API void
+MetalDrawable_present(obj_handle_t drawable, enum WMTDrawablePresentMode mode, double value) {
+  struct unixcall_mtl4_drawable_present params;
+  params.drawable = drawable;
+  params.mode = mode;
+  params.value = value;
+  UNIX_CALL(172, &params);
+}
+
+WINEMETAL_API obj_handle_t
+MTL4CommandBuffer_renderCommandEncoder(
+    obj_handle_t cmdbuf, const struct WMTRenderPassInfo *info, const struct WMTMtl4BindingState *state
+) {
+  struct unixcall_mtl4_new_encoder params;
+  params.cmdbuf = cmdbuf;
+  WMT_MEMPTR_SET(params.info, info);
+  WMT_MEMPTR_SET(params.state, state);
+  params.ret = 0;
+  UNIX_CALL(173, &params);
+  return params.ret;
+}
+
+WINEMETAL_API obj_handle_t
+MTL4CommandBuffer_computeCommandEncoder(obj_handle_t cmdbuf, const struct WMTMtl4BindingState *state) {
+  struct unixcall_mtl4_new_encoder params;
+  params.cmdbuf = cmdbuf;
+  WMT_MEMPTR_SET(params.info, NULL);
+  WMT_MEMPTR_SET(params.state, state);
+  params.ret = 0;
+  UNIX_CALL(174, &params);
+  return params.ret;
+}
+
+WINEMETAL_API void
+MTL4RenderCommandEncoder_encodeCommands(
+    obj_handle_t encoder, struct WMTMtl4BindingState *state, const struct wmtcmd_base *cmd_head
+) {
+  struct unixcall_mtl4_encode params;
+  params.encoder = encoder;
+  WMT_MEMPTR_SET(params.state, state);
+  WMT_MEMPTR_SET(params.cmd_head, cmd_head);
+  UNIX_CALL(175, &params);
+}
+
+WINEMETAL_API void
+MTL4ComputeCommandEncoder_encodeCommands(
+    obj_handle_t encoder, struct WMTMtl4BindingState *state, const struct wmtcmd_base *cmd_head
+) {
+  struct unixcall_mtl4_encode params;
+  params.encoder = encoder;
+  WMT_MEMPTR_SET(params.state, state);
+  WMT_MEMPTR_SET(params.cmd_head, cmd_head);
+  UNIX_CALL(176, &params);
+}
+
+WINEMETAL_API void
+MTL4ComputeCommandEncoder_encodeBlitCommands(
+    obj_handle_t encoder, struct WMTMtl4BindingState *state, const struct wmtcmd_base *cmd_head
+) {
+  struct unixcall_mtl4_encode params;
+  params.encoder = encoder;
+  WMT_MEMPTR_SET(params.state, state);
+  WMT_MEMPTR_SET(params.cmd_head, cmd_head);
+  UNIX_CALL(177, &params);
+}
+
+WINEMETAL_API void
+MTL4CommandEncoder_barrier(
+    obj_handle_t encoder, enum WMTMtl4BarrierScope scope, uint64_t after_stages, uint64_t before_stages,
+    uint64_t visibility
+) {
+  struct unixcall_mtl4_barrier params;
+  params.encoder = encoder;
+  params.scope = scope;
+  params.after_stages = after_stages;
+  params.before_stages = before_stages;
+  params.visibility = visibility;
+  UNIX_CALL(178, &params);
+}
