@@ -2334,13 +2334,33 @@ struct WMTMtl4BindingState {
   obj_handle_t bytes_buffer;
   uint64_t bytes_offset;
   uint64_t bytes_end;
+  /* gw2 (#32 part 3): a residency set (the chunk's) that gets every allocation the packets name
+     directly: pipelines, bound buffers and textures, index and indirect buffers, blit operands, the
+     bytes buffer, UseResource's resources (a heap-placed resource: its heap), and at encoder
+     creation the attachments and the visibility buffer (unless flags has
+     WMT_MTL4_NO_ATTACHMENT_RESIDENCY: the present pass's drawable). Metal 4 makes nothing resident
+     by itself. The caller commits the set before the commit that needs it and empties it once the
+     work retired. 0: no set; UseResource then counts in use_resource_dropped. */
+  obj_handle_t residency_set;
+  /* gw2 (#32 part 3): a Set*Bytes that didn't fit between bytes_offset and bytes_end (with a bytes
+     buffer set) stops the replay at that packet: resume is set to it and bytes_needed to what it
+     needs. The caller gives the state a new bytes buffer, clears resume and calls again from it, so
+     no update is skipped. Cleared (0) when the replay reached the end. */
+  struct WMTMemoryPointer resume;
+  uint64_t bytes_needed;
+  /* the compute pipeline's threadgroup size (its SetPSO packet's), for the dispatches after it, also
+     across calls (a resumed replay); zeroed when a compute encoder is created */
+  struct WMTSize threadgroup_size;
+  uint32_t flags;
   /* counters, for the caller's statistics; it resets them */
-  uint32_t use_resource_dropped; /* UseResource packets: residency is the residency sets' job */
+  uint32_t use_resource_dropped; /* UseResource packets without a residency set (a miss) */
   uint32_t unsupported;          /* packets the replay can't encode on Metal 4 (skipped) */
-  uint32_t bytes_overflow;       /* Set*Bytes without space (skipped) */
+  uint32_t bytes_overflow;       /* Set*Bytes with no bytes buffer at all (skipped) */
   uint32_t blit_barriers;        /* barriers between dependent copies (see encodeBlitCommands) */
+  uint32_t residency_adds;       /* allocations added to residency_set (repeats within a call skipped) */
 };
-STATIC_ASSERT(sizeof(struct WMTMtl4BindingState) == 1064); /* the same on i386 and x86_64 */
+STATIC_ASSERT(sizeof(struct WMTMtl4BindingState) == 1120); /* the same on i386 and x86_64 */
+#define WMT_MTL4_NO_ATTACHMENT_RESIDENCY 0x1u
 
 /* written by the commit's feedback handler (on a Metal thread) into the caller's memory: first the
    times and the error, then done = 1, then the event (if any) is set to event_value. So a waiter on
@@ -2396,12 +2416,13 @@ enum WMTDrawablePresentMode : uint32_t {
 };
 WINEMETAL_API void MetalDrawable_present(obj_handle_t drawable, enum WMTDrawablePresentMode mode, double value);
 
-/* autoreleased, like Metal 3's encoders. Binds state's tables (if state isn't null) */
+/* autoreleased, like Metal 3's encoders. Binds state's tables (if state isn't null); a render
+   encoder also puts the pass's attachments into state's residency set */
 WINEMETAL_API obj_handle_t MTL4CommandBuffer_renderCommandEncoder(
-    obj_handle_t cmdbuf, const struct WMTRenderPassInfo *info, const struct WMTMtl4BindingState *state
+    obj_handle_t cmdbuf, const struct WMTRenderPassInfo *info, struct WMTMtl4BindingState *state
 );
 WINEMETAL_API obj_handle_t
-MTL4CommandBuffer_computeCommandEncoder(obj_handle_t cmdbuf, const struct WMTMtl4BindingState *state);
+MTL4CommandBuffer_computeCommandEncoder(obj_handle_t cmdbuf, struct WMTMtl4BindingState *state);
 
 /* today's wmtcmd_render_* packets on an MTL4RenderCommandEncoder: Set*Buffer(Offset) and
    Set*Texture go into state's tables, Set*Bytes into its bytes buffer, fences to the MTL4 fence

@@ -1609,7 +1609,7 @@ MetalDrawable_present(obj_handle_t drawable, enum WMTDrawablePresentMode mode, d
 
 WINEMETAL_API obj_handle_t
 MTL4CommandBuffer_renderCommandEncoder(
-    obj_handle_t cmdbuf, const struct WMTRenderPassInfo *info, const struct WMTMtl4BindingState *state
+    obj_handle_t cmdbuf, const struct WMTRenderPassInfo *info, struct WMTMtl4BindingState *state
 ) {
   struct unixcall_mtl4_new_encoder params;
   params.cmdbuf = cmdbuf;
@@ -1621,7 +1621,7 @@ MTL4CommandBuffer_renderCommandEncoder(
 }
 
 WINEMETAL_API obj_handle_t
-MTL4CommandBuffer_computeCommandEncoder(obj_handle_t cmdbuf, const struct WMTMtl4BindingState *state) {
+MTL4CommandBuffer_computeCommandEncoder(obj_handle_t cmdbuf, struct WMTMtl4BindingState *state) {
   struct unixcall_mtl4_new_encoder params;
   params.cmdbuf = cmdbuf;
   WMT_MEMPTR_SET(params.info, NULL);

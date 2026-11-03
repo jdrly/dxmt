@@ -21,6 +21,8 @@
 //    is resident through one residency set on the queue, the pipelines included (on Metal 4 they
 //    are allocations that need residency too). One commit with feedback and a shared
 //    event; the pixels and buffers are checked.
+//    Then the same again with nothing made resident by hand: the replays put every allocation the
+//    packets name (pipelines, buffers, textures, attachments, UseResource's) into a chunk set (part 3).
 // 2. Probe (the issue's question, with --metallibs <copy of a DXMT shaders_*.db> [--limit n]):
 //    airconv's metallibs (GW2's own shaders, from DXMT's shader cache) load; their vertex and kernel
 //    functions build pipelines both through the device (today's path) and through MTL4Compiler; the
@@ -99,6 +101,8 @@ struct mtl4 {
   id<MTLDevice> device;
   obj_handle_t queue, allocator, cmdbuf;
   id<MTLResidencySet> residency;
+  /* part 3: residency only from the replays, into this set (the chunk's), nothing added by hand */
+  id<MTLResidencySet> chunk;
 };
 
 static obj_handle_t
@@ -146,6 +150,11 @@ begin(struct mtl4 *m) {
 /* ends the command buffer, commits it with feedback and an event, waits; true if it completed */
 static bool
 commit_and_wait(struct mtl4 *m, struct WMTMtl4CommitFeedback *fb, const char *what) {
+  if (m->chunk) {
+    [m->chunk commit];
+    struct unixcall_generic_obj_obj_noret use = {.handle = m->cmdbuf, .arg = H(m->chunk)};
+    _MTL4CommandBuffer_useResidencySet(&use);
+  }
   struct unixcall_generic_obj_noret end = {.handle = m->cmdbuf};
   _MTL4CommandBuffer_endCommandBuffer(&end);
   [m->residency commit];
@@ -178,7 +187,8 @@ resident_buffer(struct mtl4 *m, NSUInteger length) {
   id<MTLBuffer> b = [m->device newBufferWithLength:length
                                            options:MTLResourceStorageModeShared | MTLResourceHazardTrackingModeUntracked];
   memset(b.contents, 0, length);
-  [m->residency addAllocation:b];
+  if (!m->chunk)
+    [m->residency addAllocation:b];
   return b;
 }
 
@@ -192,7 +202,8 @@ resident_texture(struct mtl4 *m, MTLTextureUsage usage) {
   d.storageMode = MTLStorageModePrivate;
   d.hazardTrackingMode = MTLHazardTrackingModeUntracked;
   id<MTLTexture> t = [m->device newTextureWithDescriptor:d];
-  [m->residency addAllocation:t];
+  if (!m->chunk)
+    [m->residency addAllocation:t];
   return t;
 }
 
@@ -217,10 +228,13 @@ test_replay(struct mtl4 *m) {
   CHECK(cs_fill && cs_double, "compute pipelines: %s", err.description.UTF8String);
   if (!pso || !cs_fill || !cs_double)
     return;
-  /* Metal 4: pipelines are allocations too and must be resident (Apple, WWDC25 254; d9mt #63) */
-  [m->residency addAllocation:pso];
-  [m->residency addAllocation:cs_fill];
-  [m->residency addAllocation:cs_double];
+  /* Metal 4: pipelines are allocations too and must be resident (Apple, WWDC25 254; d9mt #63); with
+     m->chunk the replays add them (SetPSO) */
+  if (!m->chunk) {
+    [m->residency addAllocation:pso];
+    [m->residency addAllocation:cs_fill];
+    [m->residency addAllocation:cs_double];
+  }
 
   /* resources: everything the GPU touches is in the residency set (Metal 4 has no useResource) */
   id<MTLBuffer> argbuf = resident_buffer(m, 4096);
@@ -265,6 +279,7 @@ test_replay(struct mtl4 *m) {
   memset(&blit_state, 0, sizeof(blit_state));
   memset(&compute_state, 0, sizeof(compute_state));
   compute_state.tables[WMTMtl4TableCompute] = new_table(m->device, 8, 0);
+  render_state.residency_set = blit_state.residency_set = compute_state.residency_set = H(m->chunk);
   compute_state.bytes_buffer = H(bytes);
   compute_state.bytes_offset = 1024;
   compute_state.bytes_end = 4096;
@@ -317,6 +332,8 @@ test_replay(struct mtl4 *m) {
     fbytes->bytes.ptr = add, fbytes->length = sizeof(add), fbytes->index = 2;
     struct wmtcmd_render_useresource *use = chain_add(&c, sizeof(*use), WMTRenderCommandUseResource);
     use->resource = H(source), use->usage = WMTResourceUsageRead, use->stages = WMTRenderStageFragment;
+    struct wmtcmd_render_useresource *use_pos = chain_add(&c, sizeof(*use_pos), WMTRenderCommandUseResource);
+    use_pos->resource = H(positions), use_pos->usage = WMTResourceUsageRead, use_pos->stages = WMTRenderStageVertex;
     struct wmtcmd_render_setpso *setpso = chain_add(&c, sizeof(*setpso), WMTRenderCommandSetPSO);
     setpso->pso = H(pso);
     struct wmtcmd_render_setviewport *vp = chain_add(&c, sizeof(*vp), WMTRenderCommandSetViewport);
@@ -376,6 +393,41 @@ test_replay(struct mtl4 *m) {
     replay(_MTL4ComputeCommandEncoder_encodeCommands, enc, &compute_state, &c);
     [(id<MTL4ComputeCommandEncoder>)enc endEncoding];
   }
+  /* part 3: a bytes arena with room for two Set*Bytes and four in the stream: the replay stops at the
+     third (resume), gets a new arena and goes on, as Metal.hpp's encoders do; out2[k] = 100 * k */
+  id<MTLBuffer> out2 = resident_buffer(m, 64);
+  int resumes = 0;
+  {
+    obj_handle_t enc = compute_encoder(m, &compute_state);
+    id<MTLBuffer> small = resident_buffer(m, 512);
+    compute_state.bytes_buffer = H(small), compute_state.bytes_offset = 0, compute_state.bytes_end = 512;
+    static uint32_t bases[4] = {0, 100, 200, 300};
+    struct chain c = {0};
+    struct wmtcmd_compute_setpso *p = chain_add(&c, sizeof(*p), WMTComputeCommandSetPSO);
+    p->pso = H(cs_fill), p->threadgroup_size = (struct WMTSize){1, 1, 1};
+    for (int k = 0; k < 4; k++) {
+      struct wmtcmd_compute_setbuffer *b = chain_add(&c, sizeof(*b), WMTComputeCommandSetBuffer);
+      b->buffer = H(out2), b->offset = 4 * k, b->index = 0;
+      struct wmtcmd_compute_setbytes *sb = chain_add(&c, sizeof(*sb), WMTComputeCommandSetBytes);
+      sb->bytes.ptr = &bases[k], sb->length = 4, sb->index = 1;
+      struct wmtcmd_compute_dispatch *d = chain_add(&c, sizeof(*d), WMTComputeCommandDispatchThreads);
+      d->size = (struct WMTSize){1, 1, 1};
+    }
+    struct unixcall_mtl4_encode e = {.encoder = enc};
+    e.state.ptr = &compute_state;
+    e.cmd_head.ptr = c.head;
+    _MTL4ComputeCommandEncoder_encodeCommands(&e);
+    while (compute_state.resume.ptr && resumes < 8) {
+      resumes++;
+      CHECK(compute_state.bytes_needed >= 4, "bytes_needed=%llu", (unsigned long long)compute_state.bytes_needed);
+      id<MTLBuffer> more = resident_buffer(m, 512);
+      compute_state.bytes_buffer = H(more), compute_state.bytes_offset = 0, compute_state.bytes_end = 512;
+      e.cmd_head.ptr = compute_state.resume.ptr;
+      compute_state.resume.ptr = NULL;
+      _MTL4ComputeCommandEncoder_encodeCommands(&e);
+    }
+    [(id<MTL4ComputeCommandEncoder>)enc endEncoding];
+  }
   struct WMTMtl4CommitFeedback fb;
   if (commit_and_wait(m, &fb, "replay")) {
     const uint8_t *px = readback.contents;
@@ -397,8 +449,22 @@ test_replay(struct mtl4 *m) {
     for (uint32_t i = 0; i < 64; i++)
       computed &= o[i] == (1000 + i) * 2;
     CHECK(computed, "compute replay: out[1]=%u, want %u", o[1], (1000 + 1) * 2);
+    const uint32_t *o2 = out2.contents;
+    CHECK(resumes == 1 && o2[0] == 0 && o2[1] == 100 && o2[2] == 200 && o2[3] == 300,
+          "bytes resume: %d resumes, out2 = %u %u %u %u (want 1 resume, 0 100 200 300)", resumes, o2[0], o2[1], o2[2],
+          o2[3]);
   }
-  CHECK(render_state.use_resource_dropped == 1, "use_resource_dropped=%u, want 1", render_state.use_resource_dropped);
+  if (m->chunk) {
+    CHECK(render_state.use_resource_dropped == 0, "use_resource_dropped=%u, want 0 with a residency set",
+          render_state.use_resource_dropped);
+    /* render: argbuf, the bytes buffer, source, positions, target, the pipeline, indices; blit: staging,
+       source, target, readback, fill_a, fill_b; compute: the pipelines, out, the bytes buffer */
+    CHECK(render_state.residency_adds >= 7 && blit_state.residency_adds >= 6 && compute_state.residency_adds >= 4,
+          "residency_adds render %u blit %u compute %u", render_state.residency_adds, blit_state.residency_adds,
+          compute_state.residency_adds);
+  } else {
+    CHECK(render_state.use_resource_dropped == 2, "use_resource_dropped=%u, want 2", render_state.use_resource_dropped);
+  }
   CHECK(!render_state.unsupported && !blit_state.unsupported && !compute_state.unsupported,
         "unsupported packets: render %u blit %u compute %u", render_state.unsupported, blit_state.unsupported,
         compute_state.unsupported);
@@ -406,16 +472,22 @@ test_replay(struct mtl4 *m) {
   CHECK(render_state.bytes_offset == 256 + 16, "render bytes_offset=%llu, want 272",
         (unsigned long long)render_state.bytes_offset);
   CHECK(blit_state.blit_barriers == 2, "blit_barriers=%u, want 2 (readback, fill, copy)", blit_state.blit_barriers);
-  printf("replay: render, blit and compute packets on Metal 4 encoders: %s\n", failures ? "FAILED" : "ok");
+  printf("replay (%s): render, blit and compute packets on Metal 4 encoders: %s\n",
+         m->chunk ? "residency from the replays only" : "everything resident by hand", failures ? "FAILED" : "ok");
   for (int i = 0; i < 4; i++) {
     if (render_state.tables[i])
       [(id)render_state.tables[i] release];
   }
   [(id)compute_state.tables[0] release];
-  [m->residency removeAllocation:pso];
-  [m->residency removeAllocation:cs_fill];
-  [m->residency removeAllocation:cs_double];
-  [m->residency commit];
+  if (m->chunk) {
+    [m->chunk removeAllAllocations];
+    [m->chunk commit];
+  } else {
+    [m->residency removeAllocation:pso];
+    [m->residency removeAllocation:cs_fill];
+    [m->residency removeAllocation:cs_double];
+    [m->residency commit];
+  }
   [pso release];
   [cs_fill release];
   [cs_double release];
@@ -630,6 +702,11 @@ main(int argc, char **argv) {
     _MTL4CommandQueue_addResidencySet(&add);
 
     test_replay(&m);
+    /* part 3: the same with nothing made resident by hand: only what the replays put in the chunk's set */
+    m.chunk = [m.device newResidencySetWithDescriptor:rd error:&err];
+    test_replay(&m);
+    [m.chunk release];
+    m.chunk = nil;
     if (db)
       probe_metallibs(&m, db, limit);
 

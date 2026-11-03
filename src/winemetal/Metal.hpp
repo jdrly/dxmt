@@ -806,7 +806,35 @@ public:
 class MTL4CommandEncoder : public CommandEncoder {
 public:
   WMTMtl4BindingState *state = nullptr;
+  // gw2 (#32 part 3): gives state a new bytes buffer of at least state->bytes_needed when a replay
+  // stopped at a Set*Bytes that didn't fit (state->resume); null: such a packet is skipped (counted)
+  void (*refill)(void *context, WMTMtl4BindingState *state) = nullptr;
+  void *refill_context = nullptr;
 
+protected:
+  // a replay call, resumed with a new bytes buffer as often as it stops for one
+  template <typename Replay>
+  void
+  replay(Replay call, const wmtcmd_base *head) {
+    for (;;) {
+      call(handle, state, head);
+      auto resume = state ? (const wmtcmd_base *)state->resume.get_accessible_or_null() : nullptr;
+      if (!resume)
+        return;
+      state->resume.set(nullptr);
+      if (refill) {
+        refill(refill_context, state);
+        head = resume;
+      } else {
+        state->bytes_overflow++;
+        head = (const wmtcmd_base *)const_cast<wmtcmd_base *>(resume)->next.get_accessible_or_null();
+        if (!head)
+          return;
+      }
+    }
+  }
+
+public:
   void
   barrier(WMTMtl4BarrierScope scope, uint64_t after_stages, uint64_t before_stages,
           uint64_t visibility = WMTMtl4VisibilityDevice) {
@@ -818,7 +846,7 @@ class MTL4RenderCommandEncoder : public MTL4CommandEncoder {
 public:
   void
   encodeCommands(const wmtcmd_render_nop *cmd_head) {
-    MTL4RenderCommandEncoder_encodeCommands(handle, state, (const wmtcmd_base *)cmd_head);
+    replay(MTL4RenderCommandEncoder_encodeCommands, (const wmtcmd_base *)cmd_head);
   }
 
   void
@@ -915,11 +943,23 @@ public:
     fenceOp(WMTRenderCommandUpdateFence, fence, after);
   }
 
+  // gw2 (#32 part 3): the resource goes into state's residency set (Metal 4 has no useResource)
+  void
+  useResource(Resource resource, WMTResourceUsage usage, WMTRenderStages stages) {
+    struct wmtcmd_render_useresource cmd;
+    cmd.type = WMTRenderCommandUseResource;
+    cmd.next.set(nullptr);
+    cmd.resource = resource;
+    cmd.usage = usage;
+    cmd.stages = stages;
+    submit(&cmd);
+  }
+
 private:
   template <typename T>
   void
   submit(const T *cmd) {
-    MTL4RenderCommandEncoder_encodeCommands(handle, state, (const wmtcmd_base *)cmd);
+    replay(MTL4RenderCommandEncoder_encodeCommands, (const wmtcmd_base *)cmd);
   }
 
   void
@@ -948,7 +988,7 @@ class MTL4ComputeCommandEncoder : public MTL4CommandEncoder {
 public:
   void
   encodeCommands(const wmtcmd_compute_nop *cmd_head) {
-    MTL4ComputeCommandEncoder_encodeCommands(handle, state, (const wmtcmd_base *)cmd_head);
+    replay(MTL4ComputeCommandEncoder_encodeCommands, (const wmtcmd_base *)cmd_head);
   }
 
   // today's blit packets (Metal 4 has no blit encoder)
@@ -983,6 +1023,26 @@ private:
       cmd.fence = fence.handle;
       MTL4ComputeCommandEncoder_encodeCommands(handle, state, (const wmtcmd_base *)&cmd);
     }
+  }
+};
+
+// gw2 (#32 part 3): a Metal 4 compute encoder that takes today's blit packets, shaped like
+// BlitCommandEncoder (Metal 4 has no blit encoder)
+class MTL4BlitCommandEncoder : public MTL4ComputeCommandEncoder {
+public:
+  void
+  encodeCommands(const wmtcmd_blit_nop *cmd_head) {
+    encodeBlitCommands(cmd_head);
+  }
+
+  void
+  waitForFence(Fence fence) {
+    MTL4ComputeCommandEncoder::waitForFence(fence, true);
+  }
+
+  void
+  updateFence(Fence fence) {
+    MTL4ComputeCommandEncoder::updateFence(fence, true);
   }
 };
 

@@ -30,6 +30,7 @@
 #include "wsi_platform.hpp"
 #include <cstdint>
 #include <cfloat>
+#include <algorithm>
 #include <mutex>
 #include <set>
 #include <utility>
@@ -1023,6 +1024,34 @@ constexpr unsigned kEncoderOptimizerThreshold = 64;
 
 QueryReadbacks
 ArgumentEncodingContext::flushCommands(WMT::CommandBuffer &cmdbuf, uint64_t seqId, uint64_t event_seq_id) {
+  return flushCommandsImpl(cmdbuf, seqId, event_seq_id);
+}
+
+// gw2 (#32): Metal 4
+QueryReadbacks
+ArgumentEncodingContext::flushCommands(gw2::Mtl4Encoding &encoding, uint64_t seqId, uint64_t event_seq_id) {
+  return flushCommandsImpl(encoding, seqId, event_seq_id);
+}
+
+// gw2 (#32): what the Metal 4 path can't encode yet, once per kind (an error: it draws wrong)
+void
+ArgumentEncodingContext::gw2Metal4Unsupported(const char *what) {
+  static std::mutex mutex;
+  static std::vector<std::string> seen;
+  std::lock_guard lock(mutex);
+  if (std::find(seen.begin(), seen.end(), what) != seen.end())
+    return;
+  seen.emplace_back(what);
+  ERR("Metal 4: ", what, " isn't supported on the Metal 4 path; skipped (its fences still pass)");
+}
+
+// gw2 (#32): one body for both paths. CommandBuffer is WMT::CommandBuffer (Metal 3, upstream's code
+// as before) or gw2::Mtl4Encoding (Metal 4), which has the same encoder and event calls; the few
+// steps that differ are under `if constexpr (kMetal4)`.
+template <typename CommandBuffer>
+QueryReadbacks
+ArgumentEncodingContext::flushCommandsImpl(CommandBuffer &cmdbuf, uint64_t seqId, uint64_t event_seq_id) {
+  constexpr bool kMetal4 = std::is_same_v<CommandBuffer, gw2::Mtl4Encoding>;
   assert(!encoder_current);
 
   unsigned encoder_count = encoder_count_;
@@ -1064,8 +1093,10 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer &cmdbuf, uint64_t seqI
   }
   std::erase_if(pending_queries_, [=](auto &query) -> bool { return query->queryEndAt() == seqId; });
 
-  readbacks.timestamp = timestamp_state_.flush(cmdbuf, frame_id_);
-  readbacks.timestamp_estimate = timestamp_state_.flushEstimated(cmdbuf, 2 * uint64_t(encoder_count), frame_id_); // gw2 (#24)
+  if constexpr (!kMetal4) { // gw2 (#32): Metal 4 makes them from its commits, after the encoders
+    readbacks.timestamp = timestamp_state_.flush(cmdbuf, frame_id_);
+    readbacks.timestamp_estimate = timestamp_state_.flushEstimated(cmdbuf, 2 * uint64_t(encoder_count), frame_id_); // gw2 (#24)
+  }
 
   // gw2 (#4): ENCODE's counters, only with DXMT_STATS
   bool gw2_stats = gw2_enc_.on;
@@ -1090,6 +1121,8 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer &cmdbuf, uint64_t seqI
 
   while (encoder_index) {
     auto current = encoders[encoder_count - encoder_index];
+    if constexpr (kMetal4)
+      cmdbuf.setPosition(2 * uint64_t(encoder_count - encoder_index)); // gw2 (#32): timestamp segments
     // gw2 (#4): the Metal encoders as they are encoded, after the optimizer's merges
     if (gw2_stats && current->type != EncoderType::Null) {
       gw2_enc_.encoders[(unsigned)gw2EncoderKind(current->type)]++;
@@ -1306,64 +1339,69 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer &cmdbuf, uint64_t seqI
     }
     case EncoderType::Present: {
       auto data = static_cast<PresentData *>(current);
-      // gw2: commit the frame's work before waiting for a drawable (as d9mt does), so the GPU
-      // doesn't idle while nextDrawable blocks; the present gets a command buffer of its own.
-      // Fences and the queue order keep it behind the frame. DXMT_PRESENT_SPLIT=0 turns it off.
-      if (present_split_ && encoder_count - encoder_index > 0) {
-        gw2::residencyBeforeCommit(); // gw2 (#29)
-        cmdbuf.commit();
-        // gw2 (#3, #10): the finish thread checks it for a GPU error; its GPU span counts for the frame
-        queue_.KeepSplitCommandBuffer(seqId, cmdbuf);
-        cmdbuf = queue_.CreateCommandBuffer();
-        // gw2 (#24): the timestamps estimated after this point read the present's buffer
-        if (readbacks.timestamp_estimate)
-          readbacks.timestamp_estimate->split(cmdbuf, 2 * uint64_t(encoder_count - encoder_index));
-        currentFrameStatistics().present_split_count++;
-      }
-      auto t0 = clock::now();
-      auto drawable = data->presenter->encodeCommands(
-          cmdbuf, data->backbuffer, data->metadata,
-          [&](WMT::RenderCommandEncoder encoder) {
-            data->fence_wait.forEach([&](auto id) { encoder.waitForFence(fence_pool_[id], WMTRenderStageFragment); });
-          },
-          [&](WMT::RenderCommandEncoder encoder) {
-            data->fence_update.forEach([&](auto id) { encoder.updateFence(fence_pool_[id], WMTRenderStageFragment); });
-          }
-      );
-      auto t1 = clock::now();
-      currentFrameStatistics().drawable_blocking_interval += (t1 - t0);
-      // gw2 (#3): STATS2's nextdrawable and present branch, only with DXMT_STATS on
-      bool stats = gw2::statsEnabled();
-      if (stats)
-        currentFrameStatistics().next_drawable_interval += data->presenter->lastNextDrawable();
-      // gw2 (#7): when the drawable reaches the screen, for the PRESENT section
-      if (stats)
-        gw2::presentTrack(drawable.handle, frame_id_);
-      if (data->after > 0) {
-        cmdbuf.presentDrawableAfterMinimumDuration(drawable, data->after);
-        if (stats)
-          currentFrameStatistics().present_after++;
-      } else if (data->deadline > 0) {
-        cmdbuf.presentDrawableWithDeadline(drawable, data->deadline);
-        if (stats)
-          currentFrameStatistics().present_deadline++;
+      if constexpr (kMetal4) {
+        // jdrly/dxmt #32 part 4: present on Metal 4. Until it is in, no device takes the Metal 4 path.
+        gw2Metal4Unsupported("present");
       } else {
-        cmdbuf.presentDrawable(drawable);
+        // gw2: commit the frame's work before waiting for a drawable (as d9mt does), so the GPU
+        // doesn't idle while nextDrawable blocks; the present gets a command buffer of its own.
+        // Fences and the queue order keep it behind the frame. DXMT_PRESENT_SPLIT=0 turns it off.
+        if (present_split_ && encoder_count - encoder_index > 0) {
+          gw2::residencyBeforeCommit(); // gw2 (#29)
+          cmdbuf.commit();
+          // gw2 (#3, #10): the finish thread checks it for a GPU error; its GPU span counts for the frame
+          queue_.KeepSplitCommandBuffer(seqId, cmdbuf);
+          cmdbuf = queue_.CreateCommandBuffer();
+          // gw2 (#24): the timestamps estimated after this point read the present's buffer
+          if (readbacks.timestamp_estimate)
+            readbacks.timestamp_estimate->split(cmdbuf, 2 * uint64_t(encoder_count - encoder_index));
+          currentFrameStatistics().present_split_count++;
+        }
+        auto t0 = clock::now();
+        auto drawable = data->presenter->encodeCommands(
+            cmdbuf, data->backbuffer, data->metadata,
+            [&](WMT::RenderCommandEncoder encoder) {
+              data->fence_wait.forEach([&](auto id) { encoder.waitForFence(fence_pool_[id], WMTRenderStageFragment); });
+            },
+            [&](WMT::RenderCommandEncoder encoder) {
+              data->fence_update.forEach([&](auto id) { encoder.updateFence(fence_pool_[id], WMTRenderStageFragment); });
+            }
+        );
+        auto t1 = clock::now();
+        currentFrameStatistics().drawable_blocking_interval += (t1 - t0);
+        // gw2 (#3): STATS2's nextdrawable and present branch, only with DXMT_STATS on
+        bool stats = gw2::statsEnabled();
         if (stats)
-          currentFrameStatistics().present_plain++;
-      }
-      if (lt_on) { // gw2 (#31)
-        lt(drawable, LtKind::Drawable);
-        lt(drawable.texture(), LtKind::DrawableTexture);
-        lt(data->backbuffer, LtKind::Texture);
-        data->presenter->gw2LifetimeUse(lt_queue, seqId);
-      }
-      // gw2 (#31): the drawable (its texture is the pass's attachment) and the presenter (the present
-      // pass's pipelines and gamma table) stay held until the chunk retires: Metal 4 and
-      // DXMT_UNRETAINED=1 don't retain them, and Core Animation is no guarantee before the GPU is done
-      if (keep) {
-        queue_.KeepUntilRetired(seqId, WMT::Reference<WMT::MetalDrawable>(drawable));
-        queue_.KeepUntilRetired(seqId, std::move(data->presenter));
+          currentFrameStatistics().next_drawable_interval += data->presenter->lastNextDrawable();
+        // gw2 (#7): when the drawable reaches the screen, for the PRESENT section
+        if (stats)
+          gw2::presentTrack(drawable.handle, frame_id_);
+        if (data->after > 0) {
+          cmdbuf.presentDrawableAfterMinimumDuration(drawable, data->after);
+          if (stats)
+            currentFrameStatistics().present_after++;
+        } else if (data->deadline > 0) {
+          cmdbuf.presentDrawableWithDeadline(drawable, data->deadline);
+          if (stats)
+            currentFrameStatistics().present_deadline++;
+        } else {
+          cmdbuf.presentDrawable(drawable);
+          if (stats)
+            currentFrameStatistics().present_plain++;
+        }
+        if (lt_on) { // gw2 (#31)
+          lt(drawable, LtKind::Drawable);
+          lt(drawable.texture(), LtKind::DrawableTexture);
+          lt(data->backbuffer, LtKind::Texture);
+          data->presenter->gw2LifetimeUse(lt_queue, seqId);
+        }
+        // gw2 (#31): the drawable (its texture is the pass's attachment) and the presenter (the present
+        // pass's pipelines and gamma table) stay held until the chunk retires: Metal 4 and
+        // DXMT_UNRETAINED=1 don't retain them, and Core Animation is no guarantee before the GPU is done
+        if (keep) {
+          queue_.KeepUntilRetired(seqId, WMT::Reference<WMT::MetalDrawable>(drawable));
+          queue_.KeepUntilRetired(seqId, std::move(data->presenter));
+        }
       }
       data->~PresentData();
       break;
@@ -1457,29 +1495,39 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer &cmdbuf, uint64_t seqI
     }
     case EncoderType::SpatialUpscale: {
       auto data = static_cast<SpatialUpscaleData *>(current);
+      if constexpr (kMetal4) {
+        // gw2 (#32): MetalFX stays on Metal 3 (DXMT_METALFX_SPATIAL_SWAPCHAIN=1 keeps the device there);
+        // a MetalFX spatial upscale through the context extension can't be encoded: its fences still pass
+        gw2Metal4Unsupported("MetalFX spatial upscale");
+        auto encoder = cmdbuf.blitCommandEncoder();
+        data->fence_wait.forEach([&](auto id) { encoder.waitForFence(fence_pool_[id]); });
+        data->fence_update.forEach([&](auto id) { encoder.updateFence(fence_pool_[id]); });
+        encoder.endEncoding();
+      } else {
 
-      auto begin_scaler = cmdbuf.blitCommandEncoder();
-      begin_scaler.setLabel(WMT::String::string("BeginScaler", WMTUTF8StringEncoding));
-      data->fence_wait.forEach([&](auto id) { begin_scaler.waitForFence(fence_pool_[id]); });
-      begin_scaler.updateFence(data->scaler->fence());
-      begin_scaler.endEncoding();
+        auto begin_scaler = cmdbuf.blitCommandEncoder();
+        begin_scaler.setLabel(WMT::String::string("BeginScaler", WMTUTF8StringEncoding));
+        data->fence_wait.forEach([&](auto id) { begin_scaler.waitForFence(fence_pool_[id]); });
+        begin_scaler.updateFence(data->scaler->fence());
+        begin_scaler.endEncoding();
 
-      cmdbuf.encodeSpatialScale(data->scaler->scaler(), data->backbuffer, data->upscaled, data->scaler->fence());
+        cmdbuf.encodeSpatialScale(data->scaler->scaler(), data->backbuffer, data->upscaled, data->scaler->fence());
 
-      auto end_scaler = cmdbuf.blitCommandEncoder();
-      end_scaler.waitForFence(data->scaler->fence());
-      end_scaler.setLabel(WMT::String::string("EndScaler", WMTUTF8StringEncoding));
-      data->fence_update.forEach([&](auto id) { end_scaler.updateFence(fence_pool_[id]); });
-      end_scaler.endEncoding();
+        auto end_scaler = cmdbuf.blitCommandEncoder();
+        end_scaler.waitForFence(data->scaler->fence());
+        end_scaler.setLabel(WMT::String::string("EndScaler", WMTUTF8StringEncoding));
+        data->fence_update.forEach([&](auto id) { end_scaler.updateFence(fence_pool_[id]); });
+        end_scaler.endEncoding();
 
-      if (lt_on) { // gw2 (#31)
-        lt(data->backbuffer, LtKind::Texture);
-        lt(data->upscaled, LtKind::Texture);
-        lt(data->scaler->scaler(), LtKind::Scaler);
-        lt(data->scaler->fence(), LtKind::Fence);
+        if (lt_on) { // gw2 (#31)
+          lt(data->backbuffer, LtKind::Texture);
+          lt(data->upscaled, LtKind::Texture);
+          lt(data->scaler->scaler(), LtKind::Scaler);
+          lt(data->scaler->fence(), LtKind::Fence);
+        }
+        if (keep)
+          queue_.KeepUntilRetired(seqId, std::move(data->scaler)); // gw2 (#31): its scaler and fence
       }
-      if (keep)
-        queue_.KeepUntilRetired(seqId, std::move(data->scaler)); // gw2 (#31): its scaler and fence
       data->~SpatialUpscaleData();
       break;
     }
@@ -1503,72 +1551,85 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer &cmdbuf, uint64_t seqI
     }
     case EncoderType::TemporalUpscale: {
       auto data = static_cast<TemporalUpscaleData *>(current);
+      if constexpr (kMetal4) {
+        // gw2 (#32): MetalFX stays on Metal 3 (DXMT_METALFX_SPATIAL_SWAPCHAIN=1 keeps the device there);
+        // a MetalFX temporal upscale through the context extension can't be encoded: its fences still pass
+        gw2Metal4Unsupported("MetalFX temporal upscale");
+        auto encoder = cmdbuf.blitCommandEncoder();
+        data->fence_wait.forEach([&](auto id) { encoder.waitForFence(fence_pool_[id]); });
+        data->fence_update.forEach([&](auto id) { encoder.updateFence(fence_pool_[id]); });
+        encoder.endEncoding();
+      } else {
 
-      auto begin_scaler = cmdbuf.blitCommandEncoder();
-      begin_scaler.setLabel(WMT::String::string("BeginScaler", WMTUTF8StringEncoding));
-      data->fence_wait.forEach([&](auto id) { begin_scaler.waitForFence(fence_pool_[id]); });
-      begin_scaler.updateFence(data->scaler->fence());
-      begin_scaler.endEncoding();
+        auto begin_scaler = cmdbuf.blitCommandEncoder();
+        begin_scaler.setLabel(WMT::String::string("BeginScaler", WMTUTF8StringEncoding));
+        data->fence_wait.forEach([&](auto id) { begin_scaler.waitForFence(fence_pool_[id]); });
+        begin_scaler.updateFence(data->scaler->fence());
+        begin_scaler.endEncoding();
 
-      cmdbuf.encodeTemporalScale(
-          data->scaler->scaler(), data->input, data->output, data->depth, data->motion_vector, data->exposure,
-          data->scaler->fence(), data->props
-      );
+        cmdbuf.encodeTemporalScale(
+            data->scaler->scaler(), data->input, data->output, data->depth, data->motion_vector, data->exposure,
+            data->scaler->fence(), data->props
+        );
 
-      auto end_scaler = cmdbuf.blitCommandEncoder();
-      end_scaler.waitForFence(data->scaler->fence());
-      end_scaler.setLabel(WMT::String::string("EndScaler", WMTUTF8StringEncoding));
-      data->fence_update.forEach([&](auto id) { end_scaler.updateFence(fence_pool_[id]); });
-      end_scaler.endEncoding();
-      if (lt_on) { // gw2 (#31)
-        lt(data->input, LtKind::Texture);
-        lt(data->output, LtKind::Texture);
-        lt(data->depth, LtKind::Texture);
-        lt(data->motion_vector, LtKind::Texture);
-        lt(data->exposure, LtKind::Texture);
-        lt(data->scaler->scaler(), LtKind::Scaler);
-        lt(data->scaler->fence(), LtKind::Fence);
+        auto end_scaler = cmdbuf.blitCommandEncoder();
+        end_scaler.waitForFence(data->scaler->fence());
+        end_scaler.setLabel(WMT::String::string("EndScaler", WMTUTF8StringEncoding));
+        data->fence_update.forEach([&](auto id) { end_scaler.updateFence(fence_pool_[id]); });
+        end_scaler.endEncoding();
+        if (lt_on) { // gw2 (#31)
+          lt(data->input, LtKind::Texture);
+          lt(data->output, LtKind::Texture);
+          lt(data->depth, LtKind::Texture);
+          lt(data->motion_vector, LtKind::Texture);
+          lt(data->exposure, LtKind::Texture);
+          lt(data->scaler->scaler(), LtKind::Scaler);
+          lt(data->scaler->fence(), LtKind::Fence);
+        }
+        if (keep)
+          queue_.KeepUntilRetired(seqId, std::move(data->scaler)); // gw2 (#31)
       }
-      if (keep)
-        queue_.KeepUntilRetired(seqId, std::move(data->scaler)); // gw2 (#31)
       data->~TemporalUpscaleData();
       break;
     }
     case EncoderType::SampleTimestamp: {
       auto data = static_cast<SampleTimestampData *>(current);
-      if (auto readback = readbacks.timestamp.get(); readback->sampleBuffer()) {
+      // gw2 (#32): Metal 4 has no counter sample buffers; this build's timestamps never use them
+      if constexpr (!kMetal4) {
+        if (auto readback = readbacks.timestamp.get(); readback->sampleBuffer()) {
 
-        /**
-        Since Metal driver may change the execution order of encoders, implement a "barrier" to prevent that
-        FIXME: Not an elegant implementation, should get rid of it when fence-based synchronization is done
-        */
-        barrierOnQueue(cmdbuf);
-
-        WMTSampleBufferAttachmentInfo sample_buffer_info{};
-        sample_buffer_info.sample_buffer = readback->sampleBuffer();
-        sample_buffer_info.start_of_encoder_sample_index = data->readback_index;
-        sample_buffer_info.end_of_encoder_sample_index = ~0ull; /* MTLCounterDontSample */
-        auto encoder = cmdbuf.blitCommandEncoderWithSampleBuffers(&sample_buffer_info, 1);
-        encoder.setLabel(WMT::String::string("SampleTimestamp", WMTUTF8StringEncoding));
-        {
           /**
-          `sampleBufferAttachments` does not work when the blit encoder is empty, just do something
-          FIXME: potential perf overhead? 
+          Since Metal driver may change the execution order of encoders, implement a "barrier" to prevent that
+          FIXME: Not an elegant implementation, should get rid of it when fence-based synchronization is done
           */
-          struct wmtcmd_blit_fillbuffer fill;
-          fill.next.set(nullptr);
-          fill.type = WMTBlitCommandFillBuffer;
-          fill.buffer = dummy_cbuffer_;
-          fill.offset = 0;
-          fill.length = 4;
-          fill.value = 0;
-          MTLBlitCommandEncoder_encodeCommands(encoder, (const struct wmtcmd_base *)&fill);
-          lt(dummy_cbuffer_, LtKind::Buffer); // gw2 (#31)
-        }
-        encoder.endEncoding();
+          barrierOnQueue(cmdbuf);
 
-      } else {
-        // Use timestamp from command buffer's `gpuEndTime`
+          WMTSampleBufferAttachmentInfo sample_buffer_info{};
+          sample_buffer_info.sample_buffer = readback->sampleBuffer();
+          sample_buffer_info.start_of_encoder_sample_index = data->readback_index;
+          sample_buffer_info.end_of_encoder_sample_index = ~0ull; /* MTLCounterDontSample */
+          auto encoder = cmdbuf.blitCommandEncoderWithSampleBuffers(&sample_buffer_info, 1);
+          encoder.setLabel(WMT::String::string("SampleTimestamp", WMTUTF8StringEncoding));
+          {
+            /**
+            `sampleBufferAttachments` does not work when the blit encoder is empty, just do something
+            FIXME: potential perf overhead? 
+            */
+            struct wmtcmd_blit_fillbuffer fill;
+            fill.next.set(nullptr);
+            fill.type = WMTBlitCommandFillBuffer;
+            fill.buffer = dummy_cbuffer_;
+            fill.offset = 0;
+            fill.length = 4;
+            fill.value = 0;
+            MTLBlitCommandEncoder_encodeCommands(encoder, (const struct wmtcmd_base *)&fill);
+            lt(dummy_cbuffer_, LtKind::Buffer); // gw2 (#31)
+          }
+          encoder.endEncoding();
+
+        } else {
+          // Use timestamp from command buffer's `gpuEndTime`
+        }
       }
       data->~SampleTimestampData();
       break;
@@ -1581,6 +1642,23 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer &cmdbuf, uint64_t seqI
   encoder_head.next = nullptr;
   encoder_last = &encoder_head;
   encoder_count_ = 0;
+
+  if constexpr (kMetal4) {
+    // gw2 (#32): the timestamp readbacks read the chunk's commits' feedback: exact mode the last
+    // command buffer's end, estimate each buffer's span from the position it began at. A chunk with
+    // queries and no encoder still gets an (empty) command buffer for its times.
+    if (timestamp_state_.pending())
+      cmdbuf.open();
+    auto &segments = cmdbuf.segments();
+    if (!segments.empty()) {
+      readbacks.timestamp = timestamp_state_.flush(segments.back().commit, frame_id_);
+      readbacks.timestamp_estimate =
+          timestamp_state_.flushEstimated(segments.front().commit, 2 * uint64_t(encoder_count), frame_id_);
+      if (readbacks.timestamp_estimate)
+        for (size_t i = 1; i < segments.size(); i++)
+          readbacks.timestamp_estimate->split(segments[i].commit, segments[i].begin);
+    }
+  }
 
   cmdbuf.encodeSignalEvent(queue_.event, event_seq_id);
 

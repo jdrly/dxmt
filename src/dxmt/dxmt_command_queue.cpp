@@ -492,11 +492,13 @@ CommandQueue::CommitChunkMetal4(CommandChunk &chunk, uint64_t seq) {
     mtl4_->waitForEvent(initializer.event(), chunk.resource_initializer_event_id);
     gw2::lifetime::use(lifetime_id_, seq, initializer.event(), gw2::lifetime::Kind::Event); // gw2 (#31)
   }
-  mtl4_->begin(seq);
-  // jdrly/dxmt #32 part 3 encodes the chunk here. Until the port is complete gw2::metal4Active() is
-  // never true, so no Mtl4Queue exists and this isn't reached.
-  gw2::residencyBeforeCommit(); // gw2 (#29)
-  mtl4_->commit(seq);
+  // the encoders (command buffers begin as they need them; events and the present split commit)
+  gw2::Mtl4Encoding encoding(*mtl4_, seq, [this, seq](uint64_t size) {
+    auto [mapped, buffer, offset] = AllocateArgumentBuffer(seq, size);
+    return std::pair<WMT::Buffer, uint64_t>{buffer, offset};
+  });
+  chunk.encodeMetal4(encoding, argument_encoding_ctx);
+  encoding.commitOpen(); // the rest, if anything is left open
 }
 
 // gw2 (#32): the finish thread's part for a Metal 4 chunk: waits for every commit's feedback, then
@@ -505,6 +507,18 @@ CommandQueue::CommitChunkMetal4(CommandChunk &chunk, uint64_t seq) {
 void
 CommandQueue::FinishChunkMetal4(CommandChunk &chunk, uint64_t seq) {
   auto &commits = mtl4_->wait(seq);
+  // The chunk's last queue operation is the signal of its completion event (flushCommands' end,
+  // Mtl4Encoding::encodeSignalEvent), ordered after every commit and every queue-level wait of the
+  // chunk. A chunk with no command buffer, or with queue waits or signals after its last one, is
+  // complete only once it fired: wait for it too before anything of the chunk is released.
+  if (event.signaledValue() < chunk.chunk_event_id) {
+    bool warned = false;
+    while (!event.waitUntilSignaledValue(chunk.chunk_event_id, 1000)) {
+      if (!warned)
+        WARN("Metal 4: chunk ", seq, "'s completion event not signalled after 1 s; still waiting");
+      warned = true;
+    }
+  }
   bool stats = gw2::statsEnabled();
   size_t splits = commits.empty() ? 0 : commits.size() - 1;
   for (size_t i = 0; i < commits.size(); i++) {
