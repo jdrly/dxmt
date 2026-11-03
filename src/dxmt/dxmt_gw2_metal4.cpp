@@ -11,13 +11,9 @@ namespace dxmt::gw2 {
 
 namespace {
 
-enum class Metal4 { Unset, Off, On, Unsupported, Incomplete };
+enum class Metal4 { Unset, Off, On, Unsupported };
 
 std::atomic<Metal4> g_metal4{Metal4::Unset};
-
-// gw2 (#32): part 3 of 4 (the bridge, the queue and submission, the encoders). Present (part 4)
-// follows and sets this.
-constexpr bool kPortComplete = false;
 
 const char *
 supportReason(WMTMetal4Support support) {
@@ -53,8 +49,6 @@ metal4State() {
     return "1";
   case Metal4::Unsupported:
     return "unsupported";
-  case Metal4::Incomplete:
-    return "incomplete";
   default:
     return "0";
   }
@@ -94,12 +88,6 @@ metal4AttachQueue(WMT::Device device) {
         "on Metal 3",
         residencySetState()
     ));
-    return;
-  }
-  if (!kPortComplete) {
-    g_metal4.store(Metal4::Incomplete, std::memory_order_release);
-    Logger::warn("Metal 4: not yet complete, staying on Metal 3 (DXMT_METAL4=1; the device supports it; this build "
-                 "has the bridge, the queue and the encoders, jdrly/dxmt #32 part 3 of 4)");
     return;
   }
   g_metal4.store(Metal4::On, std::memory_order_release);

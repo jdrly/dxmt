@@ -484,8 +484,9 @@ CommandQueue::ReportSplitError(CommandChunk &chunk, uint64_t seq, size_t index, 
 }
 
 // gw2 (#32): the chunk's Metal 4 command buffers: a wait for the initializer's uploads at the queue,
-// then the chunk's encoders in one command buffer (the present split commits the frame's part first
-// and begins another, part 4), the residency set's pending changes, the commit with feedback.
+// then the chunk's encoders (gw2::Mtl4Encoding: command buffers begin as encoders need them; queue
+// events, the present split and the present pass commit; each commit carries the residency sets'
+// pending changes and its feedback), then the rest left open.
 void
 CommandQueue::CommitChunkMetal4(CommandChunk &chunk, uint64_t seq) {
   if (chunk.resource_initializer_event_id) {

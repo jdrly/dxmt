@@ -1340,8 +1340,55 @@ ArgumentEncodingContext::flushCommandsImpl(CommandBuffer &cmdbuf, uint64_t seqId
     case EncoderType::Present: {
       auto data = static_cast<PresentData *>(current);
       if constexpr (kMetal4) {
-        // jdrly/dxmt #32 part 4: present on Metal 4. Until it is in, no device takes the Metal 4 path.
-        gw2Metal4Unsupported("present");
+        // gw2 (#32): present on Metal 4. The split commits the frame's work before nextDrawable, as on
+        // Metal 3 (DXMT_PRESENT_SPLIT); the queue waits for the drawable before the present pass's
+        // command buffer, which is committed on its own, then the drawable is signalled at the queue
+        // and presented (the same deadline and minimum-duration branches).
+        if (present_split_ && encoder_count - encoder_index > 0) {
+          cmdbuf.commitOpen(); // timestamps after this point read the present's buffer (segments)
+          currentFrameStatistics().present_split_count++;
+        }
+        auto t0 = clock::now();
+        auto drawable = data->presenter->encodeCommandsMetal4(
+            cmdbuf, data->backbuffer, data->metadata,
+            [&](WMT::MTL4RenderCommandEncoder encoder) {
+              data->fence_wait.forEach([&](auto id) { encoder.waitForFence(fence_pool_[id], WMTRenderStageFragment); });
+            },
+            [&](WMT::MTL4RenderCommandEncoder encoder) {
+              data->fence_update.forEach([&](auto id) { encoder.updateFence(fence_pool_[id], WMTRenderStageFragment); });
+            }
+        );
+        auto t1 = clock::now();
+        currentFrameStatistics().drawable_blocking_interval += (t1 - t0);
+        bool stats = gw2::statsEnabled();
+        if (stats)
+          currentFrameStatistics().next_drawable_interval += data->presenter->lastNextDrawable();
+        if (stats)
+          gw2::presentTrack(drawable.handle, frame_id_);
+        cmdbuf.signalDrawable(drawable); // commits the present pass first
+        if (data->after > 0) {
+          drawable.present(WMTDrawablePresentAfterMinimumDuration, data->after);
+          if (stats)
+            currentFrameStatistics().present_after++;
+        } else if (data->deadline > 0) {
+          drawable.present(WMTDrawablePresentWithDeadline, data->deadline);
+          if (stats)
+            currentFrameStatistics().present_deadline++;
+        } else {
+          drawable.present();
+          if (stats)
+            currentFrameStatistics().present_plain++;
+        }
+        if (lt_on) { // gw2 (#31)
+          lt(drawable, LtKind::Drawable);
+          lt(drawable.texture(), LtKind::DrawableTexture);
+          lt(data->backbuffer, LtKind::Texture);
+          data->presenter->gw2LifetimeUse(lt_queue, seqId);
+        }
+        // as on Metal 3: the drawable and the presenter stay held until the chunk retires (Metal 4
+        // checks that keepUntilRetired() is on before it starts)
+        queue_.KeepUntilRetired(seqId, WMT::Reference<WMT::MetalDrawable>(drawable));
+        queue_.KeepUntilRetired(seqId, std::move(data->presenter));
       } else {
         // gw2: commit the frame's work before waiting for a drawable (as d9mt does), so the GPU
         // doesn't idle while nextDrawable blocks; the present gets a command buffer of its own.

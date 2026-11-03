@@ -39,7 +39,7 @@ Mtl4Encoding::commitOpen() {
 }
 
 void
-Mtl4Encoding::prepare(Kind kind) {
+Mtl4Encoding::prepare(Kind kind, uint32_t flags) {
   // a new encoder binds nothing yet (as on Metal 3): no buffer for a Set*BufferOffset to move in
   std::memset(state_.buffer_base, 0, sizeof(state_.buffer_base));
   auto &tables = queue_.tables();
@@ -53,7 +53,7 @@ Mtl4Encoding::prepare(Kind kind) {
   } else if (kind == Kind::Compute) {
     state_.tables[WMTMtl4TableCompute] = tables.compute.handle;
   }
-  state_.flags = 0;
+  state_.flags = flags;
   if (state_.bytes_end - state_.bytes_offset < kBytesReserve)
     newArena(kBytesArena);
 }
@@ -82,9 +82,9 @@ Mtl4Encoding::withRefill(Encoder encoder) {
 }
 
 WMT::MTL4RenderCommandEncoder
-Mtl4Encoding::renderCommandEncoder(WMTRenderPassInfo &info) {
+Mtl4Encoding::renderCommandEncoder(WMTRenderPassInfo &info, uint32_t flags) {
   auto &commit = open();
-  prepare(Kind::Render);
+  prepare(Kind::Render, flags);
   return withRefill(WMT::MTL4CommandBuffer{commit.cmdbuf.handle}.renderCommandEncoder(info, &state_));
 }
 
@@ -116,6 +116,17 @@ void
 Mtl4Encoding::encodeWaitForEvent(WMT::Event event, uint64_t value) {
   commitOpen();
   queue_.waitForEvent(event, value);
+}
+
+void
+Mtl4Encoding::waitForDrawable(WMT::MetalDrawable drawable) {
+  queue_.queue().waitForDrawable(drawable);
+}
+
+void
+Mtl4Encoding::signalDrawable(WMT::MetalDrawable drawable) {
+  commitOpen();
+  queue_.queue().signalDrawable(drawable);
 }
 
 } // namespace dxmt::gw2

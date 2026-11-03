@@ -23,7 +23,11 @@
 //    event; the pixels and buffers are checked.
 //    Then the same again with nothing made resident by hand: the replays put every allocation the
 //    packets name (pipelines, buffers, textures, attachments, UseResource's) into a chunk set (part 3).
-// 2. Probe (the issue's question, with --metallibs <copy of a DXMT shaders_*.db> [--limit n]):
+// 2. Part 4: a fence orders two separately committed command buffers (A fills 64 MB, B copies its
+//    end), as the present split and queue-level events rely on; and the present path on a layer
+//    without a window (waitForDrawable, a pass, signalDrawable, present at a deadline), skipped if
+//    the layer gives no drawable.
+// 3. Probe (the issue's question, with --metallibs <copy of a DXMT shaders_*.db> [--limit n]):
 //    airconv's metallibs (GW2's own shaders, from DXMT's shader cache) load; their vertex and kernel
 //    functions build pipelines both through the device (today's path) and through MTL4Compiler; the
 //    device-built ones bind on MTL4 encoders (SetPSO through the replay) and the commit reports no
@@ -495,6 +499,161 @@ test_replay(struct mtl4 *m) {
   [lib release];
 }
 
+/* --- part 4: a fence across two commits, and a drawable */
+
+static void
+commit_one(struct mtl4 *m, obj_handle_t cmdbuf, struct WMTMtl4CommitFeedback *fb, id<MTLSharedEvent> event,
+           uint64_t value) {
+  struct unixcall_generic_obj_noret end = {.handle = cmdbuf};
+  _MTL4CommandBuffer_endCommandBuffer(&end);
+  memset(fb, 0, sizeof(*fb));
+  struct unixcall_mtl4_queue_commit p = {.queue = m->queue, .count = 1, .event = H(event), .event_value = value};
+  p.cmdbufs.ptr = &cmdbuf;
+  p.feedback.ptr = fb;
+  _MTL4CommandQueue_commit(&p);
+}
+
+static void
+wait_value(id<MTLSharedEvent> event, uint64_t value, const char *what) {
+  if (![event waitUntilSignaledValue:value timeoutMS:10000]) {
+    printf("FAIL %s: not complete in 10 s; exiting without cleanup\n", what);
+    fflush(stdout);
+    _Exit(EXIT_FAILURE);
+  }
+}
+
+/* DXMT orders the present split's two command buffers (and the buffers around queue-level events)
+   with MTLFences only. Command buffer A fills 64 MB and updates a fence; B, committed separately,
+   waits for it and copies the fill's last bytes: they must be the fill's. */
+static void
+test_cross_commit_fence(struct mtl4 *m) {
+  const NSUInteger big_size = 64u << 20;
+  id<MTLBuffer> big = [m->device newBufferWithLength:big_size
+                                             options:MTLResourceStorageModePrivate | MTLResourceHazardTrackingModeUntracked];
+  id<MTLBuffer> small = resident_buffer(m, 16);
+  [m->residency addAllocation:big];
+  id<MTLFence> fence = [m->device newFence];
+  id<MTLSharedEvent> event = [m->device newSharedEvent];
+  struct unixcall_generic_obj_obj_ret nb = {.handle = H(m->device)};
+  _MTLDevice_newMTL4CommandBuffer(&nb);
+  obj_handle_t second = nb.ret;
+  struct WMTMtl4BindingState state;
+  memset(&state, 0, sizeof(state));
+  struct WMTMtl4CommitFeedback fa, fbb;
+
+  begin(m);
+  {
+    obj_handle_t enc = compute_encoder(m, &state);
+    struct chain c = {0};
+    struct wmtcmd_blit_fillbuffer *fill = chain_add(&c, sizeof(*fill), WMTBlitCommandFillBuffer);
+    fill->buffer = H(big), fill->offset = 0, fill->length = big_size, fill->value = 0x7e;
+    struct wmtcmd_blit_fence_op *update = chain_add(&c, sizeof(*update), WMTBlitCommandUpdateFence);
+    update->fence = H(fence);
+    replay(_MTL4ComputeCommandEncoder_encodeBlitCommands, enc, &state, &c);
+    [(id<MTL4ComputeCommandEncoder>)enc endEncoding];
+  }
+  [m->residency commit];
+  commit_one(m, m->cmdbuf, &fa, event, 1);
+
+  {
+    struct unixcall_generic_obj_obj_noret b = {.handle = second, .arg = m->allocator};
+    _MTL4CommandBuffer_beginCommandBuffer(&b);
+    struct unixcall_mtl4_new_encoder e = {.cmdbuf = second};
+    e.state.ptr = &state;
+    _MTL4CommandBuffer_computeCommandEncoder(&e);
+    struct chain c = {0};
+    struct wmtcmd_blit_fence_op *wait = chain_add(&c, sizeof(*wait), WMTBlitCommandWaitForFence);
+    wait->fence = H(fence);
+    struct wmtcmd_blit_copy_from_buffer_to_buffer *copy =
+        chain_add(&c, sizeof(*copy), WMTBlitCommandCopyFromBufferToBuffer);
+    copy->src = H(big), copy->src_offset = big_size - 16, copy->dst = H(small), copy->copy_length = 16;
+    replay(_MTL4ComputeCommandEncoder_encodeBlitCommands, e.ret, &state, &c);
+    [(id<MTL4ComputeCommandEncoder>)e.ret endEncoding];
+  }
+  commit_one(m, second, &fbb, event, 2);
+  wait_value(event, 2, "cross-commit fence");
+  wait_value(event, 1, "cross-commit fence");
+  CHECK(!fa.error && !fbb.error, "cross-commit fence: GPU error");
+  const uint8_t *bytes = small.contents;
+  bool ok = true;
+  for (int i = 0; i < 16; i++)
+    ok &= bytes[i] == 0x7e;
+  CHECK(ok, "cross-commit fence: the second command buffer read 0x%02x, want 0x7e (the fence didn't order it)",
+        bytes[0]);
+  printf("cross-commit fence: %s (A %.3f-%.3f ms, B %.3f-%.3f ms)\n", ok ? "ok" : "FAILED", fa.gpu_start * 1e3,
+         fa.gpu_end * 1e3, fbb.gpu_start * 1e3, fbb.gpu_end * 1e3);
+  struct unixcall_generic_obj_uint64_ret reset = {.handle = m->allocator};
+  _MTL4CommandAllocator_reset(&reset);
+  [(id)second release];
+  [m->residency removeAllocation:big];
+  [m->residency commit];
+  [big release];
+  [fence release];
+  [event release];
+}
+
+/* the present path: waitForDrawable, a pass into the drawable (kept out of the chunk's set; the
+   layer's set on the queue), commit, signalDrawable, present. Headless, a layer may give no
+   drawable: then it's skipped. */
+static void
+test_drawable(struct mtl4 *m) {
+  CAMetalLayer *layer = [CAMetalLayer layer];
+  layer.device = m->device;
+  layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+  layer.drawableSize = CGSizeMake(64, 64);
+  id<CAMetalDrawable> drawable = [layer nextDrawable];
+  if (!drawable) {
+    printf("drawable: the layer gave none without a window: skipped\n");
+    return;
+  }
+  struct unixcall_generic_obj_obj_ret ls = {.handle = H(layer)};
+  _MetalLayer_residencySet(&ls);
+  CHECK(ls.ret, "the layer has no residency set");
+  struct unixcall_generic_obj_obj_noret add = {.handle = m->queue, .arg = ls.ret};
+  if (ls.ret)
+    _MTL4CommandQueue_addResidencySet(&add);
+  struct unixcall_generic_obj_obj_noret wd = {.handle = m->queue, .arg = H(drawable)};
+  _MTL4CommandQueue_waitForDrawable(&wd);
+  id<MTLResidencySet> chunk = [m->device newResidencySetWithDescriptor:[[MTLResidencySetDescriptor new] autorelease]
+                                                                 error:nil];
+  struct WMTMtl4BindingState state;
+  memset(&state, 0, sizeof(state));
+  state.residency_set = H(chunk);
+  state.flags = WMT_MTL4_NO_ATTACHMENT_RESIDENCY;
+  begin(m);
+  struct WMTRenderPassInfo info;
+  memset(&info, 0, sizeof(info));
+  info.colors[0].texture = H(drawable.texture);
+  info.colors[0].load_action = WMTLoadActionClear;
+  info.colors[0].store_action = WMTStoreActionStore;
+  info.colors[0].clear_color = (struct WMTClearColor){1, 0, 0, 1};
+  info.default_raster_sample_count = 1;
+  info.render_target_width = 64;
+  info.render_target_height = 64;
+  obj_handle_t enc = render_encoder(m, &info, &state);
+  [(id<MTL4RenderCommandEncoder>)enc endEncoding];
+  CHECK(state.residency_adds == 0, "the drawable went into the chunk's set (%u adds)", state.residency_adds);
+  [chunk commit];
+  struct unixcall_generic_obj_obj_noret use = {.handle = m->cmdbuf, .arg = H(chunk)};
+  _MTL4CommandBuffer_useResidencySet(&use);
+  id<MTLSharedEvent> event = [m->device newSharedEvent];
+  struct WMTMtl4CommitFeedback fb;
+  commit_one(m, m->cmdbuf, &fb, event, 1);
+  _MTL4CommandQueue_signalDrawable(&wd);
+  struct unixcall_mtl4_drawable_present pr = {.drawable = H(drawable), .mode = WMTDrawablePresentWithDeadline,
+                                              .value = 1.0 / 60};
+  _MetalDrawable_present(&pr);
+  wait_value(event, 1, "drawable");
+  CHECK(!fb.error, "drawable: GPU error %s", fb.error ? [((NSError *)fb.error).description UTF8String] : "");
+  printf("drawable: wait, pass, signal, present at a deadline: %s\n", fb.error ? "FAILED" : "ok");
+  struct unixcall_generic_obj_uint64_ret reset = {.handle = m->allocator};
+  _MTL4CommandAllocator_reset(&reset);
+  if (ls.ret)
+    _MTL4CommandQueue_removeResidencySet(&add);
+  [chunk release];
+  [event release];
+}
+
 /* --- the probe: airconv's metallibs from a copy of DXMT's shader cache */
 
 static void
@@ -707,6 +866,8 @@ main(int argc, char **argv) {
     test_replay(&m);
     [m.chunk release];
     m.chunk = nil;
+    test_cross_commit_fence(&m);
+    test_drawable(&m);
     if (db)
       probe_metallibs(&m, db, limit);
 

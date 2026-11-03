@@ -7,7 +7,7 @@
 //   take their memory from their slot's allocator, which the finish thread resets when it retires
 //   the chunk, after the GPU completed every buffer of it.
 // - A chunk commits one command buffer, or several (the present split commits the frame before
-//   nextDrawable, and part 3 may split at queue-level events). Each commit carries its own
+//   nextDrawable and the present pass gets its own, and queue-level events commit as well). Each commit carries its own
 //   MTL4CommitOptions feedback (GPU start and end, error), written into an Mtl4Commit record, and
 //   raises the queue's shared event to the commit's value once written. The finish thread waits on
 //   that event instead of waitUntilCompleted.

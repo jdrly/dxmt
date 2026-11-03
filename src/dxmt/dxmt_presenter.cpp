@@ -204,6 +204,65 @@ Presenter::encodeCommands(
   return drawable;
 }
 
+// gw2 (#32): the presenter goes only after every chunk that presented with it retired (the chunks'
+// keep lists hold it), so the layer's set can leave the queue here
+Presenter::~Presenter() {
+  if (mtl4_queue_ && mtl4_layer_set_)
+    mtl4_queue_.removeResidencySet(WMT::ResidencySet{mtl4_layer_set_.handle});
+}
+
+WMT::MetalDrawable
+Presenter::encodeCommandsMetal4(
+    gw2::Mtl4Encoding &encoding, WMT::Texture backbuffer, DXMTPresentMetadata metadata,
+    std::function<void(WMT::MTL4RenderCommandEncoder)> &&wait_fences,
+    std::function<void(WMT::MTL4RenderCommandEncoder)> &&update_fences
+) {
+  if (!mtl4_queue_) {
+    // the drawables' residency: the layer's own set (a driver-owned set would pin them, d9mt)
+    mtl4_queue_ = encoding.queue().queue();
+    mtl4_layer_set_ = layer_.residencySet();
+    if (mtl4_layer_set_)
+      mtl4_queue_.addResidencySet(WMT::ResidencySet{mtl4_layer_set_.handle});
+    else
+      WARN("Metal 4: the layer has no residency set; drawables may not be resident");
+  }
+  // gw2 (#3): nextDrawable alone for STATS2, only with DXMT_STATS on
+  bool stats = gw2::statsEnabled();
+  std::chrono::high_resolution_clock::time_point t0;
+  if (stats)
+    t0 = std::chrono::high_resolution_clock::now();
+  auto drawable = layer_.nextDrawable();
+  if (stats)
+    last_next_drawable_ = std::chrono::high_resolution_clock::now() - t0;
+  encoding.waitForDrawable(drawable);
+
+  WMTRenderPassInfo info;
+  WMT::InitializeRenderPassInfo(info);
+  info.colors[0].load_action = WMTLoadActionDontCare;
+  info.colors[0].store_action = WMTStoreActionStore;
+  info.colors[0].texture = drawable.texture();
+  auto encoder = encoding.renderCommandEncoder(info, WMT_MTL4_NO_ATTACHMENT_RESIDENCY);
+  wait_fences(encoder);
+  encoder.setFragmentTexture(backbuffer, 0);
+  encoder.setFragmentTexture(gamma_lut_texture_, 1);
+
+  double width = layer_props_.drawable_width;
+  double height = layer_props_.drawable_height;
+
+  encoder.setFragmentBytes(&metadata, sizeof(metadata), 0);
+  if (backbuffer.width() == (uint64_t)width && backbuffer.height() == (uint64_t)height) {
+    encoder.setRenderPipelineState(present_blit_);
+  } else {
+    encoder.setRenderPipelineState(present_scale_);
+  }
+  encoder.setViewport({0, 0, width, height, 0, 1});
+  encoder.drawPrimitives(WMTPrimitiveTypeTriangle, 0, 3);
+  update_fences(encoder);
+  encoder.endEncoding();
+
+  return drawable;
+}
+
 void
 Presenter::gw2LifetimeUse(uint32_t queue, uint64_t seq) const {
   using gw2::lifetime::Kind;
