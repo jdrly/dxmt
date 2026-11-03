@@ -233,16 +233,16 @@ main() {
           size_t want = seq % 3 == 0 ? 2 : 1;
           CHECK(commits.size() == want, "chunk %llu: %zu commits, want %zu", (unsigned long long)seq, commits.size(),
                 want);
-          uint64_t last_end = 0;
+          // no order between a chunk's commits is checked: Metal 4 may run separately committed
+          // command buffers concurrently (measured: the second of a split chunk ended first under
+          // Rosetta), and DXMT orders dependent work across them with fences, not by queue order
+          // (mtl4_bridge_test.m's cross-commit fence check)
           for (auto *commit : commits) {
             CHECK(commit->done(), "chunk %llu: a commit not done after wait()", (unsigned long long)seq);
             CHECK(!commit->feedback.error, "chunk %llu: GPU error", (unsigned long long)seq);
             CHECK(commit->gpuStartNs() > 0 && commit->gpuEndNs() >= commit->gpuStartNs(),
                   "chunk %llu: GPU times %llu-%llu", (unsigned long long)seq,
                   (unsigned long long)commit->gpuStartNs(), (unsigned long long)commit->gpuEndNs());
-            CHECK(commit->gpuEndNs() >= last_end, "chunk %llu: commits completed out of order",
-                  (unsigned long long)seq);
-            last_end = commit->gpuEndNs();
           }
           const uint8_t *bytes = (const uint8_t *)buffer.contents + (seq % kSlots) * 4;
           CHECK(bytes[0] == uint8_t(seq) && bytes[3] == uint8_t(seq), "chunk %llu: the GPU wrote %u, want %u",
