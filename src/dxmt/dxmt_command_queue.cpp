@@ -136,6 +136,8 @@ CommandQueue::CommandQueue(WMT::Device device) :
     chunk_count_(ChunkCountFromEnv()),
     metal_buffer_count_(MetalBufferCount(chunk_count_)),
     max_latency_override_(MaxLatencyOverrideFromEnv()),
+    unretained_(gw2::lifetime::unretained()),
+    lifetime_id_(gw2::lifetime::attachQueue()), // gw2 (#31): logs the command buffer mode once per queue
     encodeThread([this]() { this->EncodingThread(); }),
     finishThread([this]() { this->WaitForFinishThread(); }),
     device(device),
@@ -198,7 +200,9 @@ CommandQueue::~CommandQueue() {
   // (and alive: the command buffers no longer retain them through useResource). The finish thread
   // stopped without retiring every committed chunk, so wait for their command buffers first; the
   // split-off ones were committed earlier on this queue and complete before their chunk's last.
-  if (gw2::residencyActive()) {
+  // gw2 (#31): the same with DXMT_UNRETAINED=1 (the command buffers retain nothing at all) and with
+  // DXMT_LIFETIME_CHECK=1 (whose stamps assume it).
+  if (gw2::residencyActive() || unretained_ || gw2::lifetime::check()) {
     for (unsigned i = 0; i < kCommandChunkCountMax; i++) {
       auto &cmdbuf = chunks[i].attached_cmdbuf;
       if (!cmdbuf)
@@ -208,6 +212,7 @@ CommandQueue::~CommandQueue() {
         cmdbuf.waitUntilCompleted();
     }
   }
+  gw2::lifetime::detachQueue(lifetime_id_); // gw2 (#31): nothing of this queue is in use any more
   for (unsigned i = 0; i < kCommandChunkCountMax; i++) {
     auto &chunk = chunks[i];
     chunk.reset();
@@ -303,10 +308,11 @@ CommandQueue::CommitChunkInternal(CommandChunk &chunk, uint64_t seq) {
   // gw2 (#5): close the previous frame's GetPipeline waits (COMPILE frame= lines)
   gw2::compileEncodeFrame(chunk.frame_);
 
-  auto cmdbuf = commandQueue.commandBuffer();
+  auto cmdbuf = CreateCommandBuffer(); // gw2 (#31): unretained with DXMT_UNRETAINED=1
   chunk.attached_cmdbuf = cmdbuf;
   if (chunk.resource_initializer_event_id) {
     cmdbuf.encodeWaitForEvent(initializer.event(), chunk.resource_initializer_event_id);
+    gw2::lifetime::use(lifetime_id_, seq, initializer.event(), gw2::lifetime::Kind::Event); // gw2 (#31)
   }
   chunk.encode(chunk.attached_cmdbuf, this->argument_encoding_ctx);
   gw2::residencyBeforeCommit(); // gw2 (#29): the set's pending adds and removes, if any
@@ -384,6 +390,8 @@ CommandQueue::WaitForFinishThread() {
     if (chunk.signal_frame_latency_fence_ != ~0ull)
       frame_latency_fence_.signal(chunk.signal_frame_latency_fence_);
 
+    // gw2 (#31): the GPU is done with every buffer of the chunk; from here its references may go
+    gw2::lifetime::completed(lifetime_id_, internal_seq);
     chunk.reset();
     cpu_coherent.signal(internal_seq);
     chunk_ongoing.fetch_sub(1, std::memory_order_release);
@@ -425,6 +433,7 @@ CommandQueue::ReportSplitError(CommandChunk &chunk, uint64_t seq, size_t index, 
 void CommandQueue::Retain(uint64_t seq, Allocation* allocation) {
   auto &chunk = chunks[seq % chunk_count_];
   auto &tracker = chunk.ref_tracker;
+  gw2::lifetime::useAllocation(lifetime_id_, seq, allocation); // gw2 (#31)
   constexpr size_t block_size = decltype(reftracker_storage_allocator)::block_size;
   while (unlikely(!tracker.track(allocation))) {
     auto [temp_buffer, _] = reftracker_storage_allocator.allocate(seq, cpu_coherent.signaledValue(), block_size, 1);

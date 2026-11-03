@@ -87,6 +87,11 @@ WINEMETAL_API obj_handle_t NSAutoreleasePool_alloc_init();
 
 WINEMETAL_API obj_handle_t MTLCommandQueue_commandBuffer(obj_handle_t queue);
 
+/* gw2 (#31): [queue commandBufferWithUnretainedReferences] (bridge call 154): a command buffer that
+   doesn't retain the objects its commands use; the caller keeps them alive until it completes.
+   Autoreleased, as MTLCommandQueue_commandBuffer. */
+WINEMETAL_API obj_handle_t MTLCommandQueue_commandBufferWithUnretainedReferences(obj_handle_t queue);
+
 WINEMETAL_API void MTLCommandBuffer_commit(obj_handle_t cmdbuf);
 
 WINEMETAL_API void MTLCommandBuffer_waitUntilCompleted(obj_handle_t cmdbuf);

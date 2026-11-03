@@ -1418,3 +1418,13 @@ WMTPSOArchiveQuery(struct WMTPSOArchiveStats *stats) {
   WMT_MEMPTR_SET(params.stats, stats);
   UNIX_CALL(151, &params);
 }
+
+// gw2 (#31): slot 154 of the jdrly/dxmt reservation 154-155
+WINEMETAL_API obj_handle_t
+MTLCommandQueue_commandBufferWithUnretainedReferences(obj_handle_t queue) {
+  struct unixcall_generic_obj_obj_ret params;
+  params.handle = queue;
+  params.ret = 0;
+  UNIX_CALL(154, &params);
+  return params.ret;
+}

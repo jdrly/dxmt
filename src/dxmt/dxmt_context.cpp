@@ -326,6 +326,12 @@ ArgumentEncodingContext::encodeShaderResources(
     case SM50BindingType::Sampler: {
       auto slot = 16 * unsigned(stage) + arg.SM50BindingSlot;
       auto &sampler = sampler_[slot].sampler;
+      if (unlikely(gw2::lifetime::check())) { // gw2 (#31): referenced by resource ID, never retained
+        auto queue = queue_.LifetimeId();
+        gw2::lifetime::use(queue, seq_id_, sampler ? sampler->sampler_state : dummy_sampler_, gw2::lifetime::Kind::SamplerState);
+        if (sampler)
+          gw2::lifetime::use(queue, seq_id_, sampler->sampler_state_cube, gw2::lifetime::Kind::SamplerState);
+      }
       if (!sampler) {
         encoded_buffer[arg.StructurePtrOffset] = dummy_sampler_info_.gpu_resource_id;
         encoded_buffer[arg.StructurePtrOffset + 1] = dummy_sampler_info_.gpu_resource_id;
@@ -1063,6 +1069,21 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer &cmdbuf, uint64_t seqI
 
   // gw2 (#4): ENCODE's counters, only with DXMT_STATS
   bool gw2_stats = gw2_enc_.on;
+  // gw2 (#31): DXMT_LIFETIME_CHECK stamps everything this chunk's command buffers use
+  using LtKind = gw2::lifetime::Kind;
+  using LtEncoder = gw2::lifetime::Encoder;
+  const bool lt_on = gw2::lifetime::check();
+  const uint32_t lt_queue = queue_.LifetimeId();
+  auto lt = [&](obj_handle_t object, LtKind kind) { gw2::lifetime::use(lt_queue, seqId, object, kind); };
+  if (lt_on) {
+    for (auto &fence : fence_pool_) // the fences of this context's pool, any of which the chunk may use
+      lt(fence, LtKind::Fence);
+    lt(queue_.event, LtKind::Event);
+    if (readbacks.visibility)
+      lt(readbacks.visibility->visibility_result_heap, LtKind::Buffer);
+    if (readbacks.timestamp && readbacks.timestamp->sampleBuffer())
+      lt(readbacks.timestamp->sampleBuffer(), LtKind::CounterSampleBuffer);
+  }
 
   while (encoder_index) {
     auto current = encoders[encoder_count - encoder_index];
@@ -1128,6 +1149,24 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer &cmdbuf, uint64_t seqI
       if (gw2_stats)
         gw2CountAttachments(data);
       auto gpu_buffer_ = data->allocated_argbuf;
+      if (lt_on) { // gw2 (#31)
+        for (auto &color : render_pass_info.colors) {
+          lt(color.texture, LtKind::Texture);
+          lt(color.resolve_texture, LtKind::Texture);
+        }
+        lt(render_pass_info.depth.texture, LtKind::Texture);
+        lt(render_pass_info.stencil.texture, LtKind::Texture);
+        lt(gpu_buffer_, LtKind::Buffer);
+        for (auto &task : data->gs_arg_marshal_tasks) {
+          lt(task.draw_arguments, LtKind::Buffer);
+          lt(task.dispatch_arguments_buffer, LtKind::Buffer);
+        }
+        for (auto &task : data->ts_arg_marshal_tasks) {
+          lt(task.draw_arguments, LtKind::Buffer);
+          lt(task.dispatch_arguments_buffer, LtKind::Buffer);
+        }
+        gw2::lifetime::useCommands(lt_queue, seqId, (const wmtcmd_base *)&data->cmd_head, LtEncoder::Render);
+      }
       auto encoder = cmdbuf.renderCommandEncoder(render_pass_info);
       data->fence_wait.forEach(
           data->fence_wait_vertex, // if a fence is waited pre-raster, no need to wait again at fragment
@@ -1164,6 +1203,7 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer &cmdbuf, uint64_t seqI
         };
         auto [mapped_task_data, task_data_buffer, task_data_buffer_offset] =
             queue_.AllocateArgumentBuffer(seq_id_, sizeof(GS_MARSHAL_TASK) * task_count);
+        lt(task_data_buffer, LtKind::Buffer); // gw2 (#31)
         auto tasks_data = (GS_MARSHAL_TASK *)mapped_task_data;
         for (unsigned i = 0; i<task_count; i++) {
           auto & task = data->gs_arg_marshal_tasks[i];
@@ -1192,6 +1232,7 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer &cmdbuf, uint64_t seqI
         };
         auto [mapped_task_data, task_data_buffer, task_data_buffer_offset] =
             queue_.AllocateArgumentBuffer(seq_id_, sizeof(TS_MARSHAL_TASK) * task_count);
+        lt(task_data_buffer, LtKind::Buffer); // gw2 (#31)
         auto tasks_data = (TS_MARSHAL_TASK *)mapped_task_data;
         for (unsigned i = 0; i<task_count; i++) {
           auto & task = data->ts_arg_marshal_tasks[i];
@@ -1227,6 +1268,10 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer &cmdbuf, uint64_t seqI
     }
     case EncoderType::Compute: {
       auto data = static_cast<ComputeEncoderData *>(current);
+      if (lt_on) { // gw2 (#31)
+        lt(data->allocated_argbuf, LtKind::Buffer);
+        gw2::lifetime::useCommands(lt_queue, seqId, (const wmtcmd_base *)&data->cmd_head, LtEncoder::Compute);
+      }
       auto encoder = cmdbuf.computeCommandEncoder(true);
       data->fence_wait.forEach([&](auto id) { encoder.waitForFence(fence_pool_[id]); });
       struct wmtcmd_compute_setbuffer setcmd;
@@ -1246,6 +1291,8 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer &cmdbuf, uint64_t seqI
     }
     case EncoderType::Blit: {
       auto data = static_cast<BlitEncoderData *>(current);
+      if (lt_on) // gw2 (#31)
+        gw2::lifetime::useCommands(lt_queue, seqId, (const wmtcmd_base *)&data->cmd_head, LtEncoder::Blit);
       auto encoder = cmdbuf.blitCommandEncoder();
       data->fence_wait.forEach([&](auto id) { encoder.waitForFence(fence_pool_[id]); });
       encoder.encodeCommands(&data->cmd_head);
@@ -1302,11 +1349,24 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer &cmdbuf, uint64_t seqI
         if (stats)
           currentFrameStatistics().present_plain++;
       }
+      if (lt_on) { // gw2 (#31)
+        lt(drawable, LtKind::Drawable);
+        lt(drawable.texture(), LtKind::DrawableTexture);
+        lt(data->backbuffer, LtKind::Texture);
+        data->presenter->gw2LifetimeUse(lt_queue, seqId);
+      }
+      // gw2 (#31): the drawable (its texture is the pass's attachment) and the presenter (the present
+      // pass's pipelines and gamma table) stay held until the chunk retires: Metal 4 and
+      // DXMT_UNRETAINED=1 don't retain them, and Core Animation is no guarantee before the GPU is done
+      queue_.KeepUntilRetired(seqId, WMT::Reference<WMT::MetalDrawable>(drawable));
+      queue_.KeepUntilRetired(seqId, std::move(data->presenter));
       data->~PresentData();
       break;
     }
     case EncoderType::Clear: {
       auto data = static_cast<ClearEncoderData *>(current);
+      if (lt_on && data->attachment) // gw2 (#31)
+        lt(data->attachment.texture(), LtKind::Texture);
       {
         WMTRenderPassInfo info;
         WMT::InitializeRenderPassInfo(info);
@@ -1356,6 +1416,12 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer &cmdbuf, uint64_t seqI
     }
     case EncoderType::Resolve: {
       auto data = static_cast<ResolveEncoderData *>(current);
+      if (lt_on) { // gw2 (#31)
+        if (data->src)
+          lt(data->src.texture(), LtKind::Texture);
+        if (data->dst)
+          lt(data->dst.texture(), LtKind::Texture);
+      }
       {
         WMTRenderPassInfo info;
         WMT::InitializeRenderPassInfo(info);
@@ -1401,18 +1467,29 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer &cmdbuf, uint64_t seqI
       data->fence_update.forEach([&](auto id) { end_scaler.updateFence(fence_pool_[id]); });
       end_scaler.endEncoding();
 
+      if (lt_on) { // gw2 (#31)
+        lt(data->backbuffer, LtKind::Texture);
+        lt(data->upscaled, LtKind::Texture);
+        lt(data->scaler->scaler(), LtKind::Scaler);
+        lt(data->scaler->fence(), LtKind::Fence);
+      }
+      queue_.KeepUntilRetired(seqId, std::move(data->scaler)); // gw2 (#31): its scaler and fence
       data->~SpatialUpscaleData();
       break;
     }
     case EncoderType::SignalEvent: {
       auto data = static_cast<SignalEventData *>(current);
       cmdbuf.encodeSignalEvent(data->event, data->value);
+      lt(data->event, LtKind::Event); // gw2 (#31)
+      queue_.KeepUntilRetired(seqId, std::move(data->event)); // gw2 (#31): an ID3D11Fence may go first
       data->~SignalEventData();
       break;
     }
     case EncoderType::WaitForEvent: {
       auto data = static_cast<WaitForEventData *>(current);
       cmdbuf.encodeWaitForEvent(data->event, data->value);
+      lt(data->event, LtKind::Event); // gw2 (#31)
+      queue_.KeepUntilRetired(seqId, std::move(data->event)); // gw2 (#31)
       data->~WaitForEventData();
       break;
     }
@@ -1435,6 +1512,16 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer &cmdbuf, uint64_t seqI
       end_scaler.setLabel(WMT::String::string("EndScaler", WMTUTF8StringEncoding));
       data->fence_update.forEach([&](auto id) { end_scaler.updateFence(fence_pool_[id]); });
       end_scaler.endEncoding();
+      if (lt_on) { // gw2 (#31)
+        lt(data->input, LtKind::Texture);
+        lt(data->output, LtKind::Texture);
+        lt(data->depth, LtKind::Texture);
+        lt(data->motion_vector, LtKind::Texture);
+        lt(data->exposure, LtKind::Texture);
+        lt(data->scaler->scaler(), LtKind::Scaler);
+        lt(data->scaler->fence(), LtKind::Fence);
+      }
+      queue_.KeepUntilRetired(seqId, std::move(data->scaler)); // gw2 (#31)
       data->~TemporalUpscaleData();
       break;
     }
@@ -1467,6 +1554,7 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer &cmdbuf, uint64_t seqI
           fill.length = 4;
           fill.value = 0;
           MTLBlitCommandEncoder_encodeCommands(encoder, (const struct wmtcmd_base *)&fill);
+          lt(dummy_cbuffer_, LtKind::Buffer); // gw2 (#31)
         }
         encoder.endEncoding();
 

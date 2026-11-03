@@ -26,6 +26,7 @@
 #include "dxmt_command_list.hpp"
 #include "dxmt_context.hpp"
 #include "dxmt_counter.hpp"
+#include "dxmt_gw2_lifetime.hpp"
 #include "dxmt_gw2_stats.hpp"
 #include "dxmt_occlusion_query.hpp"
 #include "dxmt_resource_initializer.hpp"
@@ -141,6 +142,13 @@ private:
   // in the chunk), kept until the chunk completes: the finish thread checks each for a GPU error
   // and, with DXMT_STATS on, reads its GPU timestamps. reset() keeps the capacity.
   std::vector<WMT::Reference<WMT::CommandBuffer>> split_cmdbufs;
+  // gw2 (#31): what the chunk's command buffers use that nothing else holds until the chunk retires
+  // (CommandQueue::KeepUntilRetired): Metal references (the drawable, events) owned here, and the
+  // presenter and MetalFX scalers. Released in reset(), on the finish thread once the GPU is done.
+  std::vector<obj_handle_t> keep_objects;
+  std::vector<Rc<Presenter>> keep_presenters;
+  std::vector<Rc<SpatialScaler>> keep_spatial_scalers;
+  std::vector<Rc<TemporalScaler>> keep_temporal_scalers;
   
   CommandList<ArgumentEncodingContext> list_enc;
   AllocationRefTracking ref_tracker;
@@ -158,6 +166,13 @@ public:
     ref_tracker.clear();
     attached_cmdbuf = nullptr;
     split_cmdbufs.clear();
+    // gw2 (#31): after the command buffers, as Metal 3 releases what they retained
+    for (auto object : keep_objects)
+      WMT::Object{object}.release();
+    keep_objects.clear();
+    keep_presenters.clear();
+    keep_spatial_scalers.clear();
+    keep_temporal_scalers.clear();
   }
 };
 
@@ -188,6 +203,9 @@ private:
   const uint32_t chunk_count_;
   const uint32_t metal_buffer_count_;
   const uint32_t max_latency_override_;
+  // gw2 (#31): DXMT_UNRETAINED, and this queue's id for DXMT_LIFETIME_CHECK's stamps
+  const bool unretained_;
+  const uint32_t lifetime_id_;
 
 public:
   // gw2 (#8): one frame's RING totals, kept by CommitCurrentChunk until the next frame's first commit
@@ -233,7 +251,43 @@ public:
   // a command buffer on this queue, for work split off a chunk (the present split)
   WMT::CommandBuffer
   CreateCommandBuffer() {
-    return commandQueue.commandBuffer();
+    // gw2 (#31): DXMT_UNRETAINED=1: one that doesn't retain what it uses (the chunk holds it)
+    return unretained_ ? commandQueue.commandBufferWithUnretainedReferences() : commandQueue.commandBuffer();
+  }
+
+  // gw2 (#31): chunk `seq` (being encoded, encode thread only) holds these until it retires
+  template <typename T>
+  void
+  KeepUntilRetired(uint64_t seq, WMT::Reference<T> &&object) {
+    if (object)
+      chunks[seq % chunk_count_].keep_objects.push_back(std::exchange(object.handle, NULL_OBJECT_HANDLE));
+  }
+  void
+  KeepUntilRetired(uint64_t seq, Rc<Presenter> &&presenter) {
+    if (presenter)
+      chunks[seq % chunk_count_].keep_presenters.push_back(std::move(presenter));
+  }
+  void
+  KeepUntilRetired(uint64_t seq, Rc<SpatialScaler> &&scaler) {
+    if (scaler)
+      chunks[seq % chunk_count_].keep_spatial_scalers.push_back(std::move(scaler));
+  }
+  void
+  KeepUntilRetired(uint64_t seq, Rc<TemporalScaler> &&scaler) {
+    if (scaler)
+      chunks[seq % chunk_count_].keep_temporal_scalers.push_back(std::move(scaler));
+  }
+
+  // gw2 (#31): DXMT_LIFETIME_CHECK's id of this queue
+  uint32_t LifetimeId() const { return lifetime_id_; }
+
+  // gw2 (#31): blocks until the finish thread has retired every chunk committed so far (device
+  // teardown with DXMT_UNRETAINED=1 or DXMT_LIFETIME_CHECK=1, before the device's caches go)
+  void
+  WaitCommittedRetired() {
+    auto committed = ready_for_encode.load(std::memory_order_acquire) - 1;
+    if (committed)
+      cpu_coherent.wait(committed);
   }
 
   // gw2 (#3, #10): a buffer the present split committed off chunk `seq`, for the finish thread's

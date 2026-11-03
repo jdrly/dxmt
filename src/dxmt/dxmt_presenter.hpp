@@ -69,6 +69,10 @@ public:
 
   PresentState synchronizeLayerProperties();
 
+  // gw2 (#31): DXMT_LIFETIME_CHECK: chunk `seq` of `queue` uses the present pass's pipelines and
+  // gamma table (they are rebuilt only after every earlier present's chunk retired)
+  void gw2LifetimeUse(uint32_t queue, uint64_t seq) const;
+
   // gw2: how long the last nextDrawable took (#3)
   std::chrono::high_resolution_clock::duration lastNextDrawable() const { return last_next_drawable_; }
 

@@ -32,6 +32,7 @@ dxmt_src = [
   'dxmt_gw2_rebind.cpp',
   'dxmt_gw2_control.cpp',
   'dxmt_gw2_residency.cpp',
+  'dxmt_gw2_lifetime.cpp',
 ]
 
 dxmt_shaders = [
