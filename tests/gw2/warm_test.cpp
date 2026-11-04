@@ -13,9 +13,10 @@
 //   live job parked on a queued warm job promotes the warm job past the speculative limits.
 // - The plan is bounded: DXMT_WARM_MAX recipes at most, the rest counted as capped; variants once
 //   each; other Metal targets and malformed records skipped; recipes deserialize back to their key.
-// - Teardown (#88 review): stop() joins the workers while a job runs, settles every job left (waiting,
-//   parked, queued, speculative) so a demand returns, and the owners can then be freed before the
-//   service is destroyed (built with AddressSanitizer: a later touch of a freed job is an error).
+// - Teardown (#88 review): stop() joins the workers while two jobs run, settles every job left (one
+//   really parked on a dependency never submitted, queued, waiting, speculative) so their demands
+//   return, and the owners can then be freed before the service is destroyed (built with
+//   AddressSanitizer: a later touch of a freed job is an error).
 // - A ready hit with every worker busy (#88 review): a job whose result is already done is completed at
 //   creation, so its demand returns at once; submitted instead, it would wait for a free worker.
 
@@ -86,9 +87,13 @@ struct Job {
   compile::JobRecord record;
   // the gate: a job with a gate waits there before it builds (to hold a claim while others arrive)
   std::atomic<bool> *gate = nullptr;
+  // a dependency it returns while that isn't done (a run that parks, as a pipeline on its variant)
+  Job *park_on = nullptr;
 
   Job *
   run() {
+    if (park_on && !park_on->GetIsDone())
+      return park_on;
     int value = 0;
     Job *owner = nullptr;
     switch (table->claim(key, this, &value, &owner)) {
@@ -377,18 +382,25 @@ teardown(compile::Policy policy) {
     return jobs.back().get();
   };
   Job *running = job(1, false), *waiting = job(2, false), *queued = job(3, false), *spec = job(4, true);
-  running->gate = &open;
+  Job *never = job(5, false);   // a dependency never submitted
+  Job *parked = job(6, false);  // runs and parks on it (#88 review: a real park)
+  Job *blocker = job(7, false); // then holds the second worker, so the rest stays queued
+  running->gate = blocker->gate = &open;
   waiting->deps.push_back(running);
-  Job *never = job(5, false); // a dependency never submitted: `parked` parks on it (declared)
-  Job *parked = job(6, false);
-  parked->deps.push_back(never);
+  parked->park_on = never;
   compile::Options o;
-  o.initial_workers = 1;
-  o.max_workers = 1;
+  o.initial_workers = 2;
+  o.max_workers = 2;
   o.policy = policy;
   auto service = std::make_unique<compile::Service<Job *>>(o);
   service->submit(running);
-  while (table.size() == 0)
+  while (table.size() < 1) // worker 1 holds `running` at the gate
+    std::this_thread::yield();
+  service->submit(parked);
+  while (parked->record.state.load() != compile::JobState::Parked) // worker 2 ran it: parked on `never`
+    std::this_thread::yield();
+  service->submit(blocker);
+  while (table.size() < 2) // worker 2 holds `blocker` at the gate
     std::this_thread::yield();
   if (policy == compile::Policy::Declared) {
     service->submit(waiting);
@@ -396,22 +408,38 @@ teardown(compile::Policy policy) {
   }
   service->submit(queued);
   std::thread demander([&] { compile::demand(queued->record, queued->ready); });
+  std::thread parked_demander([&] { compile::demand(parked->record, parked->ready); });
   std::thread opener([&] {
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    open = true; // the running job finishes its run while stop() waits for it
+    open = true; // both held jobs finish their runs while stop() waits for them
   });
+  bool parked_before = parked->record.state.load() == compile::JobState::Parked && !parked->GetIsDone();
   service->stop();
   opener.join();
-  demander.join(); // settled: it returns
-  bool settled = running->GetIsDone() && queued->GetIsDone() &&
+  // settled: both demands return (a regression would leave one waiting forever: fail, don't hang)
+  for (int i = 0; i < 500 && !(queued->GetIsDone() && parked->GetIsDone()); i++)
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  if (!(queued->GetIsDone() && parked->GetIsDone())) {
+    std::printf("FAIL teardown (%s): a demand still waits 5 s after stop (queued %d, parked %d)\n1 FAILED\n",
+                policy == compile::Policy::Legacy ? "legacy" : "declared", queued->GetIsDone(), parked->GetIsDone());
+    std::fflush(stdout);
+    _exit(1);
+  }
+  demander.join();
+  parked_demander.join();
+  bool settled = running->GetIsDone() && blocker->GetIsDone() && queued->GetIsDone() && parked->GetIsDone() &&
+                 parked->done_count.load() == 1 && !never->GetIsDone() &&
                  (policy == compile::Policy::Legacy || (waiting->GetIsDone() && spec->GetIsDone()));
-  CHECK(settled, "teardown (%s): every job done after stop", policy == compile::Policy::Legacy ? "legacy" : "declared");
-  (void)parked;
+  CHECK(parked_before, "teardown (%s): a job was really parked before stop",
+        policy == compile::Policy::Legacy ? "legacy" : "declared");
+  CHECK(settled, "teardown (%s): every job done after stop, the parked one once",
+        policy == compile::Policy::Legacy ? "legacy" : "declared");
   jobs.clear();    // the owners go (the pipeline cache's maps) ...
   service.reset(); // ... before the service: nothing may touch them now (ASan)
-  std::printf("%s teardown (%s): stop joins a running job's worker, settles the rest, a demand returns; "
-              "owners freed before the service\n",
-              settled ? "ok  " : "FAIL", policy == compile::Policy::Legacy ? "legacy" : "declared");
+  std::printf("%s teardown (%s): stop joins two workers mid-run, settles a parked, a queued%s job; their "
+              "demands return; owners freed before the service\n",
+              settled && parked_before ? "ok  " : "FAIL", policy == compile::Policy::Legacy ? "legacy" : "declared",
+              policy == compile::Policy::Legacy ? "" : ", a waiting and a speculative");
 }
 
 // #88 review, High: a done result is taken when the job is created, so a demand needs no worker.
