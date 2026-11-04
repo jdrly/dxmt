@@ -14,6 +14,7 @@
 #include <format>
 #include <mutex>
 #include <string>
+#include <utility>
 
 namespace dxmt::gw2 {
 
@@ -21,9 +22,13 @@ namespace {
 // gw2 (C2): =1 only (exactly "1"), off by default
 sw::Switch<bool> kCompileDemand{"DXMT_COMPILE_DEMAND", false, sw::legacy::exactlyOne};
 std::atomic<uint64_t> g_promoted{0};
-// gw2 (W0): per variant stage: count, total and max ns in the window
-std::atomic<uint64_t> g_stage_n[uint32_t(VariantStage::Count)], g_stage_ns[uint32_t(VariantStage::Count)],
-    g_stage_max_ns[uint32_t(VariantStage::Count)];
+// gw2 (W0): per variant stage: count, total and max ns in the window, published and drained together
+// under the stage's own lock (STATS only; uncontended but for a drain every 2 s)
+struct StageWindow {
+  dxmt::mutex mutex;
+  uint64_t n = 0, ns = 0, max_ns = 0; // mutex
+};
+StageWindow g_stages[uint32_t(VariantStage::Count)];
 constexpr const char *kStageNames[] = {"lock", "air", "lib", "fn", "xlate", "store"};
 } // namespace
 
@@ -280,9 +285,10 @@ variantStages() {
   uint64_t n[uint32_t(VariantStage::Count)], ns[uint32_t(VariantStage::Count)], mx[uint32_t(VariantStage::Count)];
   uint64_t any = 0;
   for (uint32_t i = 0; i < uint32_t(VariantStage::Count); i++) {
-    n[i] = g_stage_n[i].exchange(0, std::memory_order_relaxed);
-    ns[i] = g_stage_ns[i].exchange(0, std::memory_order_relaxed);
-    mx[i] = g_stage_max_ns[i].exchange(0, std::memory_order_relaxed);
+    std::lock_guard<dxmt::mutex> lock(g_stages[i].mutex);
+    n[i] = std::exchange(g_stages[i].n, 0);
+    ns[i] = std::exchange(g_stages[i].ns, 0);
+    mx[i] = std::exchange(g_stages[i].max_ns, 0);
     any += n[i];
   }
   if (!any)
@@ -393,10 +399,11 @@ compileVariantStage(VariantStage stage, int64_t t0) {
   if (!t0)
     return;
   uint64_t ns = uint64_t(std::max<int64_t>(0, nowNs() - t0));
-  auto i = uint32_t(stage);
-  g_stage_n[i].fetch_add(1, std::memory_order_relaxed);
-  g_stage_ns[i].fetch_add(ns, std::memory_order_relaxed);
-  atomicMax(g_stage_max_ns[i], ns);
+  auto &w = g_stages[uint32_t(stage)];
+  std::lock_guard<dxmt::mutex> lock(w.mutex);
+  w.n++;
+  w.ns += ns;
+  w.max_ns = std::max(w.max_ns, ns);
 }
 
 bool
