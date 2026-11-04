@@ -82,6 +82,22 @@ static uint64_t g_map_count, g_map_cap;
 /* g_current still holds a pipeline marked skipped: the next flush rebuilds before writing */
 static bool g_current_dirty;
 
+/* grows a buffer of `elem`-byte items to hold at least `need`; false (unchanged) if it can't */
+static bool
+pso_reserve(void **buf, uint64_t *cap, uint64_t need, size_t elem) {
+  if (need <= *cap)
+    return true;
+  uint64_t ncap = *cap ? *cap * 2 : 256;
+  while (ncap < need)
+    ncap *= 2;
+  void *grown = realloc(*buf, ncap * elem);
+  if (!grown)
+    return false;
+  *buf = grown;
+  *cap = ncap;
+  return true;
+}
+
 static bool
 pso_map_push(uint64_t **map, uint64_t *count, uint64_t *cap, uint64_t rec) {
   if (*count == *cap) {
@@ -559,35 +575,31 @@ pso_queue_add(id desc, bool compute, uint64_t key) {
       NSError *err = nil;
       BOOL ok;
       pthread_mutex_lock(&g_lock);
-      if (compute)
+      /* gw2 (#52): room for its record and its place in g_current's order first, so a pipeline is
+         never in the archive without both (a misaligned map would skip the wrong record) */
+      bool room = pso_reserve((void **)&g_rec, &g_rec_cap, g_rec_count + 1, sizeof(*g_rec)) &&
+                  pso_reserve((void **)&g_map, &g_map_cap, g_map_count + 1, sizeof(*g_map));
+      if (!room)
+        ok = NO;
+      else if (compute)
         ok = [g_current addComputePipelineFunctionsWithDescriptor:desc error:&err];
       else
         ok = [g_current addRenderPipelineFunctionsWithDescriptor:desc error:&err];
       if (ok) {
         atomic_fetch_add(&g_added, 1);
         atomic_fetch_add(&g_unflushed, 1);
-        /* gw2 (#52): record it for rebuilds and the .keys sidecar */
-        if (g_rec_count == g_rec_cap) {
-          uint64_t cap = g_rec_cap ? g_rec_cap * 2 : 256;
-          struct pso_record *grown = realloc(g_rec, cap * sizeof(*g_rec));
-          if (grown) {
-            g_rec = grown;
-            g_rec_cap = cap;
-          }
-        }
-        if (g_rec_count < g_rec_cap) {
-          g_rec[g_rec_count].key = key;
-          g_rec[g_rec_count].desc = [desc retain];
-          g_rec[g_rec_count].compute = compute;
-          g_rec[g_rec_count].skipped = false;
-          pso_map_push(&g_map, &g_map_count, &g_map_cap, g_rec_count);
-          g_rec_count++;
-        }
+        g_rec[g_rec_count].key = key;
+        g_rec[g_rec_count].desc = [desc retain];
+        g_rec[g_rec_count].compute = compute;
+        g_rec[g_rec_count].skipped = false;
+        g_map[g_map_count++] = g_rec_count;
+        g_rec_count++;
       } else {
         atomic_fetch_add(&g_add_failed, 1);
         if (!g_add_error[0])
           snprintf(g_add_error, sizeof(g_add_error), "%s",
-                   err ? err.localizedDescription.UTF8String : "(no error)");
+                   !room ? "out of memory for the pipeline's record (not added)"
+                         : err ? err.localizedDescription.UTF8String : "(no error)");
       }
       pthread_mutex_unlock(&g_lock);
     }

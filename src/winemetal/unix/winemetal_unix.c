@@ -2613,9 +2613,10 @@ _MTLLibrary_newFunctionWithConstants(void *obj) {
 
   params->ret = (obj_handle_t)[library newFunctionWithName:name constantValues:values error:&err];
   params->ret_error = (obj_handle_t)[err retain];
-  if (params->ret) {
+  if (params->ret && pso_archive_enabled()) {
     /* gw2 (#52): the PSO archive's pipeline key tells functions apart by name; one made with
-       constant values gets "<name>#c<FNV-1a of index, type and value bytes>" as its label */
+       constant values gets "<name>#c<FNV-1a of index, type and value bytes>" as its label
+       (only with DXMT_PSO_ARCHIVE=1) */
     uint64_t h = 0xcbf29ce484222325ull;
     for (uint64_t i = 0; i < params->num_constants; i++) {
       uint64_t idx = constants[i].index, type = constants[i].type;
