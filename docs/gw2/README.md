@@ -43,8 +43,8 @@ because Wine raises `0x80000005` (`STATUS_BUFFER_OVERFLOW`) for a line over its 
 | `DXMT_SKIP_REBIND` | on | A draw's pipeline bind is left out when its render encoder already has that pipeline bound (see [REBIND](#rebind)). Each encoder tracks the pipeline its own command list bound last; a new encoder starts with none, and any other pipeline bind in it (an internal pass's, the tile barrier's) clears it, so the first draw after those always binds. Only the bind is dropped: depth-stencil, rasterizer, blend color, viewports and scissors are separate commands, emitted as before | `=0`: every pipeline change binds, as upstream |
 | `DXMT_CONTROL` | off | `=<path>`: the control file (see [Control file](#control-file)). A thread reads it once a second, never the render thread; its keys change settings while the game runs, for A/B minutes within one start. Today's key: `present_deadline`, which replaces `DXMT_PRESENT_DEADLINE` while the file sets it | unset: no thread, no file access, every setting from its variable |
 | `DXMT_RESIDENCY_SET` | on | One `MTLResidencySet` for the Metal device, attached to every DXMT command queue on it (macOS 15+; see [RESIDENCY](#residency)). Buffers and textures enter it when they are created and leave it when they are freed, which happens only after the last chunk that used them has retired; the set's changes are committed right before a command buffer commit, only when it changed. `makeResident` emits no `useResource` for them (`ENCODE useres` near 0). Left out, with `useResource` as before: heap-placed and shared (IOSurface) resources, CPU-placed memory (i386), DXMT's bare Metal buffers (dummy constant buffer, GS marshal). Drawables never enter it. Texture views and buffer views ride on their parent | `=0`: no set, a `useResource` per resource and encoder (upstream) |
-| `DXMT_UNRETAINED` | on | A chunk's command buffers (the frame's and the present split's) come from `commandBufferWithUnretainedReferences` (bridge call 154), so Metal retains nothing they use; DXMT holds it until the finish thread retires the chunk (see [LIFECHECK](#lifecheck)): the drawable, the presenter, events and MetalFX scalers go into the chunk's keep list instead of being released after encoding, and device teardown waits for every committed chunk before the D3D11 device's pipeline, depth-stencil and sampler caches go (the same with `DXMT_LIFETIME_CHECK=1`). Metal 4 plan phase 1 (#31), groundwork for the Metal 4 queue (#32). On by default since the lifetime check (20+ min of busy Lion's Arch with a map change and alt-tabs) found 0 early releases | `=0`: `[queue commandBuffer]`, as upstream |
-| `DXMT_LIFETIME_CHECK` | off | **Diagnostic build only** (meson `-Dgw2_lifetime_check=true`; in any other build it is compiled out and `=1` is ignored with a warning). `=1`: as d9mt's `D9MT_LIFETIME_CHECK`. Every object a chunk's command buffers use is stamped with the chunk's sequence on the encode thread; releasing DXMT's last reference to one before the GPU completed that chunk logs a `LIFETIME` line (once per object type) and counts in [LIFECHECK](#lifecheck). Works with `DXMT_UNRETAINED` on or off (it checks DXMT's own bookkeeping, not Metal's retains). It also turns on the keep lists and teardown waits that `DXMT_UNRETAINED=1` uses. Costs a lock and a hash lookup per stamp, retain and release: for test runs only | `=0`: no stamps, no counting; a normal build has no code for them at all |
+| `DXMT_UNRETAINED` | on | A chunk's command buffers (the frame's and the present split's) come from `commandBufferWithUnretainedReferences` (bridge call 154), so Metal retains nothing they use; DXMT holds it until the finish thread retires the chunk (see [LIFECHECK](#lifecheck)): the drawable, the presenter, events and MetalFX scalers are held in the retirement ledger until the chunk retires instead of being released after encoding, and device teardown waits for every committed chunk before the D3D11 device's pipeline, depth-stencil and sampler caches go (the same with `DXMT_LIFETIME_CHECK=1`). Metal 4 plan phase 1 (#31), groundwork for the Metal 4 queue (#32). On by default since the lifetime check (20+ min of busy Lion's Arch with a map change and alt-tabs) found 0 early releases | `=0`: `[queue commandBuffer]`, as upstream |
+| `DXMT_LIFETIME_CHECK` | off | **Diagnostic build only** (meson `-Dgw2_lifetime_check=true`; in any other build it is compiled out and `=1` is ignored with a warning). `=1`: as d9mt's `D9MT_LIFETIME_CHECK`. Every object a chunk's command buffers use is stamped with the chunk's sequence on the encode thread; releasing DXMT's last reference to one before the GPU completed that chunk logs a `LIFETIME` line (once per object type) and counts in [LIFECHECK](#lifecheck). Works with `DXMT_UNRETAINED` on or off (it checks DXMT's own bookkeeping, not Metal's retains). It also turns on the ledger's holds and teardown waits that `DXMT_UNRETAINED=1` uses. Costs a lock and a hash lookup per stamp, retain and release: for test runs only | `=0`: no stamps, no counting; a normal build has no code for them at all |
 | `DXMT_METAL4` | on | Metal 4 for this process's devices (Metal 4 plan phase 2, #32; see [Metal 4](#metal-4)): an `MTL4CommandQueue` with one `MTL4CommandAllocator` and one residency set per chunk slot, Metal 4 command buffers with commit feedback, today's packets replayed on Metal 4 encoders through argument tables, and present through `waitForDrawable`/`signalDrawable` and the drawable's own present (the same deadline, minimum-duration and present-split behaviour). Decided once per process at the first command queue. Stays on Metal 3, with a warning, on a device without Metal 4 (macOS before 26, or not `MTLGPUFamilyMetal4`), without the residency set (`DXMT_RESIDENCY_SET`), without `DXMT_UNRETAINED=1`, or with `DXMT_METALFX_SPATIAL_SWAPCHAIN=1`. **On by default since 2026-11-04** (#32's follow-up), after Jan's 10-minute in-game session on it: no device errors, no missed resources, no visual problems | `=0`: Metal 3, exactly as before; no bridge call, no log line |
 | `DXMT_SUBSAMPLE_METALFX` | off | GW2's Render Sampling: Subsample pass with MetalFX (#56; see [SUBSAMPLE](#subsample)). `log`: capture only, every candidate draw's shape is logged once and nothing changes. `1`: an accepted pass (the full-screen draw that samples the low-resolution 3D scene into a target of the swapchain's size) samples a MetalFX spatial upscale of its source instead, on Metal 3 (`MTLFXSpatialScaler`) and Metal 4 (`MTL4FXSpatialScaler`, bridge calls 190–192); the game's pixel shader still runs, and the UI drawn after it is untouched. Anything that doesn't match runs unchanged | unset or `=0`: no detection, no counting, no bridge call |
 | `DXMT_SUBSAMPLE_METALFX_PS` | unset | With `DXMT_SUBSAMPLE_METALFX`: only a pass whose pixel shader's SHA-1 (as the candidate line prints it) starts with this hex prefix is accepted (`no(pin)` otherwise) | any pixel shader that passes the other checks |
@@ -704,7 +704,7 @@ totals (2 s). It shows the check is running; the
 | `early`, `total` | Releases of DXMT's last reference to an object before the GPU completed the last chunk that used it: in the window, and since the start. Both should stay 0 |
 
 What a chunk uses and who holds it until the finish thread retires the chunk
-(`src/dxmt/dxmt_gw2_lifetime.hpp`). The keep list and the teardown waits act only with
+(`src/dxmt/dxmt_gw2_lifetime.hpp`). The retirement ledger's holds (`src/dxmt/dxmt_gw2_retirement.hpp`) and the teardown waits act only with
 `DXMT_UNRETAINED=1` (the default) or the check; with both off the retained command buffers hold those objects, as
 upstream:
 
@@ -715,10 +715,10 @@ upstream:
 | Argument, temporary and staging buffers | `buffer` | the ring allocators, freed by sequence after retire |
 | Render and compute pipelines, depth-stencil states | `pipeline`, `depth-stencil state` | the D3D11 device's caches (never evicted) or the queue's encoding context (internal passes) |
 | Sampler states (bound by resource ID in argument buffers) | `sampler state` | the D3D11 device's sampler cache; the dummy sampler: the encoding context |
-| The drawable, its texture | `drawable`, `drawable texture` | the chunk's keep list (the drawable; its texture with it) |
-| The present pass's pipelines and gamma table | `pipeline`, `texture` | the presenter, held in the chunk's keep list; its pipelines are rebuilt only after every earlier present's chunk retired |
-| Events (`ID3D11Fence` Signal and Wait, keyed mutexes, the queue's and the initializer's) | `event` | the chunk's keep list; the queue's own: the queue |
-| MetalFX scalers and their fences | `MetalFX scaler`, `fence` | the chunk's keep list |
+| The drawable, its texture | `drawable`, `drawable texture` | the retirement ledger (the drawable; its texture with it) |
+| The present pass's pipelines and gamma table | `pipeline`, `texture` | the presenter, held in the retirement ledger; its pipelines are rebuilt only after every earlier present's chunk retired |
+| Events (`ID3D11Fence` Signal and Wait, keyed mutexes, the queue's and the initializer's) | `event` | the retirement ledger; the queue's own: the queue |
+| MetalFX scalers and their fences | `MetalFX scaler`, `fence` | the retirement ledger |
 | The fence pool, the occlusion and timestamp readbacks | `fence`, `buffer`, `counter sample buffer` | the encoding context; the chunk's readbacks |
 
 Reading it: with `DXMT_UNRETAINED=1` an early release can draw wrong or fault the GPU; with `=0`
@@ -825,8 +825,8 @@ branches off), on Metal 4 into a `gw2::Mtl4Encoding` with the same encoder and e
   there, with a warning once per kind. Issue #32 kept them on Metal 3 "at first"; they can't be
   known when a device picks its queue, and the coordinator chose on 2026-11-04 to let them run
   rather than refuse them (GW2 uses none).
-- Metal 4 needs `DXMT_UNRETAINED=1` (the default): its command buffers retain nothing, so the chunk's
-  keep lists must hold what it uses.
+- Metal 4 needs `DXMT_UNRETAINED=1` (the default): its command buffers retain nothing, so the
+  retirement ledger must hold what it uses.
 
 **Part 4, present** (`Presenter::encodeCommandsMetal4`, the `Present` encoder in `flushCommands`):
 
@@ -920,6 +920,7 @@ At `Draw`, `DrawIndexed`, and `DrawInstanced`/`DrawIndexedInstanced` with one in
 | `SUBSAMPLE: MetalFX spatial scaler WxH -> WxH format F (Metal 3\|Metal 4, perceptual\|HDR)` | Once per shape, when its scaler is built |
 | `SUBSAMPLE: MetalFX refused format F WxH -> WxH (…); not upscaled`, `SUBSAMPLE: MetalFX spatial scaling isn't supported on this device (…); not upscaled` | Once per shape (errors); that shape is then rejected as `metalfx` |
 | `SUBSAMPLE: 64 candidate shapes logged; no more candidate lines` | Once |
+| `RetirementLedger: refused a hold\|split hold\|retirement for chunk S (ring slot R, retired up to T, refusal N; only the first 8 are logged)` | An error, never expected (#66): a hold for a chunk that already retired or into a ring slot another unretired chunk still owns, or a retirement out of sequence. A refused hold is kept until the device's queue goes (never released early); a refused retirement releases nothing. The first 8 per command queue are logged |
 
 ## Native tests
 
@@ -939,3 +940,9 @@ growth to 2 × CPUs) run against the service and against the scheduler it replac
 (`tests/gw2/fixtures/legacy_task_scheduler.hpp`, unchanged), with every worker's job held at a gate
 and released one at a time; the traces (which jobs run, what they return, the worker count) must be
 identical.
+
+`retirement_ledger_test.cpp` (L1, #66) checks the retirement ledger (`src/dxmt/dxmt_gw2_retirement.hpp`)
+with counting owners: nothing is released before its chunk retires, today's cross-category release
+order, ring wrap at 32, 64 and 128 with a stale generation refused, two queues with the same
+sequence, repeated and out-of-order retirements refused, no hold after retirement began (even from a
+release), and teardown's slot-by-slot drain.

@@ -57,3 +57,31 @@ _Avoid_: hash (alone), persisted key
 
 **Variant**:
 One translation of a shader for one set of translation inputs.
+
+### Chunks and retirement
+
+**Chunk**:
+One sequenced batch of commands that is committed and retired together (`CommandChunk`).
+_Avoid_: frame
+
+**Chunk sequence**:
+A chunk's identity within one command queue (`seq`, from 1), distinct from its **ring slot**.
+
+**Ring slot**:
+A chunk's reused place in the queue's ring (`seq % DXMT_CHUNKS`). Always "ring slot", never a bare
+"slot", which is the bridge's word for a call number.
+_Avoid_: slot (alone)
+
+**Hold**:
+Ownership that keeps an object alive until its chunk retires (`CommandQueue::Hold`, the retirement
+ledger).
+_Avoid_: keep, retain (Metal's word)
+
+**Retire**:
+The CPU release of everything a chunk used, after all its commits completed and every completion
+consumer is done (`CommandQueue::RetireChunk`, on the finish thread).
+_Avoid_: finish, complete (the GPU's event)
+
+**Retirement ledger**:
+The queue's typed record of what each chunk holds, per ring slot and stamped with the chunk
+sequence; it releases a chunk's holds only when that chunk retires, in a fixed order.

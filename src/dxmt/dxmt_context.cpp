@@ -1412,8 +1412,8 @@ ArgumentEncodingContext::flushCommandsImpl(CommandBuffer &cmdbuf, uint64_t seqId
         }
         // as on Metal 3: the drawable and the presenter stay held until the chunk retires (Metal 4
         // checks that keepUntilRetired() is on before it starts)
-        queue_.KeepUntilRetired(seqId, WMT::Reference<WMT::MetalDrawable>(drawable));
-        queue_.KeepUntilRetired(seqId, std::move(data->presenter));
+        queue_.Hold(seqId, WMT::Reference<WMT::MetalDrawable>(drawable));
+        queue_.Hold(seqId, std::move(data->presenter));
       } else {
         // gw2: commit the frame's work before waiting for a drawable (as d9mt does), so the GPU
         // doesn't idle while nextDrawable blocks; the present gets a command buffer of its own.
@@ -1422,7 +1422,7 @@ ArgumentEncodingContext::flushCommandsImpl(CommandBuffer &cmdbuf, uint64_t seqId
           gw2::residencyBeforeCommit(); // gw2 (#29)
           cmdbuf.commit();
           // gw2 (#3, #10): the finish thread checks it for a GPU error; its GPU span counts for the frame
-          queue_.KeepSplitCommandBuffer(seqId, cmdbuf);
+          queue_.HoldSplit(seqId, cmdbuf);
           cmdbuf = queue_.CreateCommandBuffer();
           // gw2 (#24): the timestamps estimated after this point read the present's buffer
           if (readbacks.timestamp_estimate)
@@ -1471,8 +1471,8 @@ ArgumentEncodingContext::flushCommandsImpl(CommandBuffer &cmdbuf, uint64_t seqId
         // pass's pipelines and gamma table) stay held until the chunk retires: Metal 4 and
         // DXMT_UNRETAINED=1 don't retain them, and Core Animation is no guarantee before the GPU is done
         if (keep) {
-          queue_.KeepUntilRetired(seqId, WMT::Reference<WMT::MetalDrawable>(drawable));
-          queue_.KeepUntilRetired(seqId, std::move(data->presenter));
+          queue_.Hold(seqId, WMT::Reference<WMT::MetalDrawable>(drawable));
+          queue_.Hold(seqId, std::move(data->presenter));
         }
       }
       data->~PresentData();
@@ -1589,7 +1589,7 @@ ArgumentEncodingContext::flushCommandsImpl(CommandBuffer &cmdbuf, uint64_t seqId
             lt(data->scaler->fence(), LtKind::Fence);
           }
           if (keep)
-            queue_.KeepUntilRetired(seqId, std::move(data->scaler));
+            queue_.Hold(seqId, std::move(data->scaler));
         } else {
           // gw2 (#32): MetalFX stays on Metal 3 (DXMT_METALFX_SPATIAL_SWAPCHAIN=1 keeps the device there);
           // a Metal 3 scaler can't be encoded here: its fences still pass
@@ -1622,7 +1622,7 @@ ArgumentEncodingContext::flushCommandsImpl(CommandBuffer &cmdbuf, uint64_t seqId
           lt(data->scaler->fence(), LtKind::Fence);
         }
         if (keep)
-          queue_.KeepUntilRetired(seqId, std::move(data->scaler)); // gw2 (#31): its scaler and fence
+          queue_.Hold(seqId, std::move(data->scaler)); // gw2 (#31): its scaler and fence
       }
       data->~SpatialUpscaleData();
       break;
@@ -1632,7 +1632,7 @@ ArgumentEncodingContext::flushCommandsImpl(CommandBuffer &cmdbuf, uint64_t seqId
       cmdbuf.encodeSignalEvent(data->event, data->value);
       lt(data->event, LtKind::Event); // gw2 (#31)
       if (keep)
-        queue_.KeepUntilRetired(seqId, std::move(data->event)); // gw2 (#31): an ID3D11Fence may go first
+        queue_.Hold(seqId, std::move(data->event)); // gw2 (#31): an ID3D11Fence may go first
       data->~SignalEventData();
       break;
     }
@@ -1641,7 +1641,7 @@ ArgumentEncodingContext::flushCommandsImpl(CommandBuffer &cmdbuf, uint64_t seqId
       cmdbuf.encodeWaitForEvent(data->event, data->value);
       lt(data->event, LtKind::Event); // gw2 (#31)
       if (keep)
-        queue_.KeepUntilRetired(seqId, std::move(data->event)); // gw2 (#31)
+        queue_.Hold(seqId, std::move(data->event)); // gw2 (#31)
       data->~WaitForEventData();
       break;
     }
@@ -1683,7 +1683,7 @@ ArgumentEncodingContext::flushCommandsImpl(CommandBuffer &cmdbuf, uint64_t seqId
           lt(data->scaler->fence(), LtKind::Fence);
         }
         if (keep)
-          queue_.KeepUntilRetired(seqId, std::move(data->scaler)); // gw2 (#31)
+          queue_.Hold(seqId, std::move(data->scaler)); // gw2 (#31)
       }
       data->~TemporalUpscaleData();
       break;

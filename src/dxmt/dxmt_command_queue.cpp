@@ -140,6 +140,7 @@ CommandQueue::CommandQueue(WMT::Device device) :
     max_latency_override_(MaxLatencyOverrideFromEnv()),
     unretained_(gw2::lifetime::unretained()),
     lifetime_id_(gw2::lifetime::attachQueue()), // gw2 (#31): logs the command buffer mode once per queue
+    ledger_(chunk_count_),
     encodeThread([this]() { this->EncodingThread(); }),
     finishThread([this]() { this->WaitForFinishThread(); }),
     device(device),
@@ -234,7 +235,10 @@ CommandQueue::~CommandQueue() {
     }
   }
   gw2::lifetime::detachQueue(lifetime_id_); // gw2 (#31): nothing of this queue is in use any more
-  for (unsigned i = 0; i < kCommandChunkCountMax; i++) {
+  // gw2 (#66): chunk by chunk as before: its own state, then its ring slot's holds; the chunks past the
+  // ring (never used) last
+  ledger_.drain([this](uint32_t slot) { chunks[slot].reset(); });
+  for (unsigned i = chunk_count_; i < kCommandChunkCountMax; i++) {
     auto &chunk = chunks[i];
     chunk.reset();
   };
@@ -400,15 +404,16 @@ CommandQueue::WaitForFinishThread() {
       // needed already; a buffer still pending is waited for here, never on the encode thread.
       // gw2 (#3): their GPU execution spans, then the last buffer's, for the GPU line
       bool stats = gw2::statsEnabled();
-      for (size_t i = 0; i < chunk.split_cmdbufs.size(); i++) {
-        auto &split = chunk.split_cmdbufs[i];
+      auto splits = ledger_.splits(internal_seq); // gw2 (#66): held in the retirement ledger
+      for (size_t i = 0; i < splits.size(); i++) {
+        auto &split = splits[i];
         auto status = split.status();
         if (status <= WMTCommandBufferStatusScheduled) {
           split.waitUntilCompleted();
           status = split.status();
         }
         if (unlikely(status == WMTCommandBufferStatusError))
-          ReportSplitError(chunk, internal_seq, i, split);
+          ReportSplitError(chunk, internal_seq, i, splits.size(), split);
         if (stats)
           gpu_collector.add(chunk.frame_, split.gpuStartTime(), split.gpuEndTime());
       }
@@ -422,24 +427,44 @@ CommandQueue::WaitForFinishThread() {
     if (chunk.signal_frame_latency_fence_ != ~0ull)
       frame_latency_fence_.signal(chunk.signal_frame_latency_fence_);
 
-    // gw2 (#31): the GPU is done with every buffer of the chunk; from here its references may go
-    gw2::lifetime::completed(lifetime_id_, internal_seq);
-    chunk.reset();
-    // gw2 (#32): after reset (its readbacks read the commits' feedback); resets the slot's allocator
-    if (mtl4_)
-      mtl4_->retire(internal_seq);
-    cpu_coherent.signal(internal_seq);
-    chunk_ongoing.fetch_sub(1, std::memory_order_release);
-    chunk_ongoing.notify_one();
-
-    staging_allocator.free_blocks(internal_seq);
-    copy_temp_allocator.free_blocks(internal_seq);
-    argbuf_allocator.free_blocks(internal_seq);
+    RetireChunk(chunk, internal_seq); // gw2 (#66)
 
     internal_seq++;
   }
   TRACE("finishing thread gracefully terminates");
   return 0;
+}
+
+// gw2 (#66): the one written retirement of a chunk, in the order the finish thread always used
+void
+CommandQueue::RetireChunk(CommandChunk &chunk, uint64_t seq) {
+  // gw2 (#31): the GPU is done with every buffer of the chunk; from here its references may go
+  gw2::lifetime::completed(lifetime_id_, seq);
+  chunk.reset();
+  // gw2 (#66): its holds: split-off command buffers, objects, presenters, spatial and temporal scalers
+  if (!ledger_.retire(seq))
+    LedgerRefused("retirement", seq);
+  // gw2 (#32): after reset (its readbacks read the commits' feedback); resets the slot's allocator
+  if (mtl4_)
+    mtl4_->retire(seq);
+  cpu_coherent.signal(seq);
+  chunk_ongoing.fetch_sub(1, std::memory_order_release);
+  chunk_ongoing.notify_one();
+
+  staging_allocator.free_blocks(seq);
+  copy_temp_allocator.free_blocks(seq);
+  argbuf_allocator.free_blocks(seq);
+}
+
+// gw2 (#66): never expected. A refused hold stays held until the queue goes (never released early); a
+// refused retirement releases nothing.
+void
+CommandQueue::LedgerRefused(const char *what, uint64_t seq) {
+  auto n = ledger_refusals_.fetch_add(1, std::memory_order_relaxed) + 1;
+  if (n > 8)
+    return;
+  ERR("RetirementLedger: refused a ", what, " for chunk ", seq, " (ring slot ", seq % chunk_count_,
+      ", retired up to ", ledger_.retired(), ", refusal ", n, "; only the first 8 are logged)");
 }
 
 // gw2 (#10): the line for a GPU error in a split-off buffer, with the chunk's frame and sequence id,
@@ -458,12 +483,13 @@ CommandQueue::SplitErrorLine(uint64_t &not_logged) {
 }
 
 void
-CommandQueue::ReportSplitError(CommandChunk &chunk, uint64_t seq, size_t index, WMT::CommandBuffer cmdbuf) {
+CommandQueue::ReportSplitError(
+    CommandChunk &chunk, uint64_t seq, size_t index, size_t count, WMT::CommandBuffer cmdbuf
+) {
   uint64_t not_logged;
   if (!SplitErrorLine(not_logged))
     return;
-  ERR("Device error at frame ", chunk.frame_, " (chunk ", seq, ", split-off buffer ", index + 1, " of ",
-      chunk.split_cmdbufs.size(), ", split error ", split_errors_, ", ", not_logged, " not logged since the last line): ",
+  ERR("Device error at frame ", chunk.frame_, " (chunk ", seq, ", split-off buffer ", index + 1, " of ", count, ", split error ", split_errors_, ", ", not_logged, " not logged since the last line): ",
       cmdbuf.error().description().getUTF8String());
   if (auto logs = cmdbuf.logs()) {
     for (auto &log : logs.elements()) {

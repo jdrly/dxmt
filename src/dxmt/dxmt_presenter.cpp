@@ -204,8 +204,8 @@ Presenter::encodeCommands(
   return drawable;
 }
 
-// gw2 (#32): the presenter goes only after every chunk that presented with it retired (the chunks'
-// keep lists hold it), so the layer's set can leave the queue here
+// gw2 (#32): the presenter goes only after every chunk that presented with it retired (the retirement
+// ledger holds it, #66), so the layer's set can leave the queue here
 Presenter::~Presenter() {
   if (mtl4_queue_ && mtl4_layer_set_)
     mtl4_queue_.removeResidencySet(WMT::ResidencySet{mtl4_layer_set_.handle});
