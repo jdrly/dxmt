@@ -59,7 +59,13 @@ template <typename Task> task_scheduler<Task>::task_scheduler() {
 }
 
 template <typename Task> task_scheduler<Task>::~task_scheduler() {
-  destroyed.store(true);
+  {
+    // gw2 (#72, backport): under the lock. A worker checks its wait's predicate under worker_mutex_
+    // and then blocks; an unlocked store and notify could fall between the two, the worker would
+    // never wake, and the join below would hang the device's teardown.
+    std::unique_lock<dxmt::mutex> lock(worker_mutex_);
+    destroyed.store(true);
+  }
   worker_cond_.notify_all();
 
   for (auto &worker : workers_) {
