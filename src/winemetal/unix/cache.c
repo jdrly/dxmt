@@ -257,13 +257,14 @@ cache_enumerate_busy(struct unixcall_cache_enumerate *params, int rc) {
 
 // gw2 (#117): whether the schema reads and has no table cache_<version>. False when the schema itself
 // can't be read (the prepare's error is then the answer), or the table is there (and failed otherwise).
+// gw2 (#119): matched case-insensitively, as SQLite looks tables up: a foreign CACHE_1 is the table
 static bool
 cache_enumerate_table_missing(sqlite3 *db, uint64_t version) {
   char name[32];
   snprintf(name, sizeof(name), "cache_%llu", (unsigned long long)version);
   sqlite3_stmt *stmt = NULL;
-  if (sqlite3_prepare_v2(db, "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?;", -1, &stmt, NULL) !=
-      SQLITE_OK)
+  if (sqlite3_prepare_v2(db, "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? COLLATE NOCASE;", -1,
+                         &stmt, NULL) != SQLITE_OK)
     return false;
   sqlite3_bind_text(stmt, 1, name, -1, SQLITE_TRANSIENT);
   bool missing = sqlite3_step(stmt) == SQLITE_DONE;

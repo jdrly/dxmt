@@ -17,6 +17,8 @@
 //   a file that isn't a database is status 2 with SQLITE_NOTADB, a damaged one status 2 with
 //   SQLITE_CORRUPT, and a file that won't open (a WAL database without its -shm, read-only; a directory)
 //   status 2 with SQLITE_CANTOPEN, never 0.
+// - #119: the table is found case-insensitively, as SQLite does: a foreign CACHE_1(wrong_column) is
+//   status 2 with SQLITE_ERROR, not "no table".
 #import <Foundation/Foundation.h>
 #include <mach/mach_time.h>
 #include <sqlite3.h>
@@ -300,6 +302,27 @@ main(void) {
     CHECK(empty.ret_status == 1 && empty.ret_error == 0 && empty.ret_count == 0 && notable.ret_status == 1 &&
               notable.ret_error == 0 && notable.ret_count == 0,
           "an empty file, and a database without the table (cache_2): status 1, no error (\"no table\" is right)");
+
+    // #119: SQLite looks table names up case-insensitively, so a foreign CACHE_1 of another shape is the
+    // table, and its prepare error (no such column) is the answer; that file without CACHE_2 is still
+    // "no table"
+    char foreign_path[256];
+    snprintf(foreign_path, sizeof(foreign_path), "dxmt/cache-enumerate-test-%d.exe/foreign_1.db", getpid());
+    sqlite3 *fdb = NULL;
+    bool foreign_made =
+        sqlite3_open_v2([cachePath(foreign_path) fileSystemRepresentation], &fdb,
+                        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, NULL) == SQLITE_OK &&
+        sqlite3_exec(fdb, "CREATE TABLE CACHE_1(wrong_column); INSERT INTO CACHE_1 VALUES (1);", NULL, NULL, NULL) ==
+            SQLITE_OK;
+    sqlite3_close(fdb);
+    struct unixcall_cache_enumerate foreign = enumerate(foreign_path, 'R', 0, buf, 1 << 20);
+    struct unixcall_cache_enumerate foreign2 = enumerateVersion(foreign_path, 2, 'R', 0, buf, 1 << 20);
+    CHECK(foreign_made && foreign.ret_status == 2 && foreign.ret_error == SQLITE_ERROR && foreign.ret_count == 0,
+          "a foreign CACHE_1(wrong_column): status %u, error %u (SQLITE_ERROR), not \"no table\"",
+          foreign.ret_status, foreign.ret_error);
+    CHECK(foreign2.ret_status == 1 && foreign2.ret_error == 0 && foreign2.ret_count == 0,
+          "the same file read as cache_2 (no such table): status %u, error %u, \"no table\"", foreign2.ret_status,
+          foreign2.ret_error);
 
     char dir_path[256];
     snprintf(dir_path, sizeof(dir_path), "dxmt/cache-enumerate-test-%d.exe/dir_1.db", getpid());
