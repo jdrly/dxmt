@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <format>
+#include <vector>
 
 // gw2 (W2/W3): see dxmt_gw2_warm.hpp.
 
@@ -34,6 +35,7 @@ sw::Effective kWarmLine{"DXMT_WARM", [] { return std::string(warmModeName(warmMo
 std::atomic<uint64_t> g_counters[uint32_t(WarmCounter::Count)];
 std::atomic<uint64_t> g_planned_functions{0}, g_planned_pipelines{0}, g_planned_recipes{0}, g_capped{0},
     g_other_target{0}, g_malformed{0};
+std::atomic<uint64_t> g_read_error{0}, g_busy{0}, g_oversized{0}, g_buffer_bytes{0}; // gw2 (#114)
 std::atomic<double> g_read_ms{0};
 std::atomic<bool> g_planned_now{false};
 
@@ -53,7 +55,10 @@ section(double, uint32_t) {
     text += std::format(" planned=recipes:{},functions:{},pipelines:{} read={:.1f}ms capped={} othertarget={} "
                         "malformed={}",
                         g_planned_recipes.load(), g_planned_functions.load(), g_planned_pipelines.load(),
-                        g_read_ms.load(), g_capped.load(), g_other_target.load(), g_malformed.load());
+                        g_read_ms.load(), g_capped.load(), g_other_target.load(), g_malformed.load()) +
+            // gw2 (#114): how the read went; readerror= is SQLite's code (5: SQLITE_BUSY), 0 when read
+            std::format(" readerror={} busy={} oversized={} buffer={}KB", g_read_error.load(), g_busy.load(),
+                        g_oversized.load(), g_buffer_bytes.load() >> 10);
   return text;
 }
 
@@ -121,6 +126,51 @@ warmPlanAdd(WarmPlan &plan, const uint8_t *data, size_t length, uint32_t metal_v
   }
 }
 
+void
+warmRead(WarmPlan &plan, const WarmEnumerate &enumerate, uint32_t metal_version, WarmMode mode, uint32_t max,
+         const std::atomic<bool> &stop, uint64_t row_max) {
+  std::vector<uint8_t> buffer(1 << 20);
+  uint64_t after = 0;
+  bool more = true;
+  while (more && !stop.load() && plan.recipes < max) {
+    WarmBatch b = enumerate(after, buffer.data(), buffer.size());
+    plan.busy += b.busy;
+    for (uint64_t p = 0, i = 0; i < b.count && p + 8 <= b.used; i++) {
+      auto u32 = [&](uint64_t at) {
+        return uint32_t(buffer[at]) | uint32_t(buffer[at + 1]) << 8 | uint32_t(buffer[at + 2]) << 16 |
+               uint32_t(buffer[at + 3]) << 24;
+      };
+      uint32_t key_length = u32(p);
+      uint32_t value_length = u32(p + 4 + key_length);
+      warmPlanAdd(plan, buffer.data() + p + 8 + key_length, value_length, metal_version, mode, max);
+      p += 8ull + key_length + value_length;
+    }
+    if (b.status == 2) {
+      plan.read_error = b.error ? b.error : 1; // the rows before it were planned; the rest is lost
+      break;
+    }
+    more = b.more;
+    if (b.count == 0 && more) {
+      // the next row alone doesn't fit: grow the buffer for it, or skip a row no recipe could be
+      if (b.need > buffer.size() && b.need <= row_max) {
+        buffer.resize(b.need);
+        continue;
+      }
+      if (b.need > row_max && b.need_rowid > after) {
+        plan.oversized++;
+        after = b.need_rowid;
+        continue;
+      }
+      plan.read_error = 1; // an answer that can't be stepped past: stop, don't loop (SQLITE_ERROR)
+      break;
+    }
+    if (b.count == 0)
+      break;
+    after = b.last_rowid;
+  }
+  plan.buffer_bytes = buffer.size();
+}
+
 std::string
 warmFunctionName(const WarmVariant &v) {
   // as CreateVariantShader names them: "vs_" / "ps_" + the shader SHA-1's first 8 hex + "_" + digest
@@ -141,6 +191,10 @@ warmPlanned(const WarmPlan &plan, double read_ms) {
   g_other_target = plan.other_target;
   g_malformed = plan.malformed;
   g_read_ms = read_ms;
+  g_read_error = plan.read_error;
+  g_busy = plan.busy;
+  g_oversized = plan.oversized;
+  g_buffer_bytes = plan.buffer_bytes;
   g_planned_now = true;
 }
 

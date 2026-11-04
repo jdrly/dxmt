@@ -19,7 +19,9 @@
 
 #include "dxmt_compile_recipe.hpp"
 #include "sha1/sha1_util.hpp"
+#include <atomic>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -46,7 +48,27 @@ struct WarmPlan {
   std::vector<std::pair<int, int>> pipeline_variants; // per pipeline: indices into variants (ps: -1 if none)
   uint64_t recipes = 0, other_target = 0, malformed = 0, capped = 0;
   std::unordered_map<std::string, int> variant_index; // shader + variant + kind -> index
+  // gw2 (#114): how the read went (warmRead)
+  uint32_t read_error = 0;   // SQLite's code when a batch failed (the read stopped there), else 0
+  uint64_t busy = 0;         // SQLITE_BUSY retries the bridge made
+  uint64_t oversized = 0;    // rows larger than kWarmRowMax, skipped
+  uint64_t buffer_bytes = 0; // the read buffer's final size (grown for a row larger than 1 MiB)
 };
+
+// gw2 (#114): one batch of bridge call 193 (WMTCacheEnumerateResult's fields, without winemetal.h)
+struct WarmBatch {
+  uint64_t used = 0, last_rowid = 0, need = 0, need_rowid = 0;
+  uint32_t count = 0, status = 0, error = 0, busy = 0;
+  bool more = false;
+};
+using WarmEnumerate = std::function<WarmBatch(uint64_t after_rowid, uint8_t *buffer, uint64_t capacity)>;
+constexpr uint64_t kWarmRowMax = 16ull << 20; // a larger row is skipped (a recipe is about 420 B)
+
+// gw2 (#114): the warm thread's read: batches of recipes in rowid order into `plan` until the end,
+// `stop`, or `max` recipes. A row too large for the buffer grows it (up to kWarmRowMax) or is skipped;
+// a failed batch (status 2) ends the read with its code in plan.read_error. Nothing ends it silently.
+void warmRead(WarmPlan &plan, const WarmEnumerate &enumerate, uint32_t metal_version, WarmMode mode, uint32_t max,
+              const std::atomic<bool> &stop, uint64_t row_max = kWarmRowMax);
 
 // Adds one recorded recipe (an R row's value). Recipes for another Metal target are skipped, and past
 // `max` recipes everything is counted as capped.

@@ -327,7 +327,7 @@ Counts are **totals in the 2 s window**; the `COMPILE frame=` line below has the
 | `pso` | DXMT's in-memory pipeline caches, at draw time on the render thread: lookups that found a pipeline / new pipelines (each one is a compile task). Hits in a context's MRU (`DXMT_PSO_MRU`) never reach the caches and aren't counted here; the `PSO` section counts them as `mru` |
 | `built`, `failed` | Pipelines Metal built (render, compute, geometry and tessellation emulation), and failed builds |
 | `build` | Compile-worker time: `shader` = AIR cache lookup or airconv compile plus `newLibrary`/`newFunction`, total/max per variant; `pipeline` = `newRenderPipelineState`/`newComputePipelineState`, total/max per pipeline. Workers run in parallel, so totals can exceed the window |
-| `queue` | Compile tasks submitted and not yet finished (variants and pipelines, those waiting for their shaders included): now / max in the window |
+| `queue` | Compile tasks submitted and not yet finished (variants and pipelines, those waiting for their shaders included): now / max in the window. A device's teardown takes the tasks it settles unrun out too (#114), so a later device starts from 0 |
 | `threads` | Compile workers (the pool starts with 2 and grows while all of them are busy) |
 | `wait` | The encode thread's waits in `GetPipeline` for a pipeline that wasn't ready: count, total ms, max ms. A ready pipeline costs no wait and isn't counted |
 | `slow` | Frames whose waits reached `DXMT_COMPILE_WAIT_MS` |
@@ -751,7 +751,8 @@ its inputs; a warm stage skips such a recipe.
 ### WARM
 
 `WARM functions= pipelines= skipped= airmiss= failed= nofunctions= live=variants:N,pipelines:N joins=
-[planned=recipes:N,functions:N,pipelines:N read=ms capped= othertarget= malformed=]` (W2/W3), with
+[planned=recipes:N,functions:N,pipelines:N read=ms capped= othertarget= malformed= readerror= busy= oversized=
+buffer=KB]` (W2/W3), with
 `DXMT_WARM` on, every 2 s window.
 
 | Field | Meaning |
@@ -764,6 +765,10 @@ its inputs; a warm stage skips such a recipe.
 | `live` | Live variant and pipeline jobs that found their result done in the shared tables (each one a build saved): when they were created (then they aren't submitted, and a demand needs no worker), or when they ran |
 | `joins` | Live jobs that found a warm job building their key and waited for it instead of building it again |
 | `planned` | Once, after the warm thread's read: recipes planned (first-use order, up to `DXMT_WARM_MAX`), functions and pipelines queued, the read's time, and records skipped (`capped`, another Metal target, malformed) |
+| `readerror` | With `planned` (#114): 0 when the recipes were read to the end (or to `DXMT_WARM_MAX`); else SQLite's result code of the batch that failed, e.g. `5` (`SQLITE_BUSY`, still locked after the retries), and the read stopped there: the recipes before it are planned, the rest are left to their first use. `1` also when the bridge gave an answer the read couldn't step past |
+| `busy` | With `planned` (#114): `SQLITE_BUSY` retries bridge call 193 made (2 ms apart, at most 50 per batch) before it read on or gave up |
+| `oversized` | With `planned` (#114): rows larger than 16 MiB, skipped (a recipe is about 420 B); the rows after them are still read |
+| `buffer` | With `planned` (#114): the read buffer's final size: 1024 KB, or larger when a row didn't fit in 1 MiB (the buffer grows to it, up to 16 MiB) |
 
 The warm thread never calls the logger: this section is its report.
 

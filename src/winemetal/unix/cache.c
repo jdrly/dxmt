@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #include <string.h>
+#include <unistd.h>
 #include "sqlite3.h"
 #define WINEMETAL_API
 #include "../winemetal_thunks.h"
@@ -241,6 +242,19 @@ _CacheWriter_set(void *obj) {
   return 0;
 }
 
+// gw2 (#114): SQLITE_BUSY (a checkpoint, or another connection's lock) is retried, not taken for
+// the end of the data: at most this many times per call, 2 ms apart, then reported as status 2
+#define CACHE_ENUMERATE_BUSY_RETRIES 50
+
+static bool
+cache_enumerate_busy(struct unixcall_cache_enumerate *params, int rc) {
+  if ((rc & 0xff) != SQLITE_BUSY || params->ret_busy >= CACHE_ENUMERATE_BUSY_RETRIES)
+    return false;
+  params->ret_busy++;
+  usleep(2000);
+  return true;
+}
+
 // gw2 (W2/W3): see struct unixcall_cache_enumerate. Read-only, its own connection per call (a batch
 // is hundreds of KB; the warm thread makes a handful of calls).
 int
@@ -251,6 +265,10 @@ _CacheEnumerate(void *obj) {
   params->ret_last_rowid = params->after_rowid;
   params->ret_more = 0;
   params->ret_status = 1;
+  params->ret_error = 0;
+  params->ret_busy = 0;
+  params->ret_need = 0;
+  params->ret_need_rowid = 0;
   @autoreleasepool {
     NSString *path = [NSString stringWithUTF8String:params->path.ptr];
     NSString *dbPath = resolve_cache_dir(path, true);
@@ -266,7 +284,17 @@ _CacheEnumerate(void *obj) {
                                                @"AND (? = 256 OR substr(key, 1, 1) = ?) ORDER BY rowid;",
                                                params->version];
     sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(db, sql.UTF8String, -1, &stmt, NULL) != SQLITE_OK) {
+    int rc;
+    // gw2 (#114): preparing reads the schema, so a lock can refuse it too: retried, then status 2
+    // (a missing table stays status 1)
+    while ((rc = sqlite3_prepare_v2(db, sql.UTF8String, -1, &stmt, NULL)) != SQLITE_OK &&
+           cache_enumerate_busy(params, rc))
+      ;
+    if (rc != SQLITE_OK) {
+      if ((rc & 0xff) == SQLITE_BUSY) {
+        params->ret_status = 2;
+        params->ret_error = (uint32_t)rc;
+      }
       sqlite3_close(db);
       return 0;
     }
@@ -277,7 +305,21 @@ _CacheEnumerate(void *obj) {
     params->ret_status = 0;
     unsigned char *out = params->buffer.ptr;
     uint64_t used = 0;
-    while (sqlite3_step(stmt) == SQLITE_ROW) {
+    for (;;) {
+      rc = sqlite3_step(stmt);
+      if (rc != SQLITE_ROW) {
+        // gw2 (#114): a busy step is retried from the last row written (the rows so far stay)
+        if (cache_enumerate_busy(params, rc)) {
+          sqlite3_reset(stmt);
+          sqlite3_bind_int64(stmt, 1, (sqlite3_int64)params->ret_last_rowid);
+          continue;
+        }
+        if (rc != SQLITE_DONE) {
+          params->ret_status = 2; // gw2 (#114): not the end of the data: say so
+          params->ret_error = (uint32_t)rc;
+        }
+        break;
+      }
       const void *key = sqlite3_column_blob(stmt, 1);
       uint32_t key_len = (uint32_t)sqlite3_column_bytes(stmt, 1);
       const void *value = sqlite3_column_blob(stmt, 2);
@@ -285,6 +327,9 @@ _CacheEnumerate(void *obj) {
       uint64_t need = 8ull + key_len + value_len;
       if (used + need > params->capacity) {
         params->ret_more = 1;
+        // gw2 (#114): which row didn't fit; alone in an empty buffer, the caller grows it or skips it
+        params->ret_need = need;
+        params->ret_need_rowid = (uint64_t)sqlite3_column_int64(stmt, 0);
         break;
       }
       for (int i = 0; i < 4; i++)

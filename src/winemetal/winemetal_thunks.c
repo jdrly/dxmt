@@ -1089,7 +1089,7 @@ CacheWriter_set(
 
 WINEMETAL_API uint32_t
 CacheEnumerate(const char *path, uint64_t version, uint32_t prefix, uint64_t after_rowid, void *buffer,
-               uint64_t capacity, uint64_t *used, uint64_t *last_rowid, bool *more) {
+               uint64_t capacity, struct WMTCacheEnumerateResult *result) {
   struct unixcall_cache_enumerate params;
   WMT_MEMPTR_SET(params.path, path);
   params.version = version;
@@ -1102,10 +1102,20 @@ CacheEnumerate(const char *path, uint64_t version, uint32_t prefix, uint64_t aft
   params.ret_last_rowid = after_rowid;
   params.ret_more = 0;
   params.ret_status = 1;
+  params.ret_error = 0;
+  params.ret_busy = 0;
+  params.ret_need = 0;
+  params.ret_need_rowid = 0;
   UNIX_CALL(CacheEnumerate, &params);
-  *used = params.ret_used;
-  *last_rowid = params.ret_last_rowid;
-  *more = params.ret_more != 0;
+  result->used = params.ret_used;
+  result->last_rowid = params.ret_last_rowid;
+  result->need = params.ret_need;
+  result->need_rowid = params.ret_need_rowid;
+  result->count = params.ret_count;
+  result->status = params.ret_status;
+  result->error = params.ret_error;
+  result->busy = params.ret_busy;
+  result->more = params.ret_more != 0;
   return params.ret_count;
 }
 

@@ -13,6 +13,8 @@
 //   live job parked on a queued warm job promotes the warm job past the speculative limits.
 // - The plan is bounded: DXMT_WARM_MAX recipes at most, the rest counted as capped; variants once
 //   each; other Metal targets and malformed records skipped; recipes deserialize back to their key.
+// - The read (#114): a row larger than the buffer grows it, one past the row cap is skipped, a
+//   failed batch (SQLITE_BUSY after the retries) stops the read with its code, not silently.
 // - Teardown (#88 review): stop() joins the workers while two jobs run, settles every job left (one
 //   really parked on a dependency never submitted, queued, waiting, speculative) so their demands
 //   return, and the owners can then be freed before the service is destroyed (built with
@@ -26,6 +28,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -39,7 +42,8 @@ using namespace dxmt;
 
 // the telemetry the service calls (production: dxmt_gw2_compile.cpp)
 namespace dxmt::gw2 {
-void compileQueue(int64_t) {}
+std::atomic<int64_t> g_queue{0}; // #114: the COMPILE queue= gauge (production: dxmt_gw2_compile.cpp)
+void compileQueue(int64_t delta) { g_queue += delta; }
 void compileThreads(uint64_t) {}
 bool compileTiming() { return false; }
 int64_t compileNowNs() { return 0; }
@@ -392,6 +396,7 @@ teardown(compile::Policy policy) {
   o.initial_workers = 2;
   o.max_workers = 2;
   o.policy = policy;
+  int64_t queue_before = gw2::g_queue.load();
   auto service = std::make_unique<compile::Service<Job *>>(o);
   service->submit(running);
   while (table.size() < 1) // worker 1 holds `running` at the gate
@@ -414,8 +419,10 @@ teardown(compile::Policy policy) {
     open = true; // both held jobs finish their runs while stop() waits for them
   });
   bool parked_before = parked->record.state.load() == compile::JobState::Parked && !parked->GetIsDone();
+  int64_t queue_held = gw2::g_queue.load() - queue_before;
   service->stop();
   opener.join();
+  int64_t queue_after = gw2::g_queue.load() - queue_before;
   // settled: both demands return (a regression would leave one waiting forever: fail, don't hang)
   for (int i = 0; i < 500 && !(queued->GetIsDone() && parked->GetIsDone()); i++)
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -434,12 +441,17 @@ teardown(compile::Policy policy) {
         policy == compile::Policy::Legacy ? "legacy" : "declared");
   CHECK(settled, "teardown (%s): every job done after stop, the parked one once",
         policy == compile::Policy::Legacy ? "legacy" : "declared");
+  // #114: the queue= gauge counts the jobs stop() settled out too (submitted, never run by a worker)
+  bool gauge = queue_held >= 3 && queue_after == 0;
+  CHECK(gauge, "teardown (%s): queue= %lld before stop, %lld after (want 0)",
+        policy == compile::Policy::Legacy ? "legacy" : "declared", (long long)queue_held, (long long)queue_after);
   jobs.clear();    // the owners go (the pipeline cache's maps) ...
   service.reset(); // ... before the service: nothing may touch them now (ASan)
   std::printf("%s teardown (%s): stop joins two workers mid-run, settles a parked, a queued%s job; their "
-              "demands return; owners freed before the service\n",
-              settled && parked_before ? "ok  " : "FAIL", policy == compile::Policy::Legacy ? "legacy" : "declared",
-              policy == compile::Policy::Legacy ? "" : ", a waiting and a speculative");
+              "demands return; queue= back to 0 (%lld before); owners freed before the service\n",
+              settled && parked_before && gauge ? "ok  " : "FAIL",
+              policy == compile::Policy::Legacy ? "legacy" : "declared",
+              policy == compile::Policy::Legacy ? "" : ", a waiting and a speculative", (long long)queue_held);
 }
 
 // #88 review, High: a done result is taken when the job is created, so a demand needs no worker.
@@ -502,6 +514,115 @@ readyHitSaturated() {
   submitted.ready.wait(false);
 }
 
+// #114: the warm thread's read (warmRead) against a fake bridge call 193 with cache.c's semantics:
+// a row larger than the buffer grows it, one larger than the row cap is skipped (the rows after it
+// still planned), and a failed batch (status 2, SQLITE_BUSY after the bridge's retries) stops the
+// read with its code instead of passing for the end of the data.
+struct FakeRow {
+  uint64_t rowid;
+  std::vector<uint8_t> value; // the recipe
+  uint64_t size = 0;          // with an empty value: the row's size without storing it (a huge row)
+};
+
+static gw2::WarmBatch
+fakeEnumerate(const std::vector<FakeRow> &rows, uint64_t after, uint8_t *buffer, uint64_t capacity,
+              uint64_t fail_after_rowid, uint32_t busy) {
+  gw2::WarmBatch b;
+  b.last_rowid = after;
+  b.busy = busy;
+  for (auto &r : rows) {
+    if (r.rowid <= after)
+      continue;
+    if (r.rowid > fail_after_rowid) {
+      b.status = 2;
+      b.error = 5; // SQLITE_BUSY
+      return b;
+    }
+    uint64_t need = 8 + 21 + (r.value.empty() ? r.size : r.value.size());
+    if (b.used + need > capacity) {
+      b.more = true;
+      b.need = need;
+      b.need_rowid = r.rowid;
+      return b;
+    }
+    uint32_t kl = 21, vl = uint32_t(r.value.size());
+    std::memcpy(buffer + b.used, &kl, 4);
+    std::memset(buffer + b.used + 4, 'R', kl);
+    std::memcpy(buffer + b.used + 4 + kl, &vl, 4);
+    std::memcpy(buffer + b.used + 8 + kl, r.value.data(), vl);
+    b.used += need;
+    b.count++;
+    b.last_rowid = r.rowid;
+  }
+  return b;
+}
+
+static void
+warmReadErrors() {
+  std::vector<FakeRow> rows;
+  uint64_t rowid = 0;
+  auto recipe = [&](int i) { rows.push_back({++rowid, recordedRecipe(320, i, i)}); };
+  for (int i = 0; i < 10; i++)
+    recipe(i);
+  // a 2 MiB row: grows the 1 MiB buffer (a malformed record once read: the plan counts it)
+  rows.push_back({++rowid, std::vector<uint8_t>(2 << 20, 0xab)});
+  for (int i = 10; i < 20; i++)
+    recipe(i);
+  // a 40 MiB row, over the 16 MiB cap: skipped
+  rows.push_back({++rowid, {}, 40ull << 20});
+  for (int i = 20; i < 30; i++)
+    recipe(i);
+  std::atomic<bool> stop{false};
+  uint64_t calls = 0;
+  gw2::WarmPlan p;
+  gw2::warmRead(
+      p,
+      [&](uint64_t after, uint8_t *buffer, uint64_t capacity) {
+        calls++;
+        return fakeEnumerate(rows, after, buffer, capacity, ~0ull, 0);
+      },
+      320, gw2::WarmMode::All, 2048, stop
+  );
+  bool grown = p.recipes == 30 && p.malformed == 1 && p.oversized == 1 && p.read_error == 0 &&
+               p.buffer_bytes == 8 + 21 + (2u << 20) && calls < 10;
+  CHECK(grown, "read: %llu recipes, %llu malformed, %llu oversized, error %u, buffer %llu B, %llu calls",
+        (unsigned long long)p.recipes, (unsigned long long)p.malformed, (unsigned long long)p.oversized,
+        p.read_error, (unsigned long long)p.buffer_bytes, (unsigned long long)calls);
+
+  // BUSY past the bridge's retries after row 15: the rows before it are planned, the error is kept
+  gw2::WarmPlan q;
+  gw2::warmRead(
+      q, [&](uint64_t after, uint8_t *buffer, uint64_t capacity) {
+        return fakeEnumerate(rows, after, buffer, capacity, 15, 50);
+      },
+      320, gw2::WarmMode::All, 2048, stop
+  );
+  bool busy = q.read_error == 5 && q.busy >= 50 && q.recipes == 14 && q.malformed == 1;
+  CHECK(busy, "busy: error %u, %llu retries, %llu recipes before it", q.read_error, (unsigned long long)q.busy,
+        (unsigned long long)q.recipes);
+
+  // an answer that can't be stepped past (0 rows, more, but no larger row) ends the read, reported
+  gw2::WarmPlan r;
+  uint64_t stuck_calls = 0;
+  gw2::warmRead(
+      r,
+      [&](uint64_t after, uint8_t *, uint64_t) {
+        stuck_calls++;
+        gw2::WarmBatch b;
+        b.last_rowid = after;
+        b.more = true;
+        return b;
+      },
+      320, gw2::WarmMode::All, 2048, stop
+  );
+  bool stuck = r.read_error != 0 && stuck_calls == 1;
+  CHECK(stuck, "stuck: error %u after %llu calls", r.read_error, (unsigned long long)stuck_calls);
+  std::printf("%s warm read (#114): a 2 MiB row grows the buffer, a 40 MiB one is skipped (%llu recipes planned); "
+              "BUSY stops it with error %u after %llu recipes; a stuck answer ends it\n",
+              grown && busy && stuck ? "ok  " : "FAIL", (unsigned long long)p.recipes, q.read_error,
+              (unsigned long long)q.recipes);
+}
+
 int
 main() {
   for (int round = 0; round < 10; round++)
@@ -511,6 +632,7 @@ main() {
   joinAndDemand();
   demandNotDelayed();
   plan();
+  warmReadErrors();
   teardown(compile::Policy::Declared);
   teardown(compile::Policy::Legacy);
   readyHitSaturated();

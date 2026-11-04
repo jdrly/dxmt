@@ -36,6 +36,7 @@
 #include "dxmt_compile_recipe.hpp"
 #include "dxmt_gw2_recipe.hpp"
 #include "dxmt_gw2_warm.hpp"
+#include "dxmt_gw2_warm_bridge.hpp"
 extern "C" {
 #include "pso_archive_publish.h"
 }
@@ -243,38 +244,19 @@ fileExists(const std::string &path) {
   return !stat(path.c_str(), &st) && S_ISREG(st.st_mode);
 }
 
-// The recipes, planned as the warm thread plans them (W3, all pipelines), in first-use order.
+// The recipes, planned as the warm thread plans them (W3, all pipelines), in first-use order: the warm
+// thread's own read (#114: a row larger than the buffer grows it, here up to 256 MiB as before; a
+// failed batch stops the read and is reported).
 gw2::WarmPlan
 readPlan(const std::string &path, uint32_t metal_version, uint32_t limit) {
   gw2::WarmPlan plan;
-  std::vector<uint8_t> buffer(1 << 20);
-  uint64_t after = 0;
-  bool more = true;
-  while (more && plan.recipes < limit) {
-    uint64_t used = 0, last = after;
-    uint32_t n = CacheEnumerate(path.c_str(), gw2::kRecipeSchema, 'R', after, buffer.data(), buffer.size(), &used,
-                                &last, &more);
-    if (n == 0 && more) { // a row larger than the buffer
-      buffer.resize(buffer.size() * 4);
-      if (buffer.size() > (256u << 20))
-        break;
-      continue;
-    }
-    for (uint64_t p = 0, i = 0; i < n && p + 8 <= used; i++) {
-      auto u32 = [&](uint64_t at) {
-        return uint32_t(buffer[at]) | uint32_t(buffer[at + 1]) << 8 | uint32_t(buffer[at + 2]) << 16 |
-               uint32_t(buffer[at + 3]) << 24;
-      };
-      uint32_t key_length = u32(p);
-      uint32_t value_length = u32(p + 4 + key_length);
-      gw2::warmPlanAdd(plan, buffer.data() + p + 8 + key_length, value_length, metal_version, gw2::WarmMode::All,
-                       limit);
-      p += 8ull + key_length + value_length;
-    }
-    if (n == 0)
-      break;
-    after = last;
-  }
+  std::atomic<bool> stop{false};
+  gw2::warmRead(plan, gw2::warmEnumerateRecipes(path), metal_version, gw2::WarmMode::All, limit, stop, 256ull << 20);
+  if (plan.read_error)
+    fprintf(stderr, "pso_archive_tool: reading %s stopped at SQLite error %u (%llu busy retries); %llu recipes read\n",
+            path.c_str(), plan.read_error, (unsigned long long)plan.busy, (unsigned long long)plan.recipes);
+  if (plan.oversized)
+    fprintf(stderr, "pso_archive_tool: %llu rows over 256 MiB skipped\n", (unsigned long long)plan.oversized);
   return plan;
 }
 
