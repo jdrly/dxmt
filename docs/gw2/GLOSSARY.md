@@ -116,3 +116,26 @@ _Avoid_: call table (the generated `__wine_unix_call_funcs` and `__wine_unix_cal
 **Command packet**:
 An encoded graphics command that the unix side interprets (the Metal 3 and Metal 4 encoders'
 `encodeCommands`). Many packets travel in one bridge call; a packet is not a bridge call.
+
+### Submission
+
+**Commit**:
+One command buffer of a chunk handed to the GPU. A chunk has one, or several when it splits (Metal 4's
+queue events commit as well).
+
+**Split**:
+Committing a chunk's open command buffer early and continuing in a new one (the present split, which
+commits the frame's work before `nextDrawable`). Its command buffers are the chunk's **split buffers**;
+the one committed last is the chunk's **last buffer**.
+_Avoid_: flush
+
+**Commit record**:
+What is known about one commit once it completed (`CommitRecord`, `src/dxmt/dxmt_gw2_commit_record.hpp`):
+its ordinal in the chunk's commit order, its GPU start and end if Metal gave them (unknown is not 0),
+its error, and on Metal 3 its logs. Metal 3 builds it from the command buffer, Metal 4 from the
+commit's feedback; the finish thread reports a chunk from its records alone.
+_Avoid_: feedback (that is Metal 4's source of it)
+
+**Completed chunk**:
+A chunk whose commits have all completed and whose commit records are final; it is reported, then
+retired.
