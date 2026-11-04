@@ -26,16 +26,21 @@
 //   completion signal alone), and chunks with 0, 1 and 3 splits give that many + 1 records, in commit
 //   order, completed, without an error or logs, and the GPU did each chunk's work once wait() returns;
 // - the residency hook runs before every commit (Metal 3: the adapter's commit, while the chunk's last
-//   buffer is still uncommitted; Metal 4: Mtl4Queue::commit, once per commit);
+//   buffer is still uncommitted; Metal 4, gw2 #86: in Mtl4Queue::commit before each commit is submitted,
+//   while the open Mtl4Commit has no queue value yet, once per commit, the encoding's and commit()'s);
 // - timing: Metal 3 reads GPU times only when asked; Metal 4's feedback always has them;
 // - the report's order (Metal 3: the last buffer first) and its spans (one per record);
 // - waitEvent: a chunk that waits for an event the CPU signals isn't complete before the signal;
 // - Metal 4's wait() returns only once the chunk's completion event fired (an empty chunk that waits
 //   for an event: no commit to wait for, only that event);
 // - drain() with chunks committed and never waited for: every one of them completed afterwards.
+// - gw2 (#91, L3): the tokens. A retirement ledger (the production template, holding the present
+//   split's buffers as CommandQueue's does) is bound to the adapter and retired with each wait()'s token,
+//   then drained with drain()'s; another issuer's token, for the same chunk, is refused by the ledger
+//   and by the adapter's retire() and changes nothing; so is an empty (moved-from) one.
 // - with the deterministic test completion adapter (ScriptedSubmission, no GPU): error records and
 //   the throttle, missing GPU times reported as 0, the token's records unchanged until retire, wait and
-//   retire in order, drain() with chunks committed and never waited for.
+//   retire in order, drain() with chunks committed and never waited for, the same token checks.
 // No deliberate GPU faults (council §2); the parity of the records with the code they replaced is
 // tests/gw2/commit_record_test.cpp's.
 // Exit 77 without a Metal device; without Metal 4, the Metal 3 half runs and the test exits 77
@@ -48,8 +53,10 @@
 #include <thread>
 #include <vector>
 #include "dxmt_gw2_mtl4_queue.hpp"
+#include "dxmt_gw2_retirement.hpp"
 #include "dxmt_gw2_stats.hpp"
 #include "dxmt_gw2_submission.hpp"
+#include <memory>
 extern "C" {
 #include "winemetal_thunks.h"
 }
@@ -73,6 +80,10 @@ static std::atomic<int> failures{0};
 static std::atomic<int> g_before_commits{0};
 static std::atomic<obj_handle_t> g_uncommitted{0}; // Metal 3: the buffer the adapter is about to commit
 static std::atomic<int> g_committed_too_early{0};
+// gw2 (#86): Metal 4: the commit Mtl4Queue::commit is about to submit, and the commits whose hook ran
+// while their queue value was still 0 (before `commit->value = ++next_value_` and the queue's commit)
+static std::atomic<Mtl4Commit *> g_open_mtl4{nullptr};
+static std::atomic<int> g_mtl4_hooked_before{0};
 namespace dxmt::gw2 {
 void
 registerSection(const char *, SectionFn) {}
@@ -87,6 +98,12 @@ residencyBeforeCommit() {
   if (auto h = g_uncommitted.exchange(0))
     if (WMT::CommandBuffer{h}.status() != WMTCommandBufferStatusNotEnqueued)
       g_committed_too_early++;
+  if (auto *commit = g_open_mtl4.exchange(nullptr)) {
+    if (commit->value != 0)
+      g_committed_too_early++;
+    else
+      g_mtl4_hooked_before++;
+  }
 }
 } // namespace dxmt::gw2
 
@@ -149,17 +166,45 @@ fillMetal4(Mtl4Queue &queue, Mtl4Commit &commit, id<MTLBuffer> fill, uint64_t se
   encoder.endEncoding();
 }
 
+// gw2 (#91): the retirement ledger as production instantiates it (RetirementTraits in
+// dxmt_command_queue.hpp), with owners for the kinds this test doesn't hold
+struct LedgerTraits {
+  using Object = obj_handle_t;
+  static void
+  release(obj_handle_t object) {
+    WMT::Object{object}.release();
+  }
+  using CommandBuffer = WMT::Reference<WMT::CommandBuffer>;
+  using Presenter = std::unique_ptr<int>; // distinct types, as the hold overloads need
+  using SpatialScaler = std::unique_ptr<short>;
+  using TemporalScaler = std::unique_ptr<long>;
+};
+using Ledger = gw2::BasicRetirementLedger<LedgerTraits>;
+
+// gw2 (#91): tokens from another issuer (another queue's submission)
+struct ForeignIssuer : gw2::CompletionIssuer {
+  CompletedChunk
+  token(uint64_t seq) const {
+    return completed(seq, std::span<const CommitRecord>{}, gw2::ReportOrder::CommitOrder);
+  }
+  gw2::DrainedQueue
+  drainedToken() const {
+    return drained();
+  }
+};
+
 // What CommandQueue keeps per ring slot: the chunk's last command buffer (Metal 3; released when the
-// chunk resets) and the split buffers the retirement ledger holds
+// chunk resets); the split buffers are the retirement ledger's (gw2 #66, #91)
 struct Chunks {
   WMT::Reference<WMT::CommandBuffer> last[kRing];
-  std::vector<WMT::Reference<WMT::CommandBuffer>> splits[kRing];
+  Ledger ledger{kRing, {.unretained = true}};
 };
 
 // flushCommands for the test: the chunk's work, its present split's early commits
 struct Encoder final : ChunkEncoder {
   WMT::CommandQueue metal3_queue;
   Chunks &chunks;
+  bool ordered_commits = true; // gw2 (#86): Metal 4: every commit's hook ran before it was submitted
   id<MTLBuffer> fill;
   uint64_t seq;
   const Shape &shape;
@@ -182,7 +227,7 @@ struct Encoder final : ChunkEncoder {
         fillMetal3(cmdbuf, fill, seq, i);
       gw2::residencyBeforeCommit();
       cmdbuf.commit();
-      chunks.splits[slot].emplace_back(cmdbuf); // CommandQueue::HoldSplit
+      CHECK(chunks.ledger.holdSplit(seq, cmdbuf), "chunk %llu: split hold refused", (unsigned long long)seq); // CommandQueue::HoldSplit
       cmdbuf = metal3_queue.commandBuffer();     // CommandQueue::CreateCommandBuffer
     }
     if (shape.work)
@@ -198,9 +243,22 @@ struct Encoder final : ChunkEncoder {
     for (int i = 0; i <= shape.splits; i++) {
       auto &commit = queue.begin(seq);
       fillMetal4(queue, commit, fill, seq, i);
-      if (i < shape.splits || !shape.leave_open)
-        queue.commit(seq); // the present split; or the encoding's own signal commits the rest
+      if (i < shape.splits || !shape.leave_open) {
+        // the present split; or the encoding's own signal commits the rest
+        ordered_commits &= commitMetal4(queue, seq);
+      }
     }
+  }
+
+  // gw2 (#86): Mtl4Queue::commit with the residency hook watching the open commit: true if there was
+  // none, or if the hook ran (with the commit's queue value still 0) and the commit was then submitted
+  static bool
+  commitMetal4(Mtl4Queue &queue, uint64_t seq) {
+    auto *open = queue.current(seq);
+    g_open_mtl4 = open;
+    queue.commit(seq);
+    bool hooked = g_open_mtl4.exchange(nullptr) == nullptr; // the hook took it
+    return !open || (hooked && open->value != 0);
   }
 };
 
@@ -237,8 +295,13 @@ struct Sink {
 // Runs kChunks chunks through `sub` with an encode thread (this one) and a finish thread, as
 // CommandQueue does, then two chunks that are never waited for, then drain().
 static void
-run(const char *backend, bool metal4, ChunkSubmission &sub, WMT::CommandQueue metal3_queue, Chunks &chunks,
+run(const char *backend, Mtl4Queue *mtl4, ChunkSubmission &sub, WMT::CommandQueue metal3_queue, Chunks &chunks,
     id<MTLDevice> device, WMT::SharedEvent completion) {
+  bool metal4 = mtl4 != nullptr;
+  chunks.ledger.setPolicy({.metal4 = metal4, .unretained = true});
+  chunks.ledger.acceptTokensFrom(&sub); // gw2 (#91): as CommandQueue's constructor
+  ForeignIssuer foreign;
+  int hooked_before_start = g_mtl4_hooked_before.load();
   id<MTLBuffer> fill = [device newBufferWithLength:4 * kRing
                                            options:MTLResourceStorageModeShared | MTLResourceHazardTrackingModeUntracked];
   id<MTLSharedEvent> external = [device newSharedEvent];
@@ -286,10 +349,20 @@ run(const char *backend, bool metal4, ChunkSubmission &sub, WMT::CommandQueue me
       CHECK(sink.lines == 0 && sink.spans == (shape.timing ? records.size() : 0) &&
                 sink.aftergpu == (shape.timing && !records.empty() ? 1 : 0),
             "%s %s: report: %d lines, %zu spans, %d aftergpu", backend, shape.name, sink.lines, sink.spans, sink.aftergpu);
-      // CommandQueue::RetireChunk: the chunk's reset, its holds, then the submission
+      // CommandQueue::RetireChunk: the chunk's reset, its holds (gw2 #91: with the token), then the
+      // submission. Another queue's token for the same chunk first: refused by both, nothing changes.
       chunks.last[seq % kRing] = nullptr;
-      chunks.splits[seq % kRing].clear();
-      sub.retire(std::move(completed));
+      size_t splits_held = chunks.ledger.splits(seq).size();
+      CHECK(!chunks.ledger.retire(foreign.token(seq)), "%s: the ledger took another issuer's token", backend);
+      CHECK(!sub.retire(foreign.token(seq)), "%s: retire() took another issuer's token", backend);
+      CHECK(chunks.ledger.retired() == seq - 1 && chunks.ledger.splits(seq).size() == splits_held &&
+                splits_held == size_t(metal4 ? 0 : shape.splits), // Metal 4's split commits are Mtl4Queue's
+            "%s %s: a refused token changed the ledger", backend, shape.name);
+      CHECK(completed.issuer() == &sub && sub.issued(completed), "%s: the token isn't the adapter's", backend);
+      CHECK(chunks.ledger.retire(completed), "%s %s: the ledger refused the adapter's token", backend, shape.name);
+      CHECK(chunks.ledger.splits(seq).empty(), "%s %s: the ledger kept the split buffers", backend, shape.name);
+      CHECK(sub.retire(std::move(completed)), "%s %s: retire() refused its own token", backend, shape.name);
+      CHECK(!completed && !sub.retire(std::move(completed)), "%s: an empty token was taken back", backend);
       retired.store(seq, std::memory_order_release);
     }
   });
@@ -312,9 +385,18 @@ run(const char *backend, bool metal4, ChunkSubmission &sub, WMT::CommandQueue me
         g_uncommitted = chunks.last[seq % kRing].handle;
         metal3_buffers += shape.splits + 1;
       }
+      // gw2 (#86): Metal 4: commit() submits the commit left open, if any; its hook first
+      auto *open = metal4 ? mtl4->current(seq) : nullptr;
+      g_open_mtl4 = open;
       sub.commit(seq);
+      bool hooked = g_open_mtl4.exchange(nullptr) == nullptr;
       if (!metal4)
         CHECK(g_uncommitted.exchange(0) == 0, "%s %s: commit() didn't run the residency hook first", backend, shape.name);
+      else
+        CHECK(!open || (hooked && open->value != 0), "%s %s: commit() didn't run the residency hook before it submitted",
+              backend, shape.name);
+      CHECK(encoder.ordered_commits, "%s %s: an encoding commit didn't run the residency hook before it was submitted",
+            backend, shape.name);
     }
     committed.store(seq, std::memory_order_release);
   };
@@ -337,11 +419,25 @@ run(const char *backend, bool metal4, ChunkSubmission &sub, WMT::CommandQueue me
   // Mtl4Queue::commit, once per commit
   CHECK(before == (metal4 ? commits_seen.load() : metal3_buffers), "%s: %d residency commits for %d commits", backend,
         before, metal4 ? commits_seen.load() : metal3_buffers);
+  // gw2 (#86): Metal 4: every commit was seen by the hook before the queue value was assigned
+  if (metal4)
+    CHECK(g_mtl4_hooked_before.load() - hooked_before_start == commits_seen.load(),
+          "%s: the hook ran before %d of %d commits were submitted", backend,
+          g_mtl4_hooked_before.load() - hooked_before_start, commits_seen.load());
 
   // teardown: two chunks committed, never waited for (the finish thread stopped), then drain()
   for (uint64_t seq = kChunks + 1; seq <= kChunks + 2; seq++)
     commitChunk(seq);
-  sub.drain();
+  // gw2 (#91): CommandQueue::DrainChunks: the submission's drain, then the ledger's with its token
+  // (another issuer's is refused first and releases nothing)
+  auto drained = sub.drain();
+  CHECK(drained && drained.issuer() == &sub, "%s: drain() gave no token of its own", backend);
+  CHECK(!chunks.ledger.drain(foreign.drainedToken()), "%s: the ledger drained with another issuer's token", backend);
+  size_t pending_splits = 0;
+  for (uint64_t seq = kChunks + 1; seq <= kChunks + 2; seq++)
+    pending_splits += chunks.ledger.splits(seq).size();
+  CHECK(pending_splits == (metal4 ? 0 : size_t(shapeOf(kChunks + 1).splits + shapeOf(kChunks + 2).splits)),
+        "%s: a refused drain released split buffers", backend);
   for (uint64_t seq = kChunks + 1; seq <= kChunks + 2; seq++) {
     auto &shape = shapeOf(seq);
     if (!metal4)
@@ -353,8 +449,11 @@ run(const char *backend, bool metal4, ChunkSubmission &sub, WMT::CommandQueue me
             (unsigned long long)seq);
     }
     chunks.last[seq % kRing] = nullptr;
-    chunks.splits[seq % kRing].clear();
   }
+  CHECK(chunks.ledger.drain(drained), "%s: the ledger refused drain()'s token", backend);
+  for (uint64_t seq = kChunks + 1; seq <= kChunks + 2; seq++)
+    CHECK(chunks.ledger.splits(seq).empty(), "%s: the drain kept chunk %llu's split buffers", backend,
+          (unsigned long long)seq);
   std::printf("%s %s: %llu chunks in a ring of %u (%zu shapes), then 2 drained\n", failures ? "...." : "ok  ",
               backend, (unsigned long long)kChunks, kRing, sizeof(kShapes) / sizeof(kShapes[0]));
 }
@@ -393,18 +492,20 @@ struct ScriptedSubmission final : ChunkSubmission {
     contract += seq != retired + 1 || seq > committed;
     waited = seq;
     records = script[seq];
-    return CompletedChunk(seq, records, gw2::ReportOrder::CommitOrder);
+    return issue(seq, records, gw2::ReportOrder::CommitOrder);
   }
+  // gw2 (#91): only with this adapter's token of its last wait (ChunkSubmission::retire checks it)
   void
-  retire(CompletedChunk &&chunk) override {
+  retireChunk(const CompletedChunk &chunk) override {
     contract += chunk.seq() != waited || chunk.records().data() != records.data() ||
                 chunk.records().size() != script[chunk.seq()].size();
     retired = chunk.seq();
   }
-  void
+  gw2::DrainedQueue
   drain() override {
     drained = committed - retired;
     retired = committed;
+    return gw2::CompletionIssuer::drained();
   }
 };
 
@@ -460,6 +561,7 @@ scripted() {
   };
   constexpr uint64_t kScripted = 6;
   ScriptedSubmission sub;
+  ForeignIssuer foreign;
   sub.script.resize(kScripted + 3);
   for (uint64_t seq = 1; seq <= kScripted + 2; seq++) {
     // three commits: the two split buffers fail on every chunk; the last one on chunk 3; the first
@@ -485,9 +587,13 @@ scripted() {
       continue; // committed, never waited for: drain()
     auto completed = sub.wait(seq, 0, true);
     gw2::reportCompletedChunk(completed.records(), completed.order(), true, throttle, sink);
-    sub.retire(std::move(completed));
+    // gw2 (#91): another issuer's token, and the right one twice: only the first of its own is taken
+    CHECK(!sub.retire(foreign.token(seq)), "scripted: retire() took another issuer's token");
+    CHECK(sub.retired == seq - 1, "scripted: a refused token retired chunk %llu", (unsigned long long)seq);
+    CHECK(sub.retire(std::move(completed)), "scripted: retire() refused its own token");
+    CHECK(!sub.retire(std::move(completed)), "scripted: retire() took an empty token");
   }
-  sub.drain();
+  CHECK(bool(sub.drain()), "scripted: drain() gave no token");
   CHECK(sub.contract == 0, "scripted: %d contract violations", sub.contract);
   CHECK(sub.drained == 2, "scripted: drain() settled %llu chunks, want 2", (unsigned long long)sub.drained);
   // 12 split errors at one instant: the first 8 get a line; chunk 3's last buffer always does
@@ -531,11 +637,11 @@ main() {
           {
               .new_command_buffer = [&] { return WMT::CommandQueue(metal3_queue).commandBuffer(); },
               .before_commit = gw2::residencyBeforeCommit,
-              .split_buffers = [&](uint64_t seq) { return std::span(chunks.splits[seq % kRing]); },
+              .split_buffers = [&](uint64_t seq) { return chunks.ledger.splits(seq); },
               .wait_at_drain = [] { return true; },
           }
       );
-      run("Metal 3", false, metal3, metal3_queue, chunks, mtl_device, completion);
+      run("Metal 3", nullptr, metal3, metal3_queue, chunks, mtl_device, completion);
     }
 
     if (device.metal4Support() != WMTMetal4Supported) {
@@ -548,8 +654,9 @@ main() {
       if (!queue->valid())
         return 1;
       Chunks chunks;
+      Mtl4Queue *mtl4 = queue.get();
       Metal4Submission metal4(std::move(queue), completion);
-      run("Metal 4", true, metal4, WMT::CommandQueue{}, chunks, mtl_device, completion);
+      run("Metal 4", mtl4, metal4, WMT::CommandQueue{}, chunks, mtl_device, completion);
     }
   }
   if (failures) {

@@ -14,6 +14,10 @@
 //   chunk's lists did.
 // - Retirements come one at a time in sequence order (the finish thread's), each releasing only its
 //   own chunk's holds, in the fixed order below. A repeated or out-of-order retirement is refused.
+// - gw2 (#91, L3): only GPU completion authorizes a release (ADR 0003). retire() takes the completed
+//   chunk token from the submission's wait(seq), drain() the drained-queue token from its drain()
+//   (dxmt_gw2_completion.hpp); a token from any issuer but the queue's submission (acceptTokensFrom),
+//   or an empty one, is refused like a repeated retirement.
 // - A refused hold is never released early: it is kept until drain(). The caller logs the refusal;
 //   it is a bug, never expected.
 //
@@ -25,6 +29,7 @@
 // finish thread, drain after both stopped; the queue's ready_for_commit / cpu_coherent handshake
 // orders a slot's use between them, as it ordered the chunk's lists.
 
+#include "dxmt_gw2_completion.hpp"
 #include <atomic>
 #include <cstdint>
 #include <span>
@@ -96,6 +101,13 @@ public:
     return policy_;
   }
 
+  // gw2 (#91): the queue's chunk submission, the one issuer whose tokens retire and drain this ledger;
+  // set once, before the queue's first chunk (until then every token is refused)
+  void
+  acceptTokensFrom(const CompletionIssuer *issuer) {
+    issuer_ = issuer;
+  }
+
   // Encode thread, chunk `seq` being encoded. A null object, or one the policy doesn't need held,
   // holds nothing and stays with the caller (true). False: refused (a retired sequence, or the ring
   // slot belongs to an unretired one); the object is kept until drain().
@@ -140,11 +152,16 @@ public:
     return slot.splits;
   }
 
-  // Finish thread: chunk `seq` completed and every completion consumer is done. Releases its holds:
-  // split command buffers, objects, presenters, spatial scalers, temporal scalers. False: refused
-  // (not the next sequence: repeated, skipped, or after drain()); nothing is released.
+  // Finish thread: `chunk` (the token of the submission's wait for it) completed and every completion
+  // consumer is done. Releases its holds: split command buffers, objects, presenters, spatial scalers,
+  // temporal scalers. False: refused (gw2 #91: an empty token or another issuer's; not the next
+  // sequence: repeated, skipped, or after drain()); nothing is released.
+  template <class Record>
   [[nodiscard]] bool
-  retire(uint64_t seq) {
+  retire(const BasicCompletedChunk<Record> &chunk) {
+    if (!chunk || chunk.issuer() != issuer_)
+      return false;
+    uint64_t seq = chunk.seq();
     uint64_t retired = retired_.load(std::memory_order_relaxed);
     if (seq != retired + 1 || retired == kDrained)
       return false;
@@ -156,23 +173,28 @@ public:
     return true;
   }
 
-  // Teardown, after the encode and finish threads stopped: releases every ring slot's holds in ring-slot
-  // order, calling before_slot(ring slot index) first (the queue resets the chunk of the same index there,
-  // which keeps today's per-chunk order), then the refused holds. Holds and retirements after it are
-  // refused.
+  // Teardown, after the encode and finish threads stopped, with `drained` (gw2 #91: the token of the
+  // submission's drain()): releases every ring slot's holds in ring-slot order, calling
+  // before_slot(ring slot index) first (the queue resets the chunk of the same index there, which keeps
+  // today's per-chunk order), then the refused holds. Holds and retirements after it are refused.
+  // False: refused (an empty token or another issuer's); nothing is released or called, and the holds
+  // stay until the ledger is destroyed.
   template <class F>
-  void
-  drain(F &&before_slot) {
+  [[nodiscard]] bool
+  drain(const DrainedQueue &drained, F &&before_slot) {
+    if (!drained || drained.issuer() != issuer_)
+      return false;
     retired_.store(kDrained, std::memory_order_release);
     for (uint32_t i = 0; i < ring_slots_; i++) {
       before_slot(i);
       release(slots_[i]);
     }
     releaseRefused();
+    return true;
   }
-  void
-  drain() {
-    drain([](uint32_t) {});
+  [[nodiscard]] bool
+  drain(const DrainedQueue &drained) {
+    return drain(drained, [](uint32_t) {});
   }
 
   // the last sequence retired (0: none yet)
@@ -248,6 +270,7 @@ private:
   RingSlot refused_; // refused holds, kept until drain()
   const uint32_t ring_slots_;
   RetentionPolicy policy_;
+  const CompletionIssuer *issuer_ = nullptr; // gw2 (#91)
   std::atomic<uint64_t> retired_{0};
 };
 

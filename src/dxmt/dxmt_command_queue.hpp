@@ -213,8 +213,13 @@ private:
   // holds (the ledger), the submission's part (Metal 4's allocator), the CPU fence, the ring count, the
   // ring allocators
   void RetireChunk(CommandChunk &chunk, CompletedChunk &&completed);
+  // gw2 (#91, L3): teardown, both threads stopped: the submission's drain, then (with its token) the
+  // lifetime check's detach and the chunks' state and holds, chunk by chunk
+  void DrainChunks();
   // gw2 (#66): a refused hold or retirement (a bug): the first 8 per queue are logged
   void LedgerRefused(const char *what, uint64_t seq);
+  // gw2 (#91): the same for `who` (the ledger, or the submission refusing a token)
+  void RetirementRefused(const char *who, const char *what, uint64_t seq);
   std::atomic_uint64_t ledger_refusals_ = 0; // encode thread (holds) and finish thread (retirements)
   // gw2 (#10, #32, #77): finish thread: the split buffers' error lines (the first 8, then one a second)
   gw2::BasicSplitErrorThrottle<clock::time_point> split_errors_;

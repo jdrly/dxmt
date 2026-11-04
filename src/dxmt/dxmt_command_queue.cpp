@@ -202,6 +202,8 @@ CommandQueue::CommandQueue(WMT::Device device) :
   // gw2 (#69): which holds the chunks need, now that the queue is on Metal 3 or Metal 4 (before its
   // first chunk; the encode thread reads it only after a commit's release)
   ledger_.setPolicy({.metal4 = metal4_, .unretained = unretained_, .lifetime_check = gw2::lifetime::check()});
+  // gw2 (#91): only this submission's tokens retire and drain the chunks' holds
+  ledger_.acceptTokensFrom(submission_.get());
 
   // gw2 (#8): the ring and the frame latency in effect, once per device
   g_ring_chunks.store(chunk_count_, std::memory_order_relaxed);
@@ -231,18 +233,7 @@ CommandQueue::~CommandQueue() {
   SharedEventListener_destroy(shared_event_listener);
   encodeThread.join();
   finishThread.join();
-  // gw2 (#78): the finish thread stopped without retiring every committed chunk: Metal 4 waits for
-  // every committed command buffer; Metal 3 for its chunks' buffers when the residency set (#29),
-  // DXMT_UNRETAINED=1 or DXMT_LIFETIME_CHECK=1 (#31) need it
-  submission_->drain();
-  gw2::lifetime::detachQueue(lifetime_id_); // gw2 (#31): nothing of this queue is in use any more
-  // gw2 (#66): chunk by chunk as before: its own state, then its ring slot's holds; the chunks past the
-  // ring (never used) last
-  ledger_.drain([this](uint32_t slot) { chunks[slot].reset(); });
-  for (unsigned i = chunk_count_; i < kCommandChunkCountMax; i++) {
-    auto &chunk = chunks[i];
-    chunk.reset();
-  };
+  DrainChunks(); // gw2 (#91)
   event_listener_thread.join();
   TRACE("Destructed command queue");
 }
@@ -430,12 +421,15 @@ CommandQueue::RetireChunk(CommandChunk &chunk, CompletedChunk &&completed) {
   // gw2 (#31): the GPU is done with every buffer of the chunk; from here its references may go
   gw2::lifetime::completed(lifetime_id_, seq);
   chunk.reset();
-  // gw2 (#66): its holds: split-off command buffers, objects, presenters, spatial and temporal scalers
-  if (!ledger_.retire(seq))
+  // gw2 (#66, #91): its holds (split-off command buffers, objects, presenters, spatial and temporal
+  // scalers), with the submission's completion token for it
+  if (!ledger_.retire(completed))
     LedgerRefused("retirement", seq);
   // gw2 (#32, #78): after reset (Metal 4's readbacks read the commits' feedback): Metal 4 resets the
-  // ring slot's allocator; Metal 3 forgets the command buffer the chunk released
-  submission_->retire(std::move(completed));
+  // ring slot's allocator; Metal 3 forgets the command buffer the chunk released. gw2 (#91): the token
+  // goes back to the submission that issued it
+  if (!submission_->retire(std::move(completed)))
+    RetirementRefused("ChunkSubmission", "retirement", seq);
   cpu_coherent.signal(seq);
   chunk_ongoing.fetch_sub(1, std::memory_order_release);
   chunk_ongoing.notify_one();
@@ -445,15 +439,44 @@ CommandQueue::RetireChunk(CommandChunk &chunk, CompletedChunk &&completed) {
   argbuf_allocator.free_blocks(seq);
 }
 
+// gw2 (#91, L3): teardown's counterpart of RetireChunk, for both backends, in the order teardown always
+// used. The finish thread stopped without retiring every committed chunk: the submission drains first
+// (Metal 4 waits for every committed command buffer; Metal 3 for its chunks' buffers when the residency
+// set (#29), DXMT_UNRETAINED=1 or DXMT_LIFETIME_CHECK=1 (#31) need it), and its token lets the ledger
+// release the holds: chunk by chunk as before (its own state, then its ring slot's holds), the chunks
+// past the ring (never used) last.
+void
+CommandQueue::DrainChunks() {
+  auto drained = submission_->drain();
+  gw2::lifetime::detachQueue(lifetime_id_); // gw2 (#31): nothing of this queue is in use any more
+  if (!ledger_.drain(drained, [this](uint32_t slot) { chunks[slot].reset(); })) {
+    // never expected: the holds stay until the ledger goes with the queue; the chunks' own state goes now
+    RetirementRefused("RetirementLedger", "drain", 0);
+    for (unsigned i = 0; i < chunk_count_; i++)
+      chunks[i].reset();
+  }
+  for (unsigned i = chunk_count_; i < kCommandChunkCountMax; i++) {
+    auto &chunk = chunks[i];
+    chunk.reset();
+  };
+}
+
 // gw2 (#66): never expected. A refused hold stays held until the queue goes (never released early); a
 // refused retirement releases nothing.
 void
 CommandQueue::LedgerRefused(const char *what, uint64_t seq) {
+  RetirementRefused("RetirementLedger", what, seq);
+}
+
+// gw2 (#91): the ledger's refusals and the submission's (a token it didn't issue or didn't last give),
+// the first 8 per queue
+void
+CommandQueue::RetirementRefused(const char *who, const char *what, uint64_t seq) {
   auto n = ledger_refusals_.fetch_add(1, std::memory_order_relaxed) + 1;
   if (n > 8)
     return;
-  ERR("RetirementLedger: refused a ", what, " for chunk ", seq, " (ring slot ", seq % chunk_count_,
-      ", retired up to ", ledger_.retired(), ", refusal ", n, "; only the first 8 are logged)");
+  ERR(who, ": refused a ", what, " for chunk ", seq, " (ring slot ", seq % chunk_count_, ", retired up to ",
+      ledger_.retired(), ", refusal ", n, "; only the first 8 are logged)");
 }
 
 // gw2 (#77): what both finish paths report of a completed chunk, from its records: device errors (the

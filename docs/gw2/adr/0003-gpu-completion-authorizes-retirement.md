@@ -31,9 +31,18 @@ withdrawn: unconditional holds would be a separate, measured decision.)
   gate in every reachable configuration. (Metal 4 without `DXMT_UNRETAINED=1` or the check, which
   `metal4AttachQueue` refuses, is the one unreachable case where the two differ: the policy holds
   everything on Metal 4.)
-- Still to come: L3, with the submission seam, makes retirement take the completed-chunk token from the
-  submission's `wait` instead of a sequence number, and gives teardown one common drain. Allocation
-  tracking, the ring allocators and the handshake counters stay where they are.
+- L3 (#91) makes the authorization a value. Retirement takes the completed-chunk token from the
+  submission's `wait` (`CompletedChunk`, `src/dxmt/dxmt_gw2_completion.hpp`) instead of a sequence
+  number: only a submission can make one, it names its issuer, and the ledger accepts tokens only
+  from its own queue's submission (bound once, with the policy), and only for the next sequence.
+  Teardown has one common drain, `CommandQueue::DrainChunks`, for both backends: the submission's
+  `drain` returns a drained-queue token, and the ledger's drain needs it, so the holds can't go
+  before the submission drained. The submission takes each token back in `retire`, refusing one it
+  didn't issue for its last wait, and empties it. A refused token releases nothing and is logged
+  like the ledger's other refusals. The release points and their order are unchanged on Metal 3
+  and Metal 4. Allocation tracking, the ring allocators and the handshake counters stay where they
+  are; the lifetime check's stamps stay at their call sites (moving them into the ledger's hold
+  would move when they are taken).
 - Native tests don't replace in-game evidence: the #31 lifetime check (`DXMT_LIFETIME_CHECK=1`) stays
   the proof that nothing is released early in GW2.
 

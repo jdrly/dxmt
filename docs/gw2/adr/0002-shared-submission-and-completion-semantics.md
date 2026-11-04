@@ -42,8 +42,12 @@ spatial swapchain need.
   bridge table (empty chunks, 0, 1 and 3 splits, event waits, residency before every commit, timing,
   drain), and a deterministic scripted adapter for error records, missing times and the token's
   lifetime.
-- Still to come: L3 retires the ledger with the completed-chunk token and gives teardown one common
-  drain. Q3 (one `split()` and one present-mode function) waits for lane G's Metal 4 latency A/B. #33
+- L3 (#91): the submission is the issuer of completion tokens. `wait` returns a `CompletedChunk`
+  that only it can make, the retirement ledger releases a chunk's holds only with it, and `retire`
+  (now a non-virtual check around the adapter's `retireChunk`) takes it back only if it is this
+  submission's token for its last wait. `drain` returns a drained-queue token that the ledger's
+  teardown drain needs (ADR 0003).
+- Still to come: Q3 (one `split()` and one present-mode function) waits for lane G's Metal 4 latency A/B. #33
   adds real GPU timestamps as a record field, not as a third readback kind.
 
 Source: GW2 on Mac `council/2026-11-04-arch-grill/final.md` §2 (ADR draft 0002); Q1 implemented in

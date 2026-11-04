@@ -156,6 +156,19 @@ _Avoid_: feedback (that is Metal 4's source of it)
 A chunk whose commits have all completed and whose commit records are final; it is reported, then
 retired.
 
+**Completion token**:
+What the chunk submission's wait for a chunk returns (`CompletedChunk`, `src/dxmt/dxmt_gw2_completion.hpp`):
+proof that the chunk completed, carrying its commit records and its **issuer**, the submission that
+waited. Only a submission makes one, the retirement ledger releases a chunk's holds only with its
+own queue's token for that chunk, and the submission takes it back when the chunk retires. A
+moved-from token is empty and authorizes nothing.
+_Avoid_: handle, ticket (the compile service's), sequence (alone: a number authorizes nothing)
+
+**Drained-queue token**:
+What the chunk submission's teardown drain returns (`DrainedQueue`): nothing the queue committed
+needs its chunks' holds any more. The retirement ledger's teardown drain needs it, so the holds go
+only after the submission drained (`CommandQueue::DrainChunks`).
+
 **Chunk submission**:
 How a command queue's chunks are committed and completed (`ChunkSubmission`): begin, event waits and
 signals, encode, commit on the encode thread; wait (a completed chunk) and retire on the finish thread;
