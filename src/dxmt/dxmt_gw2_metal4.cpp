@@ -36,7 +36,8 @@ supportReason(WMTMetal4Support support) {
 
 bool
 metal4Requested() {
-  static const bool on = env::getEnvVar("DXMT_METAL4") == "1";
+  // gw2 (#32): on by default (2026-11-04); =0 restores Metal 3 exactly
+  static const bool on = env::getEnvVar("DXMT_METAL4") != "0";
   return on;
 }
 
