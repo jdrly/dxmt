@@ -101,7 +101,7 @@ uint64_t pso_gen_session_shards(const struct pso_gen_store *s);
    `keys`); this session's earlier shards unless `replace_session`; the usable shards of the newest
    keep_sessions - 1 other sessions of the current generation; and the current generation's excluded
    shapes plus `excluded`. With `write` NULL, an exclusion-only generation: no new shard (keys and
-   replace_session ignored), every current shard carried as above, the excluded shapes added. Writer
+   replace_session ignored), every usable current shard carried (#89), the excluded shapes added. Writer
    only. NULL on success (the shard's size in *bytes), else why: the
    callback's error text as it gave it, or the step that failed. */
 const char *pso_gen_publish(struct pso_gen_store *s, pso_gen_write_fn write, void *ctx, const uint64_t *keys,

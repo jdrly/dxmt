@@ -650,7 +650,9 @@ pso_gen_publish(struct pso_gen_store *s, pso_gen_write_fn write, void *ctx, cons
     bool mine = old->started == s->started && old->pid == s->pid;
     if (!mine && (!i || old->started != s->current.shards[i - 1].started || old->pid != s->current.shards[i - 1].pid))
       others++; /* shards are grouped by session, newest first */
-    if (!old->usable || (mine && replace_session) || (!mine && others > s->keep_sessions - 1))
+    /* gw2 (#89): an exclusion-only generation adds no shard, so it keeps every usable one (the
+       current generation holds at most keep_sessions sessions); a new shard leaves room for its own */
+    if (!old->usable || (mine && replace_session) || (write && !mine && others > s->keep_sessions - 1))
       continue;
     struct pso_gen_shard *copy = &m.shards[m.shard_count++];
     *copy = *old;

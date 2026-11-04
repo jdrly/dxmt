@@ -352,6 +352,38 @@ test_exclusion_only(void) {
   }
 }
 
+// #89: an exclusion-only generation adds no shard, so it keeps every session the current one holds,
+// at the retention boundary too (keep_sessions earlier sessions; keep 1 with its sole shard)
+static void
+test_exclusion_only_retention(void) {
+  for (uint32_t keep = 1; keep <= 4; keep += 3) {
+    reset_dir();
+    uint64_t k[] = {1};
+    for (uint64_t session = 1; session <= keep; session++) {
+      struct pso_gen_store s = {0};
+      open_store(&s, 1000 + session, session, keep);
+      char content[32];
+      snprintf(content, sizeof(content), "session %llu", (unsigned long long)session);
+      CHECK(!publish(&s, content, k, 1, false));
+      pso_gen_close(&s);
+    }
+    struct pso_gen_store t = {0};
+    open_store(&t, 2000, 99, keep);
+    CHECK(t.current.shard_count == keep);
+    char why[256];
+    uint64_t ex[] = {9};
+    CHECK(!pso_gen_publish(&t, NULL, NULL, NULL, 0, false, ex, 1, NULL, why, sizeof(why)));
+    CHECK(t.current.shard_count == keep && t.current.excluded_count == 1);
+    CHECK(t.current.shards[keep - 1].started == 1001); // the oldest session stays
+    pso_gen_close(&t);
+    struct pso_gen_store u = {0};
+    open_store(&u, 3000, 100, keep);
+    CHECK(u.current.shard_count == keep && u.current.excluded_count == 1);
+    CHECK(count_files(".shard") == keep);
+    pso_gen_close(&u);
+  }
+}
+
 int
 main(int argc, char **argv) {
   snprintf(g_dir, sizeof(g_dir), "%s", argc > 1 ? argv[1] : "/tmp/pso_archive_publish_test");
@@ -363,6 +395,7 @@ main(int argc, char **argv) {
   test_sessions_kept();
   test_excluded_and_codec();
   test_exclusion_only();
+  test_exclusion_only_retention();
   if (failures) {
     printf("%d failures\n", failures);
     return 1;
