@@ -14,6 +14,8 @@ emulate -L zsh
 setopt pipefail
 L=$1 N=$2 W=$3
 [[ -x $L && -x $N && -n $W ]] || { print -u2 "usage: $0 <legacy> <new> <dir>"; exit 2 }
+# repeated slashes collapsed: the drivers print their directory normalized, and norm() matches it
+W=$(print -r -- $W | tr -s /)
 rm -rf $W && mkdir -p $W/legacy $W/new || exit 2
 fails=0
 
