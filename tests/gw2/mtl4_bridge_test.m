@@ -28,8 +28,9 @@
 //    without a window (waitForDrawable, a pass, signalDrawable, present at a deadline), skipped if
 //    the layer gives no drawable.
 // 3. Probe (the issue's question, with --metallibs <copy of a DXMT shaders_*.db> [--limit n]):
-//    airconv's metallibs (GW2's own shaders, from DXMT's shader cache) load; their vertex and kernel
-//    functions build pipelines both through the device (today's path) and through MTL4Compiler; the
+//    airconv's metallibs (GW2's own shaders, from DXMT's shader cache) load; their vertex functions
+//    (with a constant fragment function of the test's) and kernel functions build pipelines both
+//    through the device (today's path) and through MTL4Compiler; the
 //    device-built ones bind on MTL4 encoders (SetPSO through the replay) and the commit reports no
 //    error. Fragment functions are counted (they need their vertex shader to link). Copy the
 //    database first; never open the live one while GW2 runs.
@@ -69,6 +70,7 @@ static const char *kSource =
     "  VOut o; o.pos = float4(args.pos[vid], 0, 1); return o;\n"
     "}\n"
     "vertex VOut vs_position_only(uint vid [[vertex_id]]) { VOut o; o.pos = float4(0, 0, 0, 1); return o; }\n"
+    "fragment float4 fs_constant() { return float4(0, 0, 0, 1); }\n"
     "fragment float4 fs(constant float4 &color [[buffer(0)]], constant FArgs &args [[buffer(1)]],\n"
     "                   constant float4 &add [[buffer(2)]]) {\n"
     "  return color * args.tex.read(uint2(0, 0)) + add;\n"
@@ -697,12 +699,18 @@ probe_metallibs(struct mtl4 *m, const char *db_path, int limit) {
   NSError *err = nil;
   id<MTLLibrary> own = [m->device newLibraryWithSource:@(kSource) options:nil error:&err];
   id<MTLFunction> position_only = [own newFunctionWithName:@"vs_position_only"];
+  /* an airconv vertex function returns its outputs, so it needs rasterization and a fragment
+     function: this one reads no varyings, so it links with any */
+  id<MTLFunction> constant_fragment = [own newFunctionWithName:@"fs_constant"];
+  MTL4LibraryFunctionDescriptor *constant_fd = [[MTL4LibraryFunctionDescriptor new] autorelease];
+  constant_fd.name = @"fs_constant";
+  constant_fd.library = own;
   id<MTL4Compiler> compiler = [m->device newCompilerWithDescriptor:[[MTL4CompilerDescriptor new] autorelease]
                                                              error:&err];
   CHECK(compiler, "newCompilerWithDescriptor: %s", err.description.UTF8String);
   NSMutableArray *render_psos = [NSMutableArray array], *compute_psos = [NSMutableArray array];
   int libs = 0, lib_fail = 0, vertex = 0, fragment = 0, kernel = 0;
-  int dev_ok = 0, dev_fail = 0, mtl4c_ok = 0, mtl4c_fail = 0, frag_ok = 0;
+  int dev_ok = 0, dev_fail = 0, mtl4c_ok = 0, mtl4c_fail = 0, frag_ok = 0, rasterless = 0;
   char first_error[512] = "";
   while (sqlite3_step(st) == SQLITE_ROW) {
     @autoreleasepool {
@@ -728,12 +736,29 @@ probe_metallibs(struct mtl4 *m, const char *db_path, int limit) {
           vertex++;
           MTLRenderPipelineDescriptor *rd = [[MTLRenderPipelineDescriptor new] autorelease];
           rd.vertexFunction = fn;
-          rd.rasterizationEnabled = NO;
+          rd.fragmentFunction = constant_fragment;
+          rd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
           dev = [m->device newRenderPipelineStateWithDescriptor:rd error:&e1];
           MTL4RenderPipelineDescriptor *r4 = [[MTL4RenderPipelineDescriptor new] autorelease];
           r4.vertexFunctionDescriptor = fd;
-          r4.rasterizationEnabled = NO;
+          r4.fragmentFunctionDescriptor = constant_fd;
+          r4.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
           m4 = [compiler newRenderPipelineStateWithDescriptor:r4 compilerTaskOptions:nil error:&e2];
+          if (!dev && !m4) {
+            /* a vertex function that returns nothing (stream output): DXMT builds it with
+               rasterization off and no fragment function */
+            [dev release];
+            rd.fragmentFunction = nil;
+            rd.rasterizationEnabled = NO;
+            e1 = nil;
+            dev = [m->device newRenderPipelineStateWithDescriptor:rd error:&e1];
+            r4.fragmentFunctionDescriptor = nil;
+            r4.rasterizationEnabled = NO;
+            e2 = nil;
+            m4 = [compiler newRenderPipelineStateWithDescriptor:r4 compilerTaskOptions:nil error:&e2];
+            if (dev)
+              rasterless++;
+          }
           if (dev)
             [render_psos addObject:dev];
           break;
@@ -781,9 +806,9 @@ probe_metallibs(struct mtl4 *m, const char *db_path, int limit) {
   sqlite3_close(db);
   printf("probe: %d metallibs (%d failed to load): %d vertex, %d fragment, %d kernel functions\n", libs, lib_fail,
          vertex, fragment, kernel);
-  printf("probe: device-built pipelines %d ok, %d failed; MTL4Compiler pipelines %d ok, %d failed; "
-         "fragment-only links %d\n",
-         dev_ok, dev_fail, mtl4c_ok, mtl4c_fail, frag_ok);
+  printf("probe: device-built pipelines %d ok, %d failed; MTL4Compiler pipelines %d ok, %d failed (%d vertex "
+         "functions without outputs, built with rasterization off); fragment-only links %d\n",
+         dev_ok, dev_fail, mtl4c_ok, mtl4c_fail, rasterless, frag_ok);
   if (first_error[0])
     printf("probe: first failure: %s\n", first_error);
   CHECK(libs > 0 && !lib_fail, "airconv metallibs load");
@@ -836,6 +861,7 @@ probe_metallibs(struct mtl4 *m, const char *db_path, int limit) {
     [m->residency removeAllocation:pso];
   [m->residency commit];
   [compiler release];
+  [constant_fragment release];
   [position_only release];
   [own release];
 }
