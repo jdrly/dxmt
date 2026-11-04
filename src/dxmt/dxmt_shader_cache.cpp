@@ -1,6 +1,7 @@
 #include "dxmt_shader_cache.hpp"
 #include "util_env.hpp"
 #include "util_string.hpp"
+#include "dxmt_gw2_air_readers.hpp"
 #include "dxmt_gw2_switches.hpp"
 #include <cstdlib>
 #include <string>
@@ -18,12 +19,11 @@ parseReaders(const std::string &raw, const uint32_t &fallback) {
   return end && *end == 0 && v >= 1 && v <= 16 ? uint32_t(v) : fallback;
 }
 sw::Switch<uint32_t> kAirReaders{"DXMT_AIR_READERS", 1, parseReaders};
-std::atomic<uint32_t> g_air_readers_open{0};
-// the startup line shows the readers actually open (0 before the first device)
-sw::Effective kAirReadersLine{"DXMT_AIR_READERS", [] {
-  auto open = g_air_readers_open.load(std::memory_order_relaxed);
-  return std::to_string(open ? open : kAirReaders());
-}};
+std::atomic<uint32_t> g_air_readers_open{gw2::kAirReadersUnopened};
+// the startup line shows the readers actually open: 0 with the cache off or its reader not opened,
+// "unopened" before any shader cache exists (#96 review)
+sw::Effective kAirReadersLine{"DXMT_AIR_READERS",
+                              [] { return gw2::airReadersEffective(g_air_readers_open.load(std::memory_order_relaxed)); }};
 } // namespace
 
 ShaderCache &
@@ -41,8 +41,10 @@ ShaderCache::getInstance(WMTMetalVersion version) {
 }
 
 ShaderCache::ShaderCache(WMTMetalVersion metal_version) {
-  if (env::getEnvVar("DXMT_SHADER_CACHE") == "0")
+  if (env::getEnvVar("DXMT_SHADER_CACHE") == "0") {
+    g_air_readers_open.store(gw2::airReadersOpen(false, false, 0), std::memory_order_relaxed);
     return;
+  }
   std::string path;
   if (path = env::getEnvVar("DXMT_SHADER_CACHE_PATH"); !path.empty() && path.starts_with("/")) {
     if (!path.ends_with('/'))
@@ -71,7 +73,8 @@ ShaderCache::ShaderCache(WMTMetalVersion metal_version) {
     if (readers_.size() == 1)
       readers_.clear(); // only the one: today's path
   }
-  g_air_readers_open.store(readers_.empty() ? 1 : uint32_t(readers_.size()), std::memory_order_relaxed);
+  g_air_readers_open.store(gw2::airReadersOpen(true, scache_reader_ != nullptr, readers_.size()),
+                           std::memory_order_relaxed);
 }
 
 } // namespace dxmt
