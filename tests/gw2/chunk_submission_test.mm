@@ -40,7 +40,8 @@
 //   and by the adapter's retire() and changes nothing; so is an empty (moved-from) one.
 // - with the deterministic test completion adapter (ScriptedSubmission, no GPU): error records and
 //   the throttle, missing GPU times reported as 0, the token's records unchanged until retire, wait and
-//   retire in order, drain() with chunks committed and never waited for, the same token checks.
+//   retire in order, drain() with chunks committed and never waited for, the same token checks, and
+//   (the review of #97) a stale token of the adapter's own, from an earlier wait, refused and kept.
 // No deliberate GPU faults (council §2); the parity of the records with the code they replaced is
 // tests/gw2/commit_record_test.cpp's.
 // Exit 77 without a Metal device; without Metal 4, the Metal 3 half runs and the test exits 77
@@ -617,6 +618,35 @@ scripted() {
               failures ? "...." : "ok  ", (unsigned long long)kScripted);
 }
 
+// gw2 (#91, the review of #97): a stale token of the adapter's own: chunk 1's token, kept while the
+// adapter already waited for chunk 2. retire() refuses it (not its last wait's), leaves it with the
+// caller unchanged, and calls nothing of the adapter's; the last wait's token is then taken back, and
+// the stale one stays refused. An isolated adapter: its out-of-order wait would break run()'s contract.
+static void
+scriptedStaleToken() {
+  ScriptedSubmission sub;
+  sub.script.resize(3);
+  sub.script[1].resize(1);
+  sub.script[2].resize(1);
+  NullEncoder encoder;
+  for (uint64_t seq = 1; seq <= 2; seq++) {
+    sub.begin(seq);
+    sub.encode(seq, encoder);
+    sub.commit(seq);
+  }
+  auto stale = sub.wait(1, 0, false);
+  auto last = sub.wait(2, 0, false);
+  int contract = sub.contract; // the second wait broke the in-order contract on purpose
+  CHECK(sub.issued(stale) && stale.seq() == 1, "stale token: chunk 1's token isn't the adapter's");
+  CHECK(!sub.retire(std::move(stale)), "stale token: retire() took chunk 1's token after chunk 2's wait");
+  CHECK(stale && stale.seq() == 1 && stale.issuer() == &sub, "stale token: a refused retire() emptied the token");
+  CHECK(sub.retired == 0 && sub.contract == contract, "stale token: a refused retire() reached retireChunk");
+  CHECK(sub.retire(std::move(last)) && sub.retired == 2, "stale token: retire() refused the last wait's token");
+  CHECK(!sub.retire(std::move(stale)) && stale && sub.retired == 2,
+        "stale token: retire() took chunk 1's token after chunk 2 retired");
+  std::printf("%s scripted adapter: a stale token of its own is refused and kept\n", failures ? "...." : "ok  ");
+}
+
 int
 main() {
   @autoreleasepool {
@@ -628,6 +658,7 @@ main() {
     WMT::Device device{HANDLE(mtl_device)};
     auto completion = device.newSharedEvent();
     scripted();
+    scriptedStaleToken();
 
     {
       auto metal3_queue = device.newCommandQueue(64);
