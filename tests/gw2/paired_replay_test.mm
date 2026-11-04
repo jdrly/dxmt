@@ -49,7 +49,8 @@
 //    buffer; Metal 4: waitForDrawable, WMT_MTL4_NO_ATTACHMENT_RESIDENCY, signalDrawable, present)
 //    draws the back buffer into the drawable with SetFragmentTexture and SetFragmentBytes (a gain), as
 //    the presenter does, and a blit reads the drawable back before it is presented. A layer without a
-//    window gives a drawable here; if it gives none, step 6 is skipped and said so.
+//    window gives a drawable here; if it gives none, step 6 is skipped, the rest is still compared, and
+//    the test exits 77 (skipped) unless something failed.
 //
 // What it checks:
 // - every readback (scene, rows, mip 2, compute output, drawable) is byte-identical between Metal 3 and
@@ -70,9 +71,10 @@
 // not without it). A missing fence or residency can therefore pass when the race or the fault doesn't
 // show.
 //
-// A known Metal 3/Metal 4 divergence is listed in kKnown with its fork issue: its comparison is
-// reported as XFAIL and doesn't fail the run; if it starts to match, XPASS fails the run so the entry
-// is removed.
+// A known Metal 3/Metal 4 divergence is listed in kKnown (by readback: scene, rows, mip 2, compute,
+// drawable) with its fork issue: its Metal 3/Metal 4 comparison and Metal 4's CPU checks of that
+// readback are reported as XFAIL and don't fail the run (Metal 3's CPU checks, the control, still do);
+// if the comparison starts to match, XPASS fails the run so the entry is removed.
 //
 // Exit 77 (skipped): no Metal device, or no Metal 4 (macOS 26+, MTLGPUFamilyMetal4).
 
@@ -95,14 +97,22 @@ extern "C" {
 using dxmt::gw2::Mtl4Encoding;
 using dxmt::gw2::Mtl4Queue;
 
-static int failures = 0;
+static int failures = 0, xfailed = 0;
+// gw2 (#107): set while a known divergence's Metal 4 CPU checks run (KnownScope): their failures are
+// expected (XFAIL, with the issue), not counted as failures
+static const char *g_known_issue = nullptr;
 #define CHECK(cond, ...)                                                                           \
   do {                                                                                             \
     if (!(cond)) {                                                                                 \
-      std::printf("FAIL %s:%d: %s: ", __FILE__, __LINE__, #cond);                                  \
+      std::printf("%s %s:%d: %s: ", g_known_issue ? "XFAIL" : "FAIL", __FILE__, __LINE__, #cond);  \
       std::printf(__VA_ARGS__);                                                                    \
+      if (g_known_issue)                                                                           \
+        std::printf(" (known: %s)", g_known_issue);                                                \
       std::printf("\n");                                                                           \
-      failures++;                                                                                  \
+      if (g_known_issue)                                                                           \
+        xfailed++;                                                                                 \
+      else                                                                                         \
+        failures++;                                                                                \
     }                                                                                              \
   } while (0)
 
@@ -141,6 +151,19 @@ known(const std::string &what) {
       return k.issue;
   return nullptr;
 }
+
+// gw2 (#107): the CPU checks of one readback, as known(what) says: on Metal 4 (the backend under test)
+// a known divergence's check failures are XFAIL; Metal 3's (the control) always count
+class KnownScope {
+public:
+  KnownScope(const char *backend, const char *what) {
+    if (std::strcmp(backend, "Metal 4") == 0)
+      g_known_issue = known(what);
+  }
+  ~KnownScope() { g_known_issue = nullptr; }
+  KnownScope(const KnownScope &) = delete;
+  KnownScope &operator=(const KnownScope &) = delete;
+};
 
 // --- a packet chain in one block of memory, as DXMT's encode thread builds an encoder's commands
 class Chain {
@@ -898,60 +921,73 @@ unorm(float v) {
   return uint8_t(std::lround(std::fmin(std::fmax(v, 0.0f), 1.0f) * 255.0f));
 }
 
-// what the CPU says the frame drew, at sample points
+// what the CPU says the frame drew, at sample points; each readback's checks under its KnownScope
 static void
 expectFrame(const char *backend, const Resources &r, bool presented) {
   auto *scene = static_cast<const uint8_t *>(r.rb_scene.contents);
-  // A: the texture's quadrants over the left half (4 px per texel across, 8 down)
-  expectPixel(backend, "scene A", scene, kSize, 8, 16, kQuadrant[0]);
-  expectPixel(backend, "scene A", scene, kSize, 24, 16, kQuadrant[1]);
-  expectPixel(backend, "scene A", scene, kSize, 8, 48, kQuadrant[2]);
-  expectPixel(backend, "scene A", scene, kSize, 24, 48, kQuadrant[3]);
-  // B: red * 0.6 over the top-right quadrant
-  const uint8_t b[4] = {unorm(0.6f), 0, 0, 255};
-  expectPixel(backend, "scene B", scene, kSize, 48, 16, b);
-  // D: depth-rejected except in the bottom-right quadrant: (0, 0.4, 0)
-  const uint8_t d[4] = {0, unorm(0.4f), 0, 255};
-  expectPixel(backend, "scene D", scene, kSize, 40, 60, d);
-  // C: (0.25, 0, 1, 1) blended 50/50 with D, instance 1 at (48,48), instance 2 at (56,48)
-  const uint8_t cc[4] = {unorm(0.125f), unorm(0.2f), unorm(0.5f), 255};
-  expectPixel(backend, "scene C", scene, kSize, 48, 48, cc);
-  expectPixel(backend, "scene C", scene, kSize, 56, 48, cc);
-  // rows: row i's own 4 KB constants
-  auto *rows = static_cast<const uint8_t *>(r.rb_rows.contents);
-  for (uint32_t i = 0; i < kSize; i++) {
-    const uint8_t e[4] = {unorm(float(i) / 63.0f), unorm(1.0f - float(i) / 63.0f), uint8_t(i % 2 ? 255 : 0),
-                          uint8_t(i)};
-    expectPixel(backend, "rows", rows, kSize, (i * 7) % kSize, i, e);
+  {
+    KnownScope scope(backend, "scene");
+    // A: the texture's quadrants over the left half (4 px per texel across, 8 down)
+    expectPixel(backend, "scene A", scene, kSize, 8, 16, kQuadrant[0]);
+    expectPixel(backend, "scene A", scene, kSize, 24, 16, kQuadrant[1]);
+    expectPixel(backend, "scene A", scene, kSize, 8, 48, kQuadrant[2]);
+    expectPixel(backend, "scene A", scene, kSize, 24, 48, kQuadrant[3]);
+    // B: red * 0.6 over the top-right quadrant
+    const uint8_t b[4] = {unorm(0.6f), 0, 0, 255};
+    expectPixel(backend, "scene B", scene, kSize, 48, 16, b);
+    // D: depth-rejected except in the bottom-right quadrant: (0, 0.4, 0)
+    const uint8_t d[4] = {0, unorm(0.4f), 0, 255};
+    expectPixel(backend, "scene D", scene, kSize, 40, 60, d);
+    // C: (0.25, 0, 1, 1) blended 50/50 with D, instance 1 at (48,48), instance 2 at (56,48)
+    const uint8_t cc[4] = {unorm(0.125f), unorm(0.2f), unorm(0.5f), 255};
+    expectPixel(backend, "scene C", scene, kSize, 48, 48, cc);
+    expectPixel(backend, "scene C", scene, kSize, 56, 48, cc);
   }
-  // mip 2: each quadrant's colour (a box filter of uniform 8x8 blocks)
-  auto *mip = static_cast<const uint8_t *>(r.rb_mip.contents);
-  expectPixel(backend, "mip 2", mip, kMip / 4, 0, 0, kQuadrant[0]);
-  expectPixel(backend, "mip 2", mip, kMip / 4, 3, 0, kQuadrant[1]);
-  expectPixel(backend, "mip 2", mip, kMip / 4, 0, 3, kQuadrant[2]);
-  expectPixel(backend, "mip 2", mip, kMip / 4, 3, 3, kQuadrant[3]);
-  // compute: (packed scene pixel ^ xor) + add, every word; the tail is FillBuffer's
-  auto *out = static_cast<const uint32_t *>(r.out.contents);
-  uint32_t bad = 0, first = 0;
-  for (uint32_t i = 0; i < kOutWords; i++) {
-    uint32_t packed;
-    std::memcpy(&packed, scene + i * 4, 4);
-    if (out[i] != (packed ^ kXor) + kAdd && !bad++)
-      first = i;
+  {
+    KnownScope scope(backend, "rows");
+    // row i's own 4 KB constants
+    auto *rows = static_cast<const uint8_t *>(r.rb_rows.contents);
+    for (uint32_t i = 0; i < kSize; i++) {
+      const uint8_t e[4] = {unorm(float(i) / 63.0f), unorm(1.0f - float(i) / 63.0f), uint8_t(i % 2 ? 255 : 0),
+                            uint8_t(i)};
+      expectPixel(backend, "rows", rows, kSize, (i * 7) % kSize, i, e);
+    }
   }
-  CHECK(!bad, "%s compute: %u words wrong, first %u: %08x, expected %08x", backend, bad, first, out[first],
-        [&] {
-          uint32_t packed;
-          std::memcpy(&packed, scene + first * 4, 4);
-          return (packed ^ kXor) + kAdd;
-        }());
-  auto *tail = reinterpret_cast<const uint8_t *>(out + kOutWords);
-  bool filled = true;
-  for (uint32_t i = 0; i < kOutTail; i++)
-    filled = filled && tail[i] == 0xab;
-  CHECK(filled, "%s compute: FillBuffer's tail isn't 0xab", backend);
-  // the drawable (BGRA): the back buffer (the scene) times the gain
+  {
+    KnownScope scope(backend, "mip 2");
+    // each quadrant's colour (a box filter of uniform 8x8 blocks)
+    auto *mip = static_cast<const uint8_t *>(r.rb_mip.contents);
+    expectPixel(backend, "mip 2", mip, kMip / 4, 0, 0, kQuadrant[0]);
+    expectPixel(backend, "mip 2", mip, kMip / 4, 3, 0, kQuadrant[1]);
+    expectPixel(backend, "mip 2", mip, kMip / 4, 0, 3, kQuadrant[2]);
+    expectPixel(backend, "mip 2", mip, kMip / 4, 3, 3, kQuadrant[3]);
+  }
+  {
+    KnownScope scope(backend, "compute");
+    // (packed scene pixel ^ xor) + add, every word; the tail is FillBuffer's
+    auto *out = static_cast<const uint32_t *>(r.out.contents);
+    uint32_t bad = 0, first = 0;
+    for (uint32_t i = 0; i < kOutWords; i++) {
+      uint32_t packed;
+      std::memcpy(&packed, scene + i * 4, 4);
+      if (out[i] != (packed ^ kXor) + kAdd && !bad++)
+        first = i;
+    }
+    CHECK(!bad, "%s compute: %u words wrong, first %u: %08x, expected %08x", backend, bad, first, out[first],
+          [&] {
+            uint32_t packed;
+            std::memcpy(&packed, scene + first * 4, 4);
+            return (packed ^ kXor) + kAdd;
+          }());
+    auto *tail = reinterpret_cast<const uint8_t *>(out + kOutWords);
+    bool filled = true;
+    for (uint32_t i = 0; i < kOutTail; i++)
+      filled = filled && tail[i] == 0xab;
+    CHECK(filled, "%s compute: FillBuffer's tail isn't 0xab", backend);
+  }
   if (presented) {
+    KnownScope scope(backend, "drawable");
+    // BGRA: the back buffer (the scene) times the gain
     auto *present = static_cast<const uint8_t *>(r.rb_present.contents);
     uint32_t wrong = 0;
     for (uint32_t i = 0; i < kSize * kSize; i++) {
@@ -964,7 +1000,6 @@ expectFrame(const char *backend, const Resources &r, bool presented) {
   }
 }
 
-static int xfailed = 0;
 
 // Metal 3 against Metal 4, byte for byte
 static void
@@ -1038,6 +1073,7 @@ newLayer(id<MTLDevice> device) {
 
 int
 main() {
+  bool presented = false; // both backends presented and their drawables were compared
   @autoreleasepool {
     Fixture fx;
     fx.device = MTLCreateSystemDefaultDevice();
@@ -1077,7 +1113,9 @@ main() {
       }
       Metal3Target target(queue);
       run3 = encodeFrame(target, s3, fx, r3, WMT::MetalLayer{H(layer)});
-      waitMetal3(target.committed, run3.presented ? 2 : 1, "Metal 3 frame");
+      // gw2 (#107): two either way: split() committed the frame's, end() commits the present's (empty
+      // without a drawable)
+      waitMetal3(target.committed, 2, "Metal 3 frame");
       queue.release();
     }
 
@@ -1142,8 +1180,7 @@ main() {
     // --- the pairing
     CHECK(run3.types == run4.types, "the two backends were given different packet streams");
     CHECK(run3.presented == run4.presented, "a drawable for one backend only");
-    if (!run3.presented)
-      std::printf("note: the layer gave no drawable without a window; the present pass wasn't compared\n");
+    presented = run3.presented && run4.presented;
     size_t packets = 0;
     for (auto &t : run3.types)
       packets += t.size();
@@ -1159,5 +1196,12 @@ main() {
       compare("drawable", r3.rb_present, r4.rb_present, kSize * kSize * 4, kSize);
   }
   std::printf("%s (%d failures, %d xfail)\n", failures ? "FAILED" : "passed", failures, xfailed);
-  return failures ? 1 : 0;
+  if (failures)
+    return 1;
+  // gw2 (#107): everything else compared, but the present pass wasn't: not a pass
+  if (!presented) {
+    std::printf("skip: the layer gave no drawable without a window; the present pass wasn't compared\n");
+    return 77;
+  }
+  return 0;
 }

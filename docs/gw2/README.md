@@ -1046,7 +1046,9 @@ bytes arena resumes), compute with a barrier, blits, mipmaps, and the present sp
 windowless layer. The scene, the rows pass, mip 2, the compute output and the drawable are read back and
 compared byte for byte between the backends and with the CPU's values at sample points. The arm64 run
 uses `MTL_SHADER_VALIDATION=1`: without it a missing residency doesn't show. A known divergence goes
-into the test's `kKnown` list with its issue (reported as XFAIL; XPASS fails the run).
+into the test's `kKnown` list (by readback) with its issue: the comparison and Metal 4's CPU checks of
+that readback are reported as XFAIL, Metal 3's still count, and XPASS fails the run (#107). If the layer
+gives no drawable, the rest is compared and the test exits 77 (skipped) unless something failed.
 
 The PSO archive (#75): `pso_archive_policy_test.c` (pure) checks keep, skip and classify under the
 legacy and the exact-shape policies; `pso_archive_publish_test.c` (pure, a fake shard writer) checks
