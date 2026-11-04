@@ -2257,7 +2257,7 @@ WINEMETAL_API int WMTPSOArchiveFlush(char *report, uint32_t report_size);
 WINEMETAL_API void WMTPSOArchiveQuery(struct WMTPSOArchiveStats *stats);
 
 /*
- * gw2 (#32): Metal 4 (DXMT_METAL4). Bridge slots 155-189 belong to jdrly/dxmt #32; the unix side is
+ * gw2 (#32): Metal 4 (DXMT_METAL4); its call numbers are in winemetal_calls.h. The unix side is
  * src/winemetal/unix/mtl4.c. DXMT's encoders keep building today's wmtcmd_* packets: the
  * MTL4*_encodeCommands calls replay them on Metal 4 encoders, with buffer and texture bindings going
  * into argument tables (WMTMtl4BindingState). Every Metal 4 object here is created +1 (new*) or

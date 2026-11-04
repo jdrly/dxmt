@@ -104,8 +104,10 @@ _Avoid_: thunk (that is the PE half), syscall
 
 **Call number**:
 A bridge call's explicit number, its line in the call manifest (`src/winemetal/winemetal_calls.h`)
-and its index in both unix-call tables (`WMTCall_<name>`). A number nobody uses yet is
-**reserved**, with the issue or lane that reserved it.
+and its index in both unix-call tables (`WMTCall_<name>`). Code names it, never writes it: a thunk
+says `UNIX_CALL(NSObject_retain, …)`, and a literal number doesn't build. A number nobody uses yet
+is **reserved** (`WMTReserved_<number>`, which no thunk can name), with the issue or lane that
+reserved it.
 _Avoid_: slot (that word belongs to the chunk ring: a **ring slot**), index, code
 
 **Call manifest**:

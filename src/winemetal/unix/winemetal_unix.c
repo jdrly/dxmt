@@ -3380,24 +3380,19 @@ _Static_assert(
     "__wine_unix_call_funcs is not WMTCall_Count long"
 );
 
-/* airconv's own call numbers (enum airconv_unixcalls, airconv_thunks.h) must agree with the manifest
-   until B3 gives its thunks the manifest's names */
-#define WMT_AIRCONV_AGREES(airconv, call)                                                                              \
-  _Static_assert((int)unix_sm50_##airconv == (int)WMTCall_##call, "airconv_thunks.h: unix_sm50_" #airconv " != " #call);
-WMT_AIRCONV_AGREES(initialize, SM50Initialize)
-WMT_AIRCONV_AGREES(destroy, SM50Destroy)
-WMT_AIRCONV_AGREES(compile, SM50Compile)
-WMT_AIRCONV_AGREES(get_compiled_bitcode, SM50GetCompiledBitcode)
-WMT_AIRCONV_AGREES(destroy_bitcode, SM50DestroyBitcode)
-WMT_AIRCONV_AGREES(get_error_message, SM50GetErrorMessage)
-WMT_AIRCONV_AGREES(free_error, SM50FreeError)
-WMT_AIRCONV_AGREES(compile_geometry_pipeline_vertex, SM50CompileGeometryPipelineVertex)
-WMT_AIRCONV_AGREES(compile_geometry_pipeline_geometry, SM50CompileGeometryPipelineGeometry)
-WMT_AIRCONV_AGREES(compile_tessellation_vertex, reserved_83)
-WMT_AIRCONV_AGREES(compile_tessellation_hull, SM50CompileTessellationPipelineHull)
-WMT_AIRCONV_AGREES(compile_tessellation_domain, SM50CompileTessellationPipelineDomain)
-WMT_AIRCONV_AGREES(get_arguments_info, SM50GetArgumentsInfo)
-#undef WMT_AIRCONV_AGREES
+/* gw2 (B3, #76): the native build's bridge dispatcher, src/nativemetal/wineunixlib.h's WINE_UNIX_CALL:
+   the real table above, called the way Wine's dispatcher calls it. Where Wine would jump to NULL, a
+   number past the manifest's end or a reserved one returns STATUS_UNSUCCESSFUL and says which. */
+#ifdef DXMT_NATIVE
+NTSTATUS
+wmt_native_dispatch(enum WMTCall call, void *params) {
+  if ((unsigned)call >= (unsigned)WMTCall_Count || !__wine_unix_call_funcs[call]) {
+    fprintf(stderr, "winemetal: bridge call %u has no handler (reserved, or past the manifest)\n", (unsigned)call);
+    return STATUS_UNSUCCESSFUL;
+  }
+  return ((NTSTATUS(*)(void *))__wine_unix_call_funcs[call])(params);
+}
+#endif
 
 #ifndef DXMT_NATIVE
 const void *__wine_unix_call_wow64_funcs[] = {
