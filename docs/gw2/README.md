@@ -782,9 +782,9 @@ Metal 4 path a device's command queue gets an `Mtl4Queue`:
   instead of a command buffer's times), then resets the allocator;
 - teardown waits for every commit before the chunks and the queue go.
 
-`tests/gw2/mtl4_queue_test.mm` runs `Mtl4Queue` natively through the real PE thunks (winemetal's
-`WINE_UNIX_CALL` dispatched straight to the unix side): a ring of 4 slots over 24 chunks, split
-commits, a queue-level event wait.
+`tests/gw2/mtl4_queue_test.mm` runs `Mtl4Queue` natively through the real PE thunks and the real
+unix side (since B3, #76: the production table through `wmt_native_dispatch`, airconv stubbed): a
+ring of 4 slots over 24 chunks, split commits, a queue-level event wait.
 
 **Part 3, the encoders and argument tables** (`ArgumentEncodingContext::flushCommands`,
 `src/dxmt/dxmt_gw2_mtl4_encoding.*`). `flushCommands` is one template for both paths: on Metal 3 it

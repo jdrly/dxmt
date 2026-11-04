@@ -1,28 +1,24 @@
 // gw2-test: metal
+// gw2-build: U=($(sed -n "/^winemetal_unix_src = files(/,/^)/s/^ *'\([a-z0-9_]*\.c\)'.*/\1/p" src/winemetal/unix/meson.build))
+// gw2-build: (( ${#U} >= 5 ))
 // gw2-build: for arch in x86_64 arm64; do
-// gw2-build:   clang -c -std=gnu17 -arch $arch -mmacosx-version-min=26.0 -Isrc/winemetal -Itests/gw2/mtl4_shim src/winemetal/winemetal_thunks.c -o $T/thunks_$arch.o
-// gw2-build:   clang -c -x objective-c -std=gnu17 -fblocks -fno-objc-arc -arch $arch -mmacosx-version-min=26.0 -Isrc/winemetal -Isrc/winemetal/unix -Isrc/airconv src/winemetal/unix/mtl4.c -o $T/mtl4_$arch.o
-// gw2-build:   clang++ -std=c++20 -fobjc-arc -arch $arch -mmacosx-version-min=26.0 -Itests/gw2/shim -Itests/gw2/mtl4_shim -Isrc/winemetal -Isrc/winemetal/unix -Isrc/dxmt tests/gw2/mtl4_queue_test.mm src/dxmt/dxmt_gw2_mtl4_queue.cpp $T/thunks_$arch.o $T/mtl4_$arch.o -framework Metal -framework QuartzCore -framework Foundation -o ${OUT}_$arch
+// gw2-build:   for f in $U; do clang -c -x objective-c -std=gnu17 -fblocks -fno-objc-arc -arch $arch -mmacosx-version-min=26.0 -DDXMT_NATIVE=1 -Wno-unused-function -Isrc/airconv -Isrc/nativemetal -Isrc/winemetal src/winemetal/unix/$f -o $T/u_${f:r}_$arch.o; done
+// gw2-build:   clang -c -std=gnu17 -arch $arch -mmacosx-version-min=26.0 -DDXMT_NATIVE=1 -Isrc/nativemetal -Isrc/winemetal src/winemetal/winemetal_thunks.c -o $T/thunks_$arch.o
+// gw2-build:   clang -c -std=gnu17 -arch $arch -mmacosx-version-min=26.0 -Wno-ignored-attributes -Isrc/airconv tests/gw2/shim/airconv_absent.c -o $T/airconv_absent_$arch.o
+// gw2-build:   clang++ -std=c++20 -fobjc-arc -arch $arch -mmacosx-version-min=26.0 -Itests/gw2/shim -Isrc/winemetal -Isrc/dxmt tests/gw2/mtl4_queue_test.mm src/dxmt/dxmt_gw2_mtl4_queue.cpp $T/thunks_$arch.o $T/u_*_$arch.o $T/airconv_absent_$arch.o -framework Metal -framework MetalFX -framework QuartzCore -framework Foundation -framework CoreGraphics -framework ColorSync -framework Cocoa -lsqlite3 -o ${OUT}_$arch
 // gw2-build: done
 // gw2-run: ${OUT}_x86_64 && MTL_DEBUG_LAYER=1 ${OUT}_arm64
 //
 // gw2 (#32): native test of DXMT's Metal 4 submission (src/dxmt/dxmt_gw2_mtl4_queue.cpp, jdrly/dxmt
 // #32 part 2) through the real bridge: the PE side (winemetal_thunks.c, Metal.hpp) compiled natively,
-// its unix calls dispatched straight to the unix side (src/winemetal/unix/mtl4.c, and a few Metal 3
-// calls written here) instead of through Wine. A real Metal 4 queue; no Wine, no game. Not part of
-// the build; run it on the Mac:
+// its bridge calls going through the real table, as Wine's would. A real Metal 4 queue; no Wine, no
+// game. Run it with `tests/gw2/run.zsh metal`.
 //
-//   T=$(mktemp -d); for arch in x86_64 arm64; do
-//     clang -c -std=gnu17 -arch $arch -mmacosx-version-min=26.0 -Isrc/winemetal -Itests/gw2/mtl4_shim \
-//       src/winemetal/winemetal_thunks.c -o $T/thunks_$arch.o &&
-//     clang -c -x objective-c -std=gnu17 -fblocks -fno-objc-arc -arch $arch -mmacosx-version-min=26.0 \
-//       -Isrc/winemetal -Isrc/winemetal/unix -Isrc/airconv src/winemetal/unix/mtl4.c -o $T/mtl4_$arch.o &&
-//     clang++ -std=c++20 -fobjc-arc -arch $arch -mmacosx-version-min=26.0 -Itests/gw2/shim \
-//       -Itests/gw2/mtl4_shim -Isrc/winemetal -Isrc/winemetal/unix -Isrc/dxmt \
-//       tests/gw2/mtl4_queue_test.mm src/dxmt/dxmt_gw2_mtl4_queue.cpp $T/thunks_$arch.o $T/mtl4_$arch.o \
-//       -framework Metal -framework QuartzCore -framework Foundation -o $T/mtl4_queue_test_$arch
-//   done
-//   $T/mtl4_queue_test_x86_64 && MTL_DEBUG_LAYER=1 $T/mtl4_queue_test_arm64
+// gw2 (B3, jdrly/dxmt #76): on the real table. The build lines link the whole unix side (every source
+// in src/winemetal/unix/meson.build's winemetal_unix_src, read from that list) with DXMT_NATIVE, so
+// each call reaches __wine_unix_call_funcs through wmt_native_dispatch (src/nativemetal/wineunixlib.h)
+// by its manifest number. Only airconv, the shader compiler, is left out (tests/gw2/shim/airconv_absent.c);
+// this test compiles no shader. Before B3 it dispatched through a hand-written table of its own.
 //
 // The fill buffer isn't in any set of the test's own: the blit replay puts it into the chunk slot's
 // residency set (part 3), which each commit commits and uses and retire() empties.
@@ -45,7 +41,6 @@
 #include "dxmt_gw2_mtl4_queue.hpp"
 #include "dxmt_gw2_stats.hpp"
 extern "C" {
-#include "mtl4.h"
 #include "winemetal_thunks.h"
 }
 
@@ -76,122 +71,6 @@ void
 residencyBeforeCommit() {}
 } // namespace dxmt::gw2
 
-// --- the unix side of the calls this test makes, by bridge slot
-#define OBJ(h) ((__bridge id)(void *)(uintptr_t)(h))
-static NTSTATUS
-u_retain(void *p) {
-  CFRetain((CFTypeRef)(uintptr_t) * (obj_handle_t *)p);
-  return 0;
-}
-static NTSTATUS
-u_release(void *p) {
-  CFRelease((CFTypeRef)(uintptr_t) * (obj_handle_t *)p);
-  return 0;
-}
-static NTSTATUS
-u_newSharedEvent(void *p) {
-  auto *params = (unixcall_generic_obj_obj_ret *)p;
-  params->ret = (obj_handle_t)(uintptr_t)CFBridgingRetain([(id<MTLDevice>)OBJ(params->handle) newSharedEvent]);
-  return 0;
-}
-static NTSTATUS
-u_signaledValue(void *p) {
-  auto *params = (unixcall_generic_obj_uint64_ret *)p;
-  params->ret = [(id<MTLSharedEvent>)OBJ(params->handle) signaledValue];
-  return 0;
-}
-static NTSTATUS
-u_waitUntilSignaledValue(void *p) {
-  auto *params = (unixcall_mtlsharedevent_waituntilsignaledvalue *)p;
-  params->ret_timeout = [(id<MTLSharedEvent>)OBJ(params->event) waitUntilSignaledValue:params->value
-                                                                              timeoutMS:params->timeout_ms];
-  return 0;
-}
-static NTSTATUS
-u_endEncoding(void *p) {
-  [(id<MTLCommandEncoder>)OBJ(((unixcall_generic_obj_noret *)p)->handle) endEncoding];
-  return 0;
-}
-
-static NTSTATUS
-u_newResidencySet(void *p) {
-  auto *params = (unixcall_mtldevice_newresidencyset *)p;
-  MTLResidencySetDescriptor *desc = [MTLResidencySetDescriptor new];
-  desc.initialCapacity = params->init_capacity;
-  NSError *err = nil;
-  params->ret_set = (obj_handle_t)(uintptr_t)CFBridgingRetain(
-      [(id<MTLDevice>)OBJ(params->device) newResidencySetWithDescriptor:desc error:&err]
-  );
-  params->ret_error = 0;
-  return 0;
-}
-static NTSTATUS
-u_removeAllAllocations(void *p) {
-  [(id<MTLResidencySet>)OBJ(((unixcall_generic_obj_noret *)p)->handle) removeAllAllocations];
-  return 0;
-}
-static NTSTATUS
-u_residencyCommit(void *p) {
-  [(id<MTLResidencySet>)OBJ(((unixcall_generic_obj_noret *)p)->handle) commit];
-  return 0;
-}
-
-static NTSTATUS (*g_table[190])(void *);
-
-extern "C" {
-uint64_t __wine_unixlib_handle = 0;
-static NTSTATUS
-dispatch(uint64_t, unsigned int code, void *args) {
-  if (code >= 190 || !g_table[code]) {
-    std::fprintf(stderr, "unix call %u isn't in the test's table\n", code);
-    std::abort();
-  }
-  return g_table[code](args);
-}
-NTSTATUS (*__wine_unix_call_dispatcher)(uint64_t, unsigned int, void *) = dispatch;
-}
-
-static void
-fillTable() {
-  g_table[0] = u_retain;
-  g_table[1] = u_release;
-  g_table[15] = u_newSharedEvent;
-  g_table[16] = u_signaledValue;
-  g_table[33] = u_endEncoding;
-  g_table[126] = u_waitUntilSignaledValue;
-  g_table[132] = u_newResidencySet;
-  g_table[135] = u_removeAllAllocations;
-  g_table[136] = u_residencyCommit;
-  NTSTATUS (*mtl4[])(void *) = {
-      _MTLDevice_metal4Support,
-      _MTLDevice_newMTL4CommandQueue,
-      _MTLDevice_newCommandAllocator,
-      _MTLDevice_newMTL4CommandBuffer,
-      _MTLDevice_newArgumentTable,
-      _MTL4CommandAllocator_reset,
-      _MTL4CommandBuffer_beginCommandBuffer,
-      _MTL4CommandBuffer_endCommandBuffer,
-      _MTL4CommandBuffer_useResidencySet,
-      _MTL4CommandQueue_commit,
-      _MTL4CommandQueue_waitForDrawable,
-      _MTL4CommandQueue_signalDrawable,
-      _MTL4CommandQueue_signalEvent,
-      _MTL4CommandQueue_waitForEvent,
-      _MTL4CommandQueue_addResidencySet,
-      _MTL4CommandQueue_removeResidencySet,
-      _MetalLayer_residencySet,
-      _MetalDrawable_present,
-      _MTL4CommandBuffer_renderCommandEncoder,
-      _MTL4CommandBuffer_computeCommandEncoder,
-      _MTL4RenderCommandEncoder_encodeCommands,
-      _MTL4ComputeCommandEncoder_encodeCommands,
-      _MTL4ComputeCommandEncoder_encodeBlitCommands,
-      _MTL4CommandEncoder_barrier,
-  };
-  for (unsigned i = 0; i < sizeof(mtl4) / sizeof(mtl4[0]); i++)
-    g_table[155 + i] = mtl4[i];
-}
-
 // one chunk's GPU work: fill its 4 bytes of `buffer` with seq
 static void
 encodeFill(Mtl4Queue &queue, Mtl4Commit &commit, id<MTLBuffer> buffer, uint64_t seq, uint32_t slots) {
@@ -211,7 +90,6 @@ encodeFill(Mtl4Queue &queue, Mtl4Commit &commit, id<MTLBuffer> buffer, uint64_t 
 
 int
 main() {
-  fillTable();
   @autoreleasepool {
     id<MTLDevice> mtl_device = MTLCreateSystemDefaultDevice();
     WMT::Device device{(obj_handle_t)(uintptr_t)(__bridge void *)mtl_device};

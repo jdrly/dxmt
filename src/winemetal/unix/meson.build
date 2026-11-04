@@ -18,14 +18,14 @@ winemetal_unix_link_args = [
 ]
 
 # gw2 (B1, #61): the native smoke test. The PE side and the real unix side linked into one macOS
-# executable with DXMT_NATIVE, so its calls reach __wine_unix_call_funcs directly. It is built with
-# the x86_64 Wine build (a missing handler source fails the build) and is never installed; run it
-# with `meson test -C <build> bridge-native-smoke` (suite gw2-metal).
+# executable with DXMT_NATIVE, so its calls reach __wine_unix_call_funcs through wmt_native_dispatch
+# (B3, #76). It is built with the x86_64 Wine build (a missing handler source fails the build) and
+# is never installed; run it with `meson test -C <build> bridge-native-smoke` (suite gw2-metal).
 bridge_native_smoke = executable('bridge_native_smoke',
   winemetal_unix_src,
   files('../winemetal_thunks.c', '../../../tests/gw2/bridge_native_smoke.c'),
   dependencies        : [ airconv_dep_darwin ],
-  # nativemetal first: its wineunixlib.h (a direct table call), not src/winemetal's (Wine's)
+  # nativemetal first: its wineunixlib.h (wmt_native_dispatch), not src/winemetal's (Wine's)
   include_directories : [ dxmt_include_path, include_directories('../../nativemetal', '..') ],
   # -Wno-unused-function: DXMT_NATIVE compiles out the wow64 thunks, the only users of
   # winemetal_unix.c's UInt32ToPtr

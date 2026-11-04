@@ -15,10 +15,14 @@
 //   with the real unix side linked in and DXMT_NATIVE: it then also checks __wine_unix_call_funcs
 //   itself, every call number with a handler and every reserved number NULL. Run it with
 //   `tests/gw2/run.zsh pure --meson <build>/x64` or `meson test -C <build>/x64 bridge-manifest`.
+//   B3 (#76): there it also dispatches by name through wmt_native_dispatch, the native build's
+//   WINE_UNIX_CALL: old and new calls reach their handlers, reserved and out-of-range numbers return an
+//   error. None of these calls needs a Metal device.
 // The wow64 table exists only in the Wine build; the manifest generates it from the same lines.
 
 #include "winemetal_thunks.h"
 #include <stdio.h>
+#include <string.h>
 
 static int failures = 0;
 #define CHECK(cond)                                                                                \
@@ -31,6 +35,8 @@ static int failures = 0;
 
 #ifdef DXMT_NATIVE
 extern const void *__wine_unix_call_funcs[]; // as winemetal_unix.c defines it
+// gw2 (B3): as src/nativemetal/wineunixlib.h declares it (whose table declaration differs from the above)
+int wmt_native_dispatch(enum WMTCall call, void *params);
 #endif
 
 int
@@ -46,7 +52,7 @@ main(void) {
   WMT_CALL(number, name, handler)                                                                  \
   wow64++;
 #define WMT_RESERVED(number, reserved_by)                                                          \
-  CHECK(WMTCall_reserved_##number == number && number == position && sizeof(reserved_by) > 1);     \
+  CHECK(WMTReserved_##number == number && number == position && sizeof(reserved_by) > 1);          \
   position++, reserved++;
 #include "winemetal_calls.h"
   CHECK(position == WMTCall_Count);
@@ -54,14 +60,14 @@ main(void) {
   // Fixed anchors from before the manifest, and the numbers lanes were given
   CHECK(WMTCall_NSObject_retain == 0);
   CHECK(WMTCall_SM50Initialize == 74);
-  CHECK(WMTCall_reserved_83 == 83);
+  CHECK(WMTReserved_83 == 83);
   CHECK(WMTCall_MTLCommandBuffer_presentDrawableWithDeadline == 146);
   CHECK(WMTCall_MetalView_visibility == 147);
   CHECK(WMTCall_MTLDevice_metal4Support == 155);
   CHECK(WMTCall_MTL4CommandEncoder_barrier == 178);
-  CHECK(WMTCall_reserved_179 == 179 && WMTCall_reserved_189 == 189);
+  CHECK(WMTReserved_179 == 179 && WMTReserved_189 == 189);
   CHECK(WMTCall_MTLDevice_supportsMetal4FX == 190);
-  CHECK(WMTCall_reserved_193 == 193 && WMTCall_reserved_199 == 199); // lane C (#64)
+  CHECK(WMTReserved_193 == 193 && WMTReserved_199 == 199); // lane C (#64)
   CHECK(WMTCall_Count == 200);
   CHECK(calls == 181 && reserved == 19 && wow64 == 9);
 
@@ -69,9 +75,32 @@ main(void) {
   // Through the real table: a handler at every call number, NULL at every reserved one
 #define WMT_CALL(number, name, handler) CHECK(__wine_unix_call_funcs[WMTCall_##name] != NULL);
 #define WMT_CALL_WOW64(number, name, handler, wow64_handler) WMT_CALL(number, name, handler)
-#define WMT_RESERVED(number, reserved_by) CHECK(__wine_unix_call_funcs[WMTCall_reserved_##number] == NULL);
+#define WMT_RESERVED(number, reserved_by) CHECK(__wine_unix_call_funcs[WMTReserved_##number] == NULL);
 #include "winemetal_calls.h"
   printf("real table: checked %d entries\n", (int)WMTCall_Count);
+
+  // gw2 (B3): dispatch by name through the real table. Old calls (upstream's numbers)...
+  struct unixcall_generic_obj_ret pool = {0};
+  CHECK(wmt_native_dispatch(WMTCall_NSAutoreleasePool_alloc_init, &pool) == 0 && pool.ret != 0);
+  struct unixcall_get_os_version os = {0};
+  CHECK(wmt_native_dispatch(WMTCall_WMTGetOSVersion, &os) == 0 && os.ret_major >= 26);
+  // ... the fork's (#5, #46)...
+  struct WMTPSOArchiveStats stats;
+  memset(&stats, 0xff, sizeof(stats));
+  struct unixcall_wmt_pso_archive_query query;
+  WMT_MEMPTR_SET(query.stats, &stats);
+  CHECK(wmt_native_dispatch(WMTCall_WMTPSOArchiveQuery, &query) == 0 && stats.loaded == 0);
+  char cache_path[4096];
+  struct unixcall_getmetalcachepath path = {.size = sizeof(cache_path), .ret_length = ~0ull};
+  WMT_MEMPTR_SET(path.buf, cache_path);
+  CHECK(wmt_native_dispatch(WMTCall_WMTGetMetalShaderCachePath, &path) == 0 && path.ret_length < sizeof(cache_path));
+  CHECK(wmt_native_dispatch(WMTCall_NSObject_release, &pool.ret) == 0);
+  // ... and holes: an error, where Wine's dispatcher would jump to NULL (each says so on stderr)
+  CHECK(wmt_native_dispatch(WMTReserved_83, NULL) != 0);
+  CHECK(wmt_native_dispatch(WMTReserved_179, NULL) != 0);
+  CHECK(wmt_native_dispatch(WMTReserved_193, NULL) != 0);
+  CHECK(wmt_native_dispatch(WMTCall_Count, NULL) != 0);
+  printf("real table: dispatched 5 calls by name, 4 holes refused\n");
 #endif
 
   if (failures) {

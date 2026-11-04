@@ -1,6 +1,6 @@
 /*
  * gw2 (B2, jdrly/dxmt #67): the bridge's call manifest. Every bridge call's number is written here
- * once; the PE side's enum WMTCall (winemetal_thunks.h) and the unix side's two tables
+ * once; the PE side's enum WMTCall (winemetal_call_numbers.h) and the unix side's two tables
  * (__wine_unix_call_funcs and __wine_unix_call_wow64_funcs, winemetal_unix.c) are generated from it.
  *
  *   WMT_CALL(number, name, handler)                      the same unix handler in both tables
@@ -9,7 +9,8 @@
  *
  * The rules (ADR 0005, docs/gw2/adr/0005-bridge-call-numbers-in-one-manifest.md):
  * - One line per call number, in order, from 0 with no gap: the build rejects a duplicate, a gap or
- *   a line out of order (the checks in winemetal_thunks.h).
+ *   a line out of order (the checks in winemetal_call_numbers.h).
+ * - Code names a call, never its number: UNIX_CALL(NSObject_retain, ...) in the thunks (B3, #76).
  * - Append only. A new call takes the next number, or turns its own WMT_RESERVED line into a
  *   WMT_CALL. Never renumber a call; PE and unix ship together, so compaction is allowed but is a
  *   deliberate change of its own.
