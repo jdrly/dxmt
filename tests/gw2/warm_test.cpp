@@ -1,6 +1,6 @@
 // gw2-test: pure
 // gw2-build: clang -c -O1 src/util/sha1/sha1.c -o ${OUT}_sha1.o
-// gw2-build: clang++ -std=c++20 -O1 -Itests/gw2/shim -Itests/gw2 -Isrc/dxmt -Isrc/util -Isrc/winemetal tests/gw2/warm_test.cpp src/dxmt/dxmt_gw2_warm.cpp src/dxmt/dxmt_compile_recipe.cpp src/dxmt/dxmt_gw2_stats.cpp src/dxmt/dxmt_gw2_switches.cpp src/util/sha1/sha1_util.cpp ${OUT}_sha1.o -o $OUT
+// gw2-build: clang++ -std=c++20 -O1 -g -fsanitize=address -Itests/gw2/shim -Itests/gw2 -Isrc/dxmt -Isrc/util -Isrc/winemetal tests/gw2/warm_test.cpp src/dxmt/dxmt_gw2_warm.cpp src/dxmt/dxmt_compile_recipe.cpp src/dxmt/dxmt_gw2_stats.cpp src/dxmt/dxmt_gw2_switches.cpp src/util/sha1/sha1_util.cpp ${OUT}_sha1.o -o $OUT
 //
 // gw2 (C4, W2/W3): native test of the shared results (src/dxmt/dxmt_compile_results.hpp) with the
 // compile service's declared policy, and of the warm plan (src/dxmt/dxmt_gw2_warm.cpp). No Metal.
@@ -13,6 +13,11 @@
 //   live job parked on a queued warm job promotes the warm job past the speculative limits.
 // - The plan is bounded: DXMT_WARM_MAX recipes at most, the rest counted as capped; variants once
 //   each; other Metal targets and malformed records skipped; recipes deserialize back to their key.
+// - Teardown (#88 review): stop() joins the workers while a job runs, settles every job left (waiting,
+//   parked, queued, speculative) so a demand returns, and the owners can then be freed before the
+//   service is destroyed (built with AddressSanitizer: a later touch of a freed job is an error).
+// - A ready hit with every worker busy (#88 review): a job whose result is already done is completed at
+//   creation, so its demand returns at once; submitted instead, it would wait for a free worker.
 
 #include "dxmt_compile_results.hpp"
 #include "dxmt_compile_service.hpp"
@@ -355,6 +360,120 @@ plan() {
               (unsigned long long)p.other_target, (unsigned long long)p.malformed, p.variants.size());
 }
 
+// #88 review, Blocker: stop() before the job owners go.
+static void
+teardown(compile::Policy policy) {
+  Table table;
+  Builds builds;
+  std::atomic<bool> open{false};
+  std::vector<std::unique_ptr<Job>> jobs;
+  auto job = [&](int key, bool warm) {
+    auto j = std::make_unique<Job>();
+    j->key = key;
+    j->warm = warm;
+    j->table = &table;
+    j->builds = &builds;
+    jobs.push_back(std::move(j));
+    return jobs.back().get();
+  };
+  Job *running = job(1, false), *waiting = job(2, false), *queued = job(3, false), *spec = job(4, true);
+  running->gate = &open;
+  waiting->deps.push_back(running);
+  Job *never = job(5, false); // a dependency never submitted: `parked` parks on it (declared)
+  Job *parked = job(6, false);
+  parked->deps.push_back(never);
+  compile::Options o;
+  o.initial_workers = 1;
+  o.max_workers = 1;
+  o.policy = policy;
+  auto service = std::make_unique<compile::Service<Job *>>(o);
+  service->submit(running);
+  while (table.size() == 0)
+    std::this_thread::yield();
+  if (policy == compile::Policy::Declared) {
+    service->submit(waiting);
+    service->submit(spec, compile::Lane::Speculative);
+  }
+  service->submit(queued);
+  std::thread demander([&] { compile::demand(queued->record, queued->ready); });
+  std::thread opener([&] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    open = true; // the running job finishes its run while stop() waits for it
+  });
+  service->stop();
+  opener.join();
+  demander.join(); // settled: it returns
+  bool settled = running->GetIsDone() && queued->GetIsDone() &&
+                 (policy == compile::Policy::Legacy || (waiting->GetIsDone() && spec->GetIsDone()));
+  CHECK(settled, "teardown (%s): every job done after stop", policy == compile::Policy::Legacy ? "legacy" : "declared");
+  (void)parked;
+  jobs.clear();    // the owners go (the pipeline cache's maps) ...
+  service.reset(); // ... before the service: nothing may touch them now (ASan)
+  std::printf("%s teardown (%s): stop joins a running job's worker, settles the rest, a demand returns; "
+              "owners freed before the service\n",
+              settled ? "ok  " : "FAIL", policy == compile::Policy::Legacy ? "legacy" : "declared");
+}
+
+// #88 review, High: a done result is taken when the job is created, so a demand needs no worker.
+static void
+readyHitSaturated() {
+  Table table;
+  Builds builds;
+  std::atomic<bool> open{false};
+  std::vector<std::unique_ptr<Job>> busy;
+  compile::Service<Job *> service(declared(2, 2));
+  for (int i = 0; i < 2; i++) {
+    auto j = std::make_unique<Job>();
+    j->key = 100 + i;
+    j->warm = false;
+    j->table = &table;
+    j->builds = &builds;
+    j->gate = &open;
+    service.submit(j.get());
+    busy.push_back(std::move(j));
+  }
+  while (table.size() < 2) // both workers hold a claim and wait at the gate
+    std::this_thread::yield();
+  // key 7 is done (warmed earlier)
+  Job warm;
+  warm.key = 7;
+  int dummy;
+  Job *owner;
+  table.claim(7, &warm, &dummy, &owner);
+  table.publish(7, &warm, 70);
+  // as get_shader / GetGraphicsPipeline do: done -> complete it now, don't submit
+  Job hit;
+  hit.key = 7;
+  int value = 0;
+  auto waits_before = gw2::g_waits.load();
+  bool taken = table.find(7, &value, &owner) == Claim::Done;
+  if (taken) {
+    hit.result = value;
+    compile::completedWithoutRun(hit.record);
+    hit.SetIsDone(true);
+  }
+  auto t0 = std::chrono::steady_clock::now();
+  compile::demand(hit.record, hit.ready);
+  double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+  // the same job submitted instead: it waits for a worker (both busy)
+  Job submitted;
+  submitted.key = 7;
+  submitted.warm = false;
+  submitted.table = &table;
+  submitted.builds = &builds;
+  service.submit(&submitted);
+  std::this_thread::sleep_for(std::chrono::milliseconds(30));
+  bool would_wait = !submitted.GetIsDone();
+  bool ok = taken && hit.result == 70 && gw2::g_waits.load() == waits_before && would_wait;
+  CHECK(ok, "ready hit: taken=%d result=%d waits=%llu would_wait=%d", taken, hit.result,
+        (unsigned long long)(gw2::g_waits.load() - waits_before), would_wait);
+  std::printf("%s ready hit with both workers busy: completed at creation, its demand returned in %.3f ms with "
+              "no wait (submitted, it still waited for a worker after 30 ms)\n",
+              ok ? "ok  " : "FAIL", ms);
+  open = true;
+  submitted.ready.wait(false);
+}
+
 int
 main() {
   for (int round = 0; round < 10; round++)
@@ -364,6 +483,9 @@ main() {
   joinAndDemand();
   demandNotDelayed();
   plan();
+  teardown(compile::Policy::Declared);
+  teardown(compile::Policy::Legacy);
+  readyHitSaturated();
   std::printf(failures ? "%d FAILED\n" : "all passed\n", failures);
   return failures ? 1 : 0;
 }

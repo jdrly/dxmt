@@ -252,7 +252,9 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
             },
             variant);
         gw2::compileVariantNew(); // gw2 (#5)
-        cache->scheduler_.submit(c.first->second.get());
+        // gw2 (#88): a function already in the shared results needs no job
+        if (!cache->shared_ || !c.first->second->CompleteFromShared(cache->shared_.get()))
+          cache->scheduler_.submit(c.first->second.get());
       }
       return c.first->second.get();
     }
@@ -728,7 +730,9 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
     if (!inserted) {
       D3D11_ASSERT(0 && "duplicated graphics pipeline");
     } else {
-      scheduler_.submit(iter->second.get());
+      // gw2 (#88): a pipeline already in the shared results needs no job
+      if (!iter->second->CompleteFromShared())
+        scheduler_.submit(iter->second.get());
       gw2::psoCount(gw2::PsoCounter::New);
     }
     *ppPipeline = iter->second.get();
@@ -832,6 +836,9 @@ public:
     warm_stop_.store(true);
     if (warm_thread_.joinable())
       warm_thread_.join();
+    // gw2 (#88): then the compile workers, before any job owner goes (the shader and pipeline maps are
+    // destroyed before the service); jobs that never ran are settled, so no demand waits forever
+    scheduler_.stop();
     gw2::psoArchiveRequestFlush(); // gw2 (#5): non-blocking
   }
 };

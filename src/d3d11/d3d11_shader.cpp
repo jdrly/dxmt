@@ -138,6 +138,20 @@ public:
     return this;
   }
 
+  bool CompleteFromShared(SharedResults *results) final {
+    // gw2 (#88): a function already done (warm, or another job's) is taken now
+    WMT::Reference<WMT::Function> function;
+    ThreadpoolWork *owner = nullptr;
+    if (results->variants.find(VariantId{shader_->sha1(), variant_digest_}, &function, &owner) !=
+        decltype(results->variants)::Claim::Done)
+      return false;
+    function_ = function;
+    compile::completedWithoutRun(compile_job);
+    gw2::warmCount(gw2::WarmCounter::LiveVariantHit);
+    SetIsDone(true);
+    return true;
+  }
+
   bool GetStableKey(Sha1Digest *pShader, Sha1Digest *pVariant) final {
     // gw2 (C4): the AIR cache's key, always
     *pShader = shader_->sha1();

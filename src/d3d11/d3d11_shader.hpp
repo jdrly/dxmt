@@ -216,6 +216,11 @@ public:
   results' stable key); false if this compiled shader has none
    */
   virtual bool GetStableKey(Sha1Digest *pShader, Sha1Digest *pVariant) { return false; }
+  /**
+  gw2 (#88): when it is created, before it is submitted: true if its result was already done in the
+  shared results; then it is complete and isn't submitted (no worker is needed to hand it over)
+   */
+  virtual bool CompleteFromShared(struct SharedResults *results) { return false; }
 };
 
 // gw2 (C4, W2/W3): a shader variant's stable key in the shared results

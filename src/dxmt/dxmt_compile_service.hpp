@@ -125,6 +125,13 @@ onComplete(JobRecord &r) {
 
 } // namespace detail
 
+// A job completed without running (gw2 #88: its result was already in the shared results when it was
+// created); the caller sets its done flag.
+inline void
+completedWithoutRun(JobRecord &r) {
+  r.state.store(JobState::Complete, std::memory_order_release);
+}
+
 // The job's Metal build starts (pipeline jobs, right before newRenderPipelineState and the like).
 inline void
 building(JobRecord &r) {
@@ -170,7 +177,12 @@ struct Options {
 template <typename Job, typename Traits = JobTraits<Job>> class Service final : public DemandSink {
 public:
   explicit Service(Options options = {});
-  ~Service(); // stop: workers finish the job they run, nothing else; queued jobs are dropped (as before)
+  ~Service(); // stop()
+
+  // gw2 (#88): stops. No job starts any more; the running ones finish their run and the workers are
+  // joined; then every job left (queued, waiting, parked) is settled as done without a result, so no
+  // demand waits forever. Call it before destroying anything a job refers to. Idempotent.
+  void stop();
 
   // Queues a new job, never blocking on a build. Legacy: FIFO, `lane` ignored. Declared: after its
   // unfinished dependencies, in `lane`. C4 adds acquire(key, lane, deps, job).
@@ -241,7 +253,11 @@ template <typename Job, typename Traits> Service<Job, Traits>::Service(Options o
   gw2::compileThreads(threads_); // gw2 (#5)
 }
 
-template <typename Job, typename Traits> Service<Job, Traits>::~Service() {
+template <typename Job, typename Traits> Service<Job, Traits>::~Service() { stop(); }
+
+template <typename Job, typename Traits>
+void
+Service<Job, Traits>::stop() {
   {
     // gw2 (#72): under the lock. A worker checks its wait's predicate under worker_mutex_ and then
     // blocks; an unlocked store and notify could fall between the two, the worker would never wake,
@@ -257,6 +273,38 @@ template <typename Job, typename Traits> Service<Job, Traits>::~Service() {
   }
 
   workers_.clear();
+
+  // settle what never ran (gw2 #88): no worker is left, so this thread alone touches the queues
+  std::vector<Job> left;
+  {
+    std::unique_lock<dxmt::mutex> lock(worker_mutex_);
+    for (; !queue_.empty(); queue_.pop())
+      left.push_back(queue_.front());
+    for (; !continuations_.empty(); continuations_.pop())
+      left.push_back(continuations_.front());
+    for (auto *q : {&demand_q_, &released_q_, &normal_q_, &speculative_q_}) {
+      left.insert(left.end(), q->begin(), q->end());
+      q->clear();
+    }
+    for (auto &[job, node] : nodes_)
+      left.push_back(job);
+    nodes_.clear();
+    by_record_.clear();
+  }
+  {
+    std::unique_lock<dxmt::mutex> lock(deps_mutex_);
+    for (auto &[dep, job] : parked_)
+      left.push_back(job);
+    parked_.clear();
+  }
+  std::sort(left.begin(), left.end());
+  left.erase(std::unique(left.begin(), left.end()), left.end());
+  for (auto job : left) {
+    if (!traits_.done(job)) {
+      detail::onComplete(traits_.record(job));
+      traits_.setDone(job);
+    }
+  }
 }
 
 template <typename Job, typename Traits>
