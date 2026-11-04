@@ -85,3 +85,25 @@ _Avoid_: finish, complete (the GPU's event)
 **Retirement ledger**:
 The queue's typed record of what each chunk holds, per ring slot and stamped with the chunk
 sequence; it releases a chunk's holds only when that chunk retires, in a fixed order.
+
+### Bridge
+
+**Bridge call**:
+One named PE→unix call through Wine's unix-call interface: a thunk in `winemetal_thunks.c` on the
+PE side, a handler in `src/winemetal/unix/` on the unix side.
+_Avoid_: thunk (that is the PE half), syscall
+
+**Call number**:
+A bridge call's explicit number, its line in the call manifest (`src/winemetal/winemetal_calls.h`)
+and its index in both unix-call tables (`WMTCall_<name>`). A number nobody uses yet is
+**reserved**, with the issue or lane that reserved it.
+_Avoid_: slot (that word belongs to the chunk ring: a **ring slot**), index, code
+
+**Call manifest**:
+`src/winemetal/winemetal_calls.h`, the one list of call numbers: the enum and both tables are
+generated from it.
+_Avoid_: call table (the generated `__wine_unix_call_funcs` and `__wine_unix_call_wow64_funcs`)
+
+**Command packet**:
+An encoded graphics command that the unix side interprets (the Metal 3 and Metal 4 encoders'
+`encodeCommands`). Many packets travel in one bridge call; a packet is not a bridge call.

@@ -36,6 +36,21 @@ bridge_native_smoke = executable('bridge_native_smoke',
 )
 test('bridge-native-smoke', bridge_native_smoke, suite : ['gw2', 'gw2-metal'])
 
+# gw2 (B2, #67): the call manifest's test through the real __wine_unix_call_funcs (no Metal device
+# needed: it reads the table, it calls nothing). tests/gw2/run.zsh builds the same file without the
+# unix side for its own checks.
+bridge_manifest_test = executable('bridge_manifest_test',
+  winemetal_unix_src,
+  files('../../../tests/gw2/bridge_manifest_test.c'),
+  dependencies        : [ airconv_dep_darwin ],
+  include_directories : [ dxmt_include_path, include_directories('../../nativemetal', '..') ],
+  c_args              : ['-ObjC', '-DDXMT_NATIVE=1', '-Wno-unused-function'],
+  link_args           : winemetal_unix_link_args,
+  native              : true,
+  install             : false,
+)
+test('bridge-manifest', bridge_manifest_test, suite : ['gw2'])
+
 if not dxmt_crossbuild
   subdir_done()
 endif

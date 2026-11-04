@@ -102,7 +102,9 @@ If two sources conflict, report the conflict instead of silently choosing one.
 - [ ] **Nothing measurably slower or worse to look at.** A visual change is checked where it
       matters (fire/smoke, stealth, Cursed Shore, the Fractal lobby for shader changes).
 - [ ] **Bridge changes say so.** A change to `src/winemetal` changes the unix side and the PE
-      side together; the PR says so, and the two always ship from one build.
+      side together; the PR says so, and the two always ship from one build. A new bridge call is
+      a line appended to the call manifest, `src/winemetal/winemetal_calls.h`, never a number
+      handed out by hand ([ADR 0005](../docs/gw2/adr/0005-bridge-call-numbers-in-one-manifest.md)).
 - [ ] **arm64-clean.** No x86 intrinsics or inline assembly in new code (the fork must build as
       ARM64X before macOS 28).
 - [ ] The independent agent review has no open `Blocker` or `High`, and its verdict is in the PR.
