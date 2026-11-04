@@ -1092,6 +1092,14 @@ publisher across processes (hits, exclusion, last good generation, lock, a `kill
 exclusion-only generations: a fresh store's sole failing pipeline, a failing sole delta after a publish,
 a failed exclusion-only publish retried).
 
+`shared_event_listener_test.m` (#127) runs the shared-event listener's real unix handlers
+(`winemetal_unix.c`'s `#ifndef DXMT_NATIVE` block, cut out of the source by its build lines, with a
+stand-in `NtSetEvent`) as the PE side drives them: start on a thread of its own, destroy from another,
+then a join under a watchdog. Destroy before start, destroy racing start (3,000 times, 0–200 µs apart),
+delivery on the listener thread, a notification before start, and notifications still pending at
+destroy (dropped); the arm64 binary runs under AddressSanitizer. Before the port of athei/dxmt
+`0cd8b76e9a`, the joins hung.
+
 `clock_bench.cpp` (#28) is not a native test: it is a Windows .exe that measures the clocks PE code
 can read (ns per call, step size, backward steps), and `tests/gw2/clock_bench.zsh <engine> <scratch dir>`
 runs it headless under an APFS clone of the engine in a throwaway prefix (winemac disabled). It chose
