@@ -1070,3 +1070,59 @@ runs it headless under an APFS clone of the engine in a throwaway prefix (winema
 55 ns with 1 µs steps on the wall clock. Every clock finer than Wine's server tick is a crossing into
 the unix side; `KUSER_SHARED_DATA`'s interrupt time is a 1.4 ns read but changes only when the
 wineserver wakes (about every 18 ms in an idle process).
+
+The native PSO archive tool (#111): `pso_archive_tool_test.mm` (metal) builds the tool for x86_64 and
+arm64 and a generator that writes synthetic recipes from real AIR: an isolated copy of DXMT's AIR
+cache (`$GW2_AIR_DB`, else lane C's `work/dxmt-squeeze/native/w0/sample.db` in the GW2 on Mac
+workspace; skipped without it), copied again into the test's directory. Its recipes go through C3's
+serializer in five shapes (full VS/PS, blending, sparse color slots, MSAA, fragment-less), each checked
+to build on the device. `pso_archive_tool.zsh` then checks that `run` publishes all of them, that fresh
+processes on both architectures hit every one, `status`, the refusal under a held writer lock (the
+store unchanged), a second run's newer generation, an injected crash at one recipe isolated by
+the bisection, the rest published and hit, and six faked named packer failures (a third build with
+`PSO_ARCHIVE_TESTING`) excluded over several flushes, the rest published and the six classified as
+excluded misses.
+
+## PSO archive tool
+
+`tools/gw2/pso_archive_tool.cpp` (#111) is a macOS executable, not part of the DLL build: it builds
+the pipelines W1 recorded (`recipes_1.db`, `DXMT_PSO_RECORD`) after the game exits and publishes them
+as one generation of the PSO archive store, which a session with `DXMT_PSO_ARCHIVE=1
+DXMT_PSO_GENERATIONS=1` loads for lookup (see [COMPILE](#compile), *Generations*). It runs the game's
+own code, linked natively: the recipes are read through the bridge's `CacheEnumerate` and planned by
+W2/W3's `warmPlanAdd` (same order and target filter as `DXMT_WARM`); each function comes from the AIR
+cache through `CacheReader` (read-only, never a translation); each pipeline is built by C3's
+`Metal3PipelineBuilder`, so `_MTLDevice_newRenderPipelineState`'s descriptor conversion and the
+archive's lookup and capture (`pso_archive_new_render`) are the bridge's; the store is opened and
+published with `WMTPSOArchiveInit`/`WMTPSOArchiveFlush` (generations, the exact-shape policy, its
+retries and the last good generation). Build it with `tools/gw2/build-pso-archive-tool.zsh <output>
+[x86_64|arm64]`; GW2 on Mac wraps it as `scripts/pso-archive-tool.zsh build|run|status`.
+
+| Command | What it does |
+|---|---|
+| `run` | Builds every recipe in a child process and publishes one generation (this run is one session of the store: its shard, plus the newest 3 other sessions' shards). A publish failure that names a pipeline excludes its shape (the archive's exact-shape policy, 3 writes a flush); the child flushes again while the failures keep naming shapes (up to 64 flushes). A child that crashes, or whose publish fails without Metal naming a pipeline, is bisected in probe processes, each publishing a range into an empty scratch store no game reads; a recipe that fails alone is left out and the rest published (up to 4 rounds). Then a fresh process verifies the lookup |
+| `verify` | A fresh process builds the recipes against the published generation and reports hits and misses; it captures and publishes nothing |
+| `status` | Each store's current generation (shards, pipeline keys, size, excluded shapes), whether its writer lock is held, and the recipe file. Opens nothing for writing; probes the lock for an instant |
+
+Options: `--cache-dir` (DXMT's per-exe cache, default `$(getconf DARWIN_USER_CACHE_DIR)dxmt/<exe>`),
+`--recipes`, `--air` (default `<cache-dir>/shaders_<target>.db`), `--archive-dir` (as
+`DXMT_PSO_ARCHIVE_DIR`; another directory is a store no game reads), `--exe` (default `Gw2-64.exe`),
+`--keep` (sessions a generation keeps, default 4 as the DLL), `--limit`, `--metal-version` (default as
+DXMT picks it: 320 on macOS 15+ with an Apple7 GPU), `--quiet`.
+
+Output lines (stdout): `RESULT recipes= selected= built= failed= nofunction= airmiss= fnfailed=
+othertarget= malformed= hits= misses= known= new= missexcl= excluded= skipped= generation= published=
+flush= mode=` per child (`failed`: Metal refused the pipeline, listed as `BUILDFAILED <index> <recipe key>
+<error>` without `--quiet`; `nofunction`: a function missing, its AIR (`airmiss`) or the library
+(`fnfailed`); `hits`/`misses` as the archive counts them; `skipped`: pipelines left out after Metal's packer named
+their shape; `mode` `writer` or `lookup`), `ISOLATED
+<index> exit=<code>` per recipe the bisection left out, `VERIFY …` (the verifying process's result) and
+`LEFTOUT <n>`. The archive's own report lines go to stderr.
+
+Exit codes: 0 done; 1 usage or input error (no recipes or AIR file, no device); 3 the store is busy:
+another process (a running game with generations on) holds its writer lock, and nothing was written;
+4 publishing failed; 5 a failure the bisection couldn't isolate; 6 published, but the verifying process
+failed (`VERIFY failed exit=<n>`; the generation stays). A failed run leaves the last good
+generation. A game started while the tool writes gets the store's lookup-only role for that session.
+`PSO_ARCHIVE_TOOL_TEST_CRASH=<index>` (tests only) aborts a child at that recipe; a build with
+`build-pso-archive-tool.zsh <output> <arch> testing` also takes the archive's `PSO_ARCHIVE_TEST_*` fakes.
