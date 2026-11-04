@@ -41,7 +41,9 @@
 // - with the deterministic test completion adapter (ScriptedSubmission, no GPU): error records and
 //   the throttle, missing GPU times reported as 0, the token's records unchanged until retire, wait and
 //   retire in order, drain() with chunks committed and never waited for, the same token checks, and
-//   (the review of #97) a stale token of the adapter's own, from an earlier wait, refused and kept.
+//   (the review of #97) a stale token of the adapter's own, from an earlier wait, refused and kept;
+//   gw2 (#113): after a refused retirement, retireWaited() retires the last wait's chunk once, with that
+//   wait's records, and nothing else.
 // No deliberate GPU faults (council §2); the parity of the records with the code they replaced is
 // tests/gw2/commit_record_test.cpp's.
 // Exit 77 without a Metal device; without Metal 4, the Metal 3 half runs and the test exits 77
@@ -647,6 +649,101 @@ scriptedStaleToken() {
   std::printf("%s scripted adapter: a stale token of its own is refused and kept\n", failures ? "...." : "ok  ");
 }
 
+// gw2 (#113): CommandQueue's recovery (DXMT_RETIRE_RECOVERY) after the adapter's retire() refused a token
+// (here an empty one): retireWaited(seq) retires the chunk of the last wait once, through retireChunk with
+// that wait's records (the adapter checks them), and refuses another sequence, a repeat, or a chunk
+// retired normally. The next chunk then waits and retires as usual.
+static void
+scriptedRetireWaited() {
+  ScriptedSubmission sub;
+  sub.script.resize(4);
+  for (auto &records : sub.script)
+    records.resize(2);
+  NullEncoder encoder;
+  CHECK(!sub.retireWaited(0) && !sub.retireWaited(1), "retireWaited: retired before any wait");
+  for (uint64_t seq = 1; seq <= 3; seq++) {
+    sub.begin(seq);
+    sub.encode(seq, encoder);
+    sub.commit(seq);
+    auto completed = sub.wait(seq, 0, false);
+    if (seq == 2) {
+      auto taken = std::move(completed); // the injected bug: the token is gone before the retirement
+      CHECK(!sub.retire(std::move(completed)) && sub.retired == 1, "retireWaited: an empty token retired chunk 2");
+      CHECK(!sub.retireWaited(1) && !sub.retireWaited(3), "retireWaited: retired a chunk it didn't last wait for");
+      CHECK(sub.retireWaited(2) && sub.retired == 2, "retireWaited: didn't retire the last wait's chunk");
+      CHECK(!sub.retireWaited(2) && sub.retired == 2, "retireWaited: retired chunk 2 twice");
+      CHECK(!sub.retire(std::move(taken)), "retireWaited: retire() took the token of a recovered chunk");
+    } else {
+      CHECK(sub.retire(std::move(completed)) && sub.retired == seq, "retireWaited: the normal retire() refused");
+      CHECK(!sub.retireWaited(seq), "retireWaited: retired a chunk retire() had retired");
+    }
+  }
+  CHECK(sub.contract == 0, "retireWaited: %d contract violations", sub.contract);
+  std::printf("%s scripted adapter: retireWaited() after a refused retirement\n", failures ? "...." : "ok  ");
+}
+
+// gw2 (#113, the review of #116): CommandQueue's finish loop and RetireChunk with DXMT_RETIRE_RECOVERY,
+// through gw2::retireStep as RetireChunk calls it: the loop's own sequence goes in, and the bookkeeping
+// (the CPU fence WaitCommittedRetired waits on) signals step.seq. Empty (moved-from) tokens at chunk 2
+// and at the last committed chunk, 4: the fence still reaches every chunk (so WaitCommittedRetired, which
+// waits for the last committed one, returns), the submission retires each chunk exactly once (Metal 4:
+// its ring slot's allocator resets), and the ledger releases only with a token's completion: chunk 3's
+// token recovers chunks 2 and 3; chunk 4, the last, keeps its holds until the drain.
+static void
+scriptedRetireStep() {
+  ScriptedSubmission sub;
+  sub.script.resize(5);
+  for (auto &records : sub.script)
+    records.resize(1);
+  Ledger ledger{kRing, {.metal4 = true}};
+  ledger.acceptTokensFrom(&sub);
+  NullEncoder encoder;
+  uint64_t coherent = 0; // cpu_coherent
+  for (uint64_t seq = 1; seq <= 4; seq++) {
+    sub.begin(seq);
+    sub.encode(seq, encoder);
+    sub.commit(seq);
+    CHECK(ledger.hold(seq, std::make_unique<int>(int(seq))), "retireStep: the hold for chunk %llu was refused",
+          (unsigned long long)seq);
+  }
+  uint64_t committed = 4;
+  int error_lines = 0, info_lines = 0;
+  for (uint64_t internal_seq = 1; internal_seq <= committed; internal_seq++) {
+    auto completed = sub.wait(internal_seq, 0, false);
+    if (internal_seq == 2 || internal_seq == 4)
+      auto taken = std::move(completed); // the injected bug: the token is gone before the retirement
+    auto step = gw2::retireStep(ledger, sub, internal_seq, std::move(completed), true);
+    // RetireChunk's one line (the review of #116): an empty token is one error naming both refusals
+    auto diag = gw2::retireDiagnostic(step);
+    error_lines += diag.line == gw2::RetireLine::Error;
+    info_lines += diag.line == gw2::RetireLine::Info;
+    CHECK(step.seq == internal_seq, "retireStep: chunk %llu retired as %llu", (unsigned long long)internal_seq,
+          (unsigned long long)step.seq);
+    coherent = step.seq; // RetireChunk: cpu_coherent.signal(step.seq)
+    CHECK(sub.retired == internal_seq, "retireStep: the submission didn't retire chunk %llu",
+          (unsigned long long)internal_seq);
+    bool empty = internal_seq == 2 || internal_seq == 4;
+    CHECK(step.submission_refused == empty && step.submission_recovered == empty,
+          "retireStep: chunk %llu's submission retirement", (unsigned long long)internal_seq);
+    CHECK(step.ledger_refused == (empty || internal_seq == 3), "retireStep: chunk %llu's ledger retirement",
+          (unsigned long long)internal_seq);
+    uint64_t want = internal_seq == 2 ? 1 : internal_seq == 4 ? 3 : internal_seq;
+    CHECK(ledger.retired() == want, "retireStep: after chunk %llu the ledger retired up to %llu, want %llu",
+          (unsigned long long)internal_seq, (unsigned long long)ledger.retired(), (unsigned long long)want);
+  }
+  // chunk 2: one error (ledger and submission); chunk 3 catching up: info; chunk 4: one error
+  CHECK(error_lines == 2 && info_lines == 1, "retireStep: %d error and %d info lines, want 2 and 1", error_lines,
+        info_lines);
+  // WaitCommittedRetired: cpu_coherent.wait(committed) returns once the fence reached it
+  CHECK(coherent == committed, "retireStep: the fence reached %llu of %llu committed",
+        (unsigned long long)coherent, (unsigned long long)committed);
+  CHECK(ledger.splits(4).empty() && ledger.retired() == 3, "retireStep: chunk 4's holds released without completion");
+  CHECK(ledger.drain(sub.drain()), "retireStep: the drain was refused");
+  CHECK(sub.contract == 0, "retireStep: %d contract violations", sub.contract);
+  std::printf("%s scripted adapter: retireStep with empty tokens, the last committed chunk included\n",
+              failures ? "...." : "ok  ");
+}
+
 int
 main() {
   @autoreleasepool {
@@ -659,6 +756,8 @@ main() {
     auto completion = device.newSharedEvent();
     scripted();
     scriptedStaleToken();
+    scriptedRetireWaited(); // gw2 (#113)
+    scriptedRetireStep();   // gw2 (#113)
 
     {
       auto metal3_queue = device.newCommandQueue(64);

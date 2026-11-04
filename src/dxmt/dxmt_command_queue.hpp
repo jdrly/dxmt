@@ -212,7 +212,8 @@ private:
   // its ring slot, in this order: the lifetime check's completion, the chunk's own state (reset()), its
   // holds (the ledger), the submission's part (Metal 4's allocator), the CPU fence, the ring count, the
   // ring allocators
-  void RetireChunk(CommandChunk &chunk, CompletedChunk &&completed);
+  // gw2 (#113): `seq` the finish loop's own sequence, never the (possibly empty) token's
+  void RetireChunk(CommandChunk &chunk, uint64_t seq, CompletedChunk &&completed);
   // gw2 (#91, L3): teardown, both threads stopped: the submission's drain, then (with its token) the
   // lifetime check's detach and the chunks' state and holds, chunk by chunk
   void DrainChunks();
@@ -220,7 +221,11 @@ private:
   void LedgerRefused(const char *what, uint64_t seq);
   // gw2 (#91): the same for `who` (the ledger, or the submission refusing a token)
   void RetirementRefused(const char *who, const char *what, uint64_t seq);
+  // gw2 (#113): a refused retirement (the ledger's, the submission's, or both) and what
+  // DXMT_RETIRE_RECOVERY did, one line
+  void RetireRecovered(uint64_t seq, const gw2::RetireStep &step, const gw2::RetireDiagnostic &diagnostic);
   std::atomic_uint64_t ledger_refusals_ = 0; // encode thread (holds) and finish thread (retirements)
+  bool refused_holds_logged_ = false;        // gw2 (#113): finish thread
   // gw2 (#10, #32, #77): finish thread: the split buffers' error lines (the first 8, then one a second)
   gw2::BasicSplitErrorThrottle<clock::time_point> split_errors_;
 
@@ -239,6 +244,7 @@ private:
   // gw2 (#31): DXMT_UNRETAINED, and this queue's id for DXMT_LIFETIME_CHECK's stamps
   const bool unretained_;
   const uint32_t lifetime_id_;
+  const bool retire_recovery_; // gw2 (#113): DXMT_RETIRE_RECOVERY
 
 public:
   // gw2 (#8): one frame's RING totals, kept by CommitCurrentChunk until the next frame's first commit
