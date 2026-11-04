@@ -719,6 +719,7 @@ report.
 | `written`, `present`, `failed` | Records the writer stored in the window; records it skipped because the file already had them (an earlier session's); writes SQLite refused (they may be queued again if seen again) |
 | `queued` | Records waiting for the writer now |
 | `dropped` | `queue`: the queue was full (queued again if seen again); `seen`: the fingerprint table's probe run was full; `stopped`: recording had stopped |
+| `seen` (collisions) | Keys are deduplicated by a 63-bit fingerprint, not the key itself (#103): two different keys with the same fingerprint count as one. At 30,000 keys a session that is about 5×10⁻¹¹; because fingerprints are deterministic, such a pair would collide in every session, so the second key's row is never recorded and its pipeline is built at first use, as without recording. Warming's tables (C4) use full digests |
 | `stopped=budget`, `stopped=writer` | Recording stopped for this process: the file reached 256 MB (delete it to start over), or it couldn't be opened, or 8 writes in a row failed (a warning says which) |
 
 Keys in `recipes_1.db` (table `cache_1`), all content addressed (a key always holds the same value, so a
