@@ -679,7 +679,10 @@ blending (u8), then alpha-to-coverage, logic operation enabled (u8), logic opera
 rasterization, sample count (u8), depth and stencil formats, immutable vertex and fragment buffer
 masks, topology class, tessellation partition mode (u32), max tessellation factor (u8), winding and
 factor step (u32), indirect command buffer support (u8). Never pointers or padding, so the same pipeline
-gets the same key in every process.
+gets the same key in every process. Since C3 the recipe is `compile::PipelineRecipe` (`src/dxmt/dxmt_compile_recipe.hpp`), built from the
+exact descriptor; the recorder and the pipeline build share it, and its serializer
+(`compile::serialize`) is the one above, byte for byte (`tests/gw2/pipeline_recipe_test.cpp` pins it
+against #57's code and a golden key).
 
 | Line | When |
 |---|---|

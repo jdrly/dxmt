@@ -4,6 +4,7 @@
 #include "d3d11_device.hpp"
 #include "d3d11_shader.hpp"
 #include "log/log.hpp"
+#include "dxmt_compile_recipe.hpp"
 #include "dxmt_gw2_compile.hpp"
 #include "dxmt_gw2_recipe.hpp"
 #include <atomic>
@@ -105,21 +106,29 @@ public:
     info.raster_sample_count = SampleCount;
     info.immutable_vertex_buffers = (1 << 16) | (1 << 29) | (1 << 30);
     info.immutable_fragment_buffers = (1 << 29) | (1 << 30);
+    // gw2 (C3): the pipeline's recipe, from the exact descriptor above: what is recorded (#57) and
+    // what the builder builds (applied to a fresh descriptor, it gives this one back)
+    auto recipe = compile::recipeFromInfo(info);
+    recipe.metal_version = device_->GetDXMTDevice().metalVersion();
     if (gw2::recipeRecording()) {
-      // gw2 (#57): this pipeline's recipe, from the exact descriptor Metal gets. Only when every
-      // shader variant's inputs were recorded (a stream-output vertex variant's never are).
+      // gw2 (#57): only when every shader variant's inputs were recorded (a stream-output vertex
+      // variant's never are)
       Sha1Digest vs_sha1, vs_variant, ps_sha1, ps_variant;
       bool has_ps = PixelShader && PixelShader->GetIdentity(&ps_sha1, &ps_variant);
-      if (VertexShader->GetIdentity(&vs_sha1, &vs_variant) && (has_ps || !PixelShader))
-        gw2::recipePipeline(vs_sha1, vs_variant, has_ps ? &ps_sha1 : nullptr, has_ps ? &ps_variant : nullptr,
-                            device_->GetDXMTDevice().metalVersion(), info);
-      else
+      if (VertexShader->GetIdentity(&vs_sha1, &vs_variant) && (has_ps || !PixelShader)) {
+        recipe.vs = compile::VariantKey{vs_sha1, vs_variant};
+        if (has_ps)
+          recipe.ps = compile::VariantKey{ps_sha1, ps_variant};
+        gw2::recipePipeline(recipe);
+      } else {
         gw2::recipePipelineUnsupported();
+      }
     }
 
     compile::building(compile_job); // gw2 (#46, C1)
     auto t0 = gw2::compileClock(); // gw2 (#5)
-    state_ = device_->GetMTLDevice().newRenderPipelineState(info, err);
+    state_ = compile::Metal3PipelineBuilder(device_->GetMTLDevice())
+                 .build(recipe, vs.Function, PixelShader ? ps.Function : WMT::Function{}, err); // gw2 (C3)
     gw2::compilePipelineBuilt(t0, state_ != nullptr); // gw2 (#5)
 
     if (state_ == nullptr) {
