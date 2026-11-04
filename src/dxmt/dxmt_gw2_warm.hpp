@@ -64,8 +64,9 @@ struct WarmBatch {
 using WarmEnumerate = std::function<WarmBatch(uint64_t after_rowid, uint8_t *buffer, uint64_t capacity)>;
 constexpr uint64_t kWarmRowMax = 16ull << 20; // a larger row is skipped (a recipe is about 420 B)
 
-// gw2 (#114): the warm thread's read: batches of recipes in rowid order into `plan` until the end,
-// `stop`, or `max` recipes. A row too large for the buffer grows it (up to kWarmRowMax) or is skipped;
+// gw2 (#114): the warm thread's read: batches of recipes in rowid order into `plan` until the end or
+// `stop`. Past `max` recipes it still reads to the end, so plan.capped counts every recipe over the cap
+// (before: only the rest of the batch that reached it). A row too large for the buffer grows it (up to kWarmRowMax) or is skipped;
 // a failed batch (status 2) ends the read with its code in plan.read_error. Nothing ends it silently.
 void warmRead(WarmPlan &plan, const WarmEnumerate &enumerate, uint32_t metal_version, WarmMode mode, uint32_t max,
               const std::atomic<bool> &stop, uint64_t row_max = kWarmRowMax);

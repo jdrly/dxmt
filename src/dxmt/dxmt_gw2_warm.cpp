@@ -132,7 +132,9 @@ warmRead(WarmPlan &plan, const WarmEnumerate &enumerate, uint32_t metal_version,
   std::vector<uint8_t> buffer(1 << 20);
   uint64_t after = 0;
   bool more = true;
-  while (more && !stop.load() && plan.recipes < max) {
+  // read to the end even past the cap: every recipe over DXMT_WARM_MAX is counted as capped, not
+  // only the rest of the batch that reached it (the read costs about 5 ms per 1 MiB batch)
+  while (more && !stop.load()) {
     WarmBatch b = enumerate(after, buffer.data(), buffer.size());
     plan.busy += b.busy;
     for (uint64_t p = 0, i = 0; i < b.count && p + 8 <= b.used; i++) {
