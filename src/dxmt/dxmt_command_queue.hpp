@@ -26,6 +26,7 @@
 #include "dxmt_command_list.hpp"
 #include "dxmt_context.hpp"
 #include "dxmt_counter.hpp"
+#include "dxmt_gw2_commit_record.hpp"
 #include "dxmt_gw2_lifetime.hpp"
 #include "dxmt_gw2_mtl4_queue.hpp"
 #include "dxmt_gw2_retirement.hpp"
@@ -112,6 +113,9 @@ struct RetirementTraits {
   using TemporalScaler = Rc<dxmt::TemporalScaler>;
 };
 using RetirementLedger = gw2::BasicRetirementLedger<RetirementTraits>;
+
+// gw2 (#77, Q1): one completed command buffer of a chunk, as both finish paths read it
+using CommitRecord = gw2::BasicCommitRecord<WMT::Error>;
 
 class CommandChunk {
 public:
@@ -201,17 +205,14 @@ private:
 
   uint32_t WaitForFinishThread();
 
-  // gw2 (#10): a GPU error in split-off buffer `index` of `count` of chunk `seq`; finish thread only
-  void ReportSplitError(CommandChunk &chunk, uint64_t seq, size_t index, size_t count, WMT::CommandBuffer cmdbuf);
-  // gw2 (#32): the same for Metal 4, from a commit's feedback (`count`: the chunk's split-off buffers)
-  void ReportSplitError(CommandChunk &chunk, uint64_t seq, size_t index, size_t count, WMT::Error error);
-  // gw2 (#10, #32): whether a split error gets its line (the first 8, then one a second), and how
-  // many weren't logged since the last one
-  bool SplitErrorLine(uint64_t &not_logged);
-
   // gw2 (#32): Metal 4 (mtl4_): the encode thread's commit of a chunk, the finish thread's wait
   void CommitChunkMetal4(CommandChunk &chunk, uint64_t seq);
   void FinishChunkMetal4(CommandChunk &chunk, uint64_t seq);
+  // gw2 (#77): Metal 3: the finish thread's wait for chunk `seq`'s command buffers
+  void FinishChunkMetal3(CommandChunk &chunk, uint64_t seq);
+  // gw2 (#77): finish thread, after either: chunk `seq`'s report from its records (completed_): device
+  // errors (the split buffers' throttled), with `stats` the GPU line's spans and PRESENT's aftergpu
+  void ReportCompletedChunk(CommandChunk &chunk, uint64_t seq, gw2::ReportOrder order, bool stats);
 
   // gw2 (#66): finish thread, chunk `seq` complete (Metal 3: its command buffers; Metal 4: its
   // commits and completion event): releases everything it used and frees its ring slot, in this
@@ -221,9 +222,11 @@ private:
   // gw2 (#66): a refused hold or retirement (a bug): the first 8 per queue are logged
   void LedgerRefused(const char *what, uint64_t seq);
   std::atomic_uint64_t ledger_refusals_ = 0; // encode thread (holds) and finish thread (retirements)
-  uint64_t split_errors_ = 0;        // all of them, logged or not
-  uint64_t split_errors_logged_ = 0; // split_errors_ at the last line
-  clock::time_point split_error_last_line_{};
+  // gw2 (#10, #32, #77): finish thread: the split buffers' error lines (the first 8, then one a second)
+  gw2::BasicSplitErrorThrottle<clock::time_point> split_errors_;
+  // gw2 (#77): finish thread: the records of the chunk being finished, in commit order (reused, so
+  // no allocation per chunk); valid until the chunk retires
+  std::vector<CommitRecord> completed_;
 
   std::atomic_uint64_t ready_for_encode = 1; // we start from 1, so 0 is always coherent
   std::atomic_uint64_t ready_for_commit = 1;

@@ -127,6 +127,40 @@ RingSection(double, uint32_t) {
 
 gw2::SectionRegistrar g_ring_section("RING", RingSection);
 
+// gw2 (#77): a Metal 3 command buffer as gw2::recordMetal3Commit reads it
+struct Metal3Buffer {
+  static constexpr auto kScheduled = WMTCommandBufferStatusScheduled;
+  static constexpr auto kError = WMTCommandBufferStatusError;
+  WMT::CommandBuffer cmdbuf;
+
+  WMTCommandBufferStatus
+  status() {
+    return cmdbuf.status();
+  }
+  void
+  waitUntilCompleted() {
+    cmdbuf.waitUntilCompleted();
+  }
+  WMT::Error
+  error() {
+    return cmdbuf.error();
+  }
+  void
+  logs(std::vector<std::string> &out) {
+    if (auto logs = cmdbuf.logs())
+      for (auto &log : logs.elements())
+        out.push_back(log.description().getUTF8String());
+  }
+  uint64_t
+  gpuStartTime() {
+    return cmdbuf.gpuStartTime();
+  }
+  uint64_t
+  gpuEndTime() {
+    return cmdbuf.gpuEndTime();
+  }
+};
+
 } // namespace
 
 void *
@@ -391,41 +425,7 @@ CommandQueue::WaitForFinishThread() {
     if (mtl4_) { // gw2 (#32): Metal 4: the chunk's commits, from their feedback
       FinishChunkMetal4(chunk, internal_seq);
     } else {
-      if (chunk.attached_cmdbuf.status() <= WMTCommandBufferStatusScheduled) {
-        chunk.attached_cmdbuf.waitUntilCompleted();
-      }
-      if (chunk.attached_cmdbuf.status() == WMTCommandBufferStatusError) {
-        ERR("Device error at frame ", chunk.frame_, ": ", chunk.attached_cmdbuf.error().description().getUTF8String());
-      }
-      if (auto logs = chunk.attached_cmdbuf.logs()) {
-        for (auto &log : logs.elements()) {
-          ERR("Frame ", chunk.frame_, ": ", log.description().getUTF8String());
-        }
-      }
-
-      // gw2 (#10): the buffers the present split committed first (earlier on this queue, so done or
-      // about to be), checked for a GPU error as the last one is. The status is the read the GPU line
-      // needed already; a buffer still pending is waited for here, never on the encode thread.
-      // gw2 (#3): their GPU execution spans, then the last buffer's, for the GPU line
-      bool stats = gw2::statsEnabled();
-      auto splits = ledger_.splits(internal_seq); // gw2 (#66): held in the retirement ledger
-      for (size_t i = 0; i < splits.size(); i++) {
-        auto &split = splits[i];
-        auto status = split.status();
-        if (status <= WMTCommandBufferStatusScheduled) {
-          split.waitUntilCompleted();
-          status = split.status();
-        }
-        if (unlikely(status == WMTCommandBufferStatusError))
-          ReportSplitError(chunk, internal_seq, i, splits.size(), split);
-        if (stats)
-          gpu_collector.add(chunk.frame_, split.gpuStartTime(), split.gpuEndTime());
-      }
-      if (stats) {
-        uint64_t gpu_end = chunk.attached_cmdbuf.gpuEndTime();
-        gpu_collector.add(chunk.frame_, chunk.attached_cmdbuf.gpuStartTime(), gpu_end);
-        gw2::presentGpuEnd(chunk.frame_, gpu_end); // gw2 (#7): PRESENT's aftergpu
-      }
+      FinishChunkMetal3(chunk, internal_seq); // gw2 (#77)
     }
 
     if (chunk.signal_frame_latency_fence_ != ~0ull)
@@ -471,47 +471,66 @@ CommandQueue::LedgerRefused(const char *what, uint64_t seq) {
       ", retired up to ", ledger_.retired(), ", refusal ", n, "; only the first 8 are logged)");
 }
 
-// gw2 (#10): the line for a GPU error in a split-off buffer, with the chunk's frame and sequence id,
-// then the buffer's logs, as for the chunk's last buffer. A GPU fault tends to repeat every frame,
-// so the first 8 are logged, then at most one line a second, each with the count of those not logged.
-bool
-CommandQueue::SplitErrorLine(uint64_t &not_logged) {
-  split_errors_++;
-  auto now = clock::now();
-  if (split_errors_ > 8 && now - split_error_last_line_ < std::chrono::seconds(1))
-    return false;
-  not_logged = split_errors_ - split_errors_logged_ - 1;
-  split_errors_logged_ = split_errors_;
-  split_error_last_line_ = now;
-  return true;
-}
-
+// gw2 (#77): the finish thread's part for a Metal 3 chunk: the records of its last command buffer
+// and of the buffers the present split committed first (gw2 #10; held in the retirement ledger,
+// committed earlier on this queue, so done or about to be). A buffer still pending is waited for
+// here, never on the encode thread, the last one first as before. GPU times only with DXMT_STATS.
 void
-CommandQueue::ReportSplitError(
-    CommandChunk &chunk, uint64_t seq, size_t index, size_t count, WMT::CommandBuffer cmdbuf
-) {
-  uint64_t not_logged;
-  if (!SplitErrorLine(not_logged))
-    return;
-  ERR("Device error at frame ", chunk.frame_, " (chunk ", seq, ", split-off buffer ", index + 1, " of ", count, ", split error ", split_errors_, ", ", not_logged, " not logged since the last line): ",
-      cmdbuf.error().description().getUTF8String());
-  if (auto logs = cmdbuf.logs()) {
-    for (auto &log : logs.elements()) {
-      ERR("Frame ", chunk.frame_, " (chunk ", seq, ", split-off buffer ", index + 1, "): ",
-          log.description().getUTF8String());
-    }
+CommandQueue::FinishChunkMetal3(CommandChunk &chunk, uint64_t seq) {
+  bool stats = gw2::statsEnabled();
+  auto splits = ledger_.splits(seq); // gw2 (#66)
+  completed_.resize(splits.size() + 1);
+  Metal3Buffer last{chunk.attached_cmdbuf};
+  gw2::recordMetal3Commit(last, uint32_t(splits.size()), true, stats, completed_.back());
+  for (size_t i = 0; i < splits.size(); i++) {
+    Metal3Buffer split{splits[i]};
+    gw2::recordMetal3Commit(split, uint32_t(i), false, stats, completed_[i]);
   }
+  // upstream's order: the last buffer's error and logs, then the split buffers'
+  ReportCompletedChunk(chunk, seq, gw2::ReportOrder::LastFirst, stats);
 }
 
-// gw2 (#32): Metal 4 has no command buffer logs; the error is the commit feedback's
+// gw2 (#77): what both finish paths report of a completed chunk, from its records: device errors (the
+// last buffer's as upstream's line, then its logs; a split buffer's with the chunk's frame and
+// sequence id, through the throttle, then its logs), and with DXMT_STATS the GPU spans (gw2 #3: the
+// split buffers', then the last one's) and the last one's end for PRESENT's aftergpu (gw2 #7).
 void
-CommandQueue::ReportSplitError(CommandChunk &chunk, uint64_t seq, size_t index, size_t count, WMT::Error error) {
-  uint64_t not_logged;
-  if (!SplitErrorLine(not_logged))
-    return;
-  ERR("Device error at frame ", chunk.frame_, " (chunk ", seq, ", split-off buffer ", index + 1, " of ", count,
-      ", split error ", split_errors_, ", ", not_logged, " not logged since the last line): ",
-      error.description().getUTF8String());
+CommandQueue::ReportCompletedChunk(CommandChunk &chunk, uint64_t seq, gw2::ReportOrder order, bool stats) {
+  struct Sink {
+    CommandQueue &queue;
+    uint64_t frame;
+    uint64_t seq;
+
+    clock::time_point
+    now() {
+      return clock::now();
+    }
+    void
+    deviceError(const CommitRecord &record) {
+      ERR("Device error at frame ", frame, ": ", WMT::Error(record.error).description().getUTF8String());
+    }
+    void
+    lastLog(const CommitRecord &, const std::string &log) {
+      ERR("Frame ", frame, ": ", log);
+    }
+    void
+    splitError(const CommitRecord &record, size_t index, size_t count, uint64_t errors, uint64_t not_logged) {
+      ERR("Device error at frame ", frame, " (chunk ", seq, ", split-off buffer ", index + 1, " of ", count,
+          ", split error ", errors, ", ", not_logged, " not logged since the last line): ",
+          WMT::Error(record.error).description().getUTF8String());
+      for (auto &log : record.logs)
+        ERR("Frame ", frame, " (chunk ", seq, ", split-off buffer ", index + 1, "): ", log);
+    }
+    void
+    gpuSpan(uint64_t start_ns, uint64_t end_ns) {
+      queue.gpu_collector.add(frame, start_ns, end_ns);
+    }
+    void
+    presentGpuEnd(uint64_t end_ns) {
+      gw2::presentGpuEnd(frame, end_ns);
+    }
+  } sink{*this, chunk.frame_, seq};
+  gw2::reportCompletedChunk(std::span<const CommitRecord>(completed_), order, stats, split_errors_, sink);
 }
 
 // gw2 (#32): the chunk's Metal 4 command buffers: a wait for the initializer's uploads at the queue,
@@ -534,8 +553,7 @@ CommandQueue::CommitChunkMetal4(CommandChunk &chunk, uint64_t seq) {
 }
 
 // gw2 (#32): the finish thread's part for a Metal 4 chunk: waits for every commit's feedback, then
-// does what the Metal 3 path does with the command buffers: device errors (the last buffer's as
-// upstream's line, earlier ones as split errors), GPU spans for the GPU line, PRESENT's aftergpu.
+// reports the chunk from its commits' records as the Metal 3 path does (gw2 #77).
 void
 CommandQueue::FinishChunkMetal4(CommandChunk &chunk, uint64_t seq) {
   auto &commits = mtl4_->wait(seq);
@@ -551,21 +569,11 @@ CommandQueue::FinishChunkMetal4(CommandChunk &chunk, uint64_t seq) {
       warned = true;
     }
   }
-  bool stats = gw2::statsEnabled();
-  size_t splits = commits.empty() ? 0 : commits.size() - 1;
-  for (size_t i = 0; i < commits.size(); i++) {
-    auto *commit = commits[i];
-    if (unlikely(commit->feedback.error != NULL_OBJECT_HANDLE)) {
-      if (i < splits)
-        ReportSplitError(chunk, seq, i, splits, commit->error());
-      else
-        ERR("Device error at frame ", chunk.frame_, ": ", commit->error().description().getUTF8String());
-    }
-    if (stats)
-      gpu_collector.add(chunk.frame_, commit->gpuStartNs(), commit->gpuEndNs());
-  }
-  if (stats && !commits.empty())
-    gw2::presentGpuEnd(chunk.frame_, commits.back()->gpuEndNs()); // gw2 (#7)
+  // gw2 (#77): their records, reported in commit order (Metal 4 has no command buffer logs)
+  completed_.resize(commits.size());
+  for (size_t i = 0; i < commits.size(); i++)
+    gw2::recordMetal4Commit(*commits[i], uint32_t(i), completed_[i]);
+  ReportCompletedChunk(chunk, seq, gw2::ReportOrder::CommitOrder, gw2::statsEnabled());
 }
 
 void CommandQueue::Retain(uint64_t seq, Allocation* allocation) {
