@@ -2,13 +2,17 @@
 #include "dxmt_compile_recipe.hpp"
 #include "Metal.hpp"
 #include "airconv_public.h"
+#include "dxmt_gw2_recipe_use.hpp"
 #include "dxmt_gw2_stats.hpp"
+#include "dxmt_gw2_switches.hpp"
 #include "log/log.hpp"
 #include "thread.hpp"
 #include "util_env.hpp"
 #include "util_string.hpp"
 #include "winemetal.h"
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <format>
 #include <memory>
 #include <mutex>
@@ -22,6 +26,8 @@
 //   'V' + shader SHA-1 + variant digest (40) + target (4) -> schema (u32), target (u32), airconv (u32),
 //                                                           kind (u8), the variant's inputs
 //   'R' + SHA-1 of the recipe (20)                       -> the recipe: schema (u32), target (u32), ...
+//   'U' + SHA-1 of the recipe (20) + session (8)         -> schema (u32), first use (u32 ms) (#124:
+//                                                           dxmt_gw2_recipe_use.hpp)
 // The target (SM50_SHADER_METAL_VERSION) is a translation input, so it is part of the V identity and
 // of every recipe. AIRCONV_VERSION isn't: a warm stage translates the DXBC with its own airconv, so a
 // V row only notes the airconv it was first recorded with.
@@ -67,6 +73,14 @@ struct Recorder {
   // counters: exchanged by the RECORD section
   std::atomic<uint64_t> shaders{0}, variants{0}, recipes{0}, unsupported_variants{0}, unsupported_pipelines{0},
       written{0}, present{0}, failed{0}, dropped_queue{0}, dropped_seen{0}, dropped_stop{0};
+  std::atomic<uint64_t> uses{0}; // gw2 (#124): use rows queued
+
+  // gw2 (#124): this session, for the use rows: its start in unix ms (the rows' session) and on the
+  // steady clock (their first-use times). The recorder is created by the process's first record.
+  const uint64_t session_id = uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                           std::chrono::system_clock::now().time_since_epoch())
+                                           .count());
+  const std::chrono::steady_clock::time_point session_start = std::chrono::steady_clock::now();
 
   // the writer thread's log lines (it never calls the logger)
   dxmt::mutex lines_mutex;
@@ -305,16 +319,17 @@ section(double, uint32_t) {
   uint64_t shaders = x(r.shaders), variants = x(r.variants), recipes = x(r.recipes),
            uv = x(r.unsupported_variants), up = x(r.unsupported_pipelines), written = x(r.written),
            present = x(r.present), failed = x(r.failed), dq = x(r.dropped_queue), ds = x(r.dropped_seen),
-           dst = x(r.dropped_stop);
+           dst = x(r.dropped_stop), uses = x(r.uses);
   size_t queued = r.queued.load(std::memory_order_relaxed);
   if (!shaders && !variants && !recipes && !uv && !up && !written && !present && !failed && !dq && !ds && !dst &&
-      !queued)
+      !queued && !uses)
     return {};
   auto stop = r.stop.load(std::memory_order_relaxed);
   return std::format("shaders={} variants={} recipes={} unsupported=variants:{},pipelines:{} written={} present={} "
                      "failed={} queued={} dropped=queue:{},seen:{},stopped:{}{}",
                      shaders, variants, recipes, uv, up, written, present, failed, queued, dq, ds, dst,
-                     stop == Stop::Budget ? " stopped=budget" : stop == Stop::WriterFailed ? " stopped=writer" : "");
+                     stop == Stop::Budget ? " stopped=budget" : stop == Stop::WriterFailed ? " stopped=writer" : "") +
+         std::format(" uses={}", uses); // gw2 (#124)
 }
 
 SectionRegistrar g_section("RECORD", section);
@@ -326,6 +341,23 @@ digestKey(char tag, const Sha1Digest &a, const Sha1Digest *b = nullptr) {
   if (b)
     key.append(reinterpret_cast<const char *>(b->data), sizeof(b->data));
   return key;
+}
+
+// gw2 (#124): DXMT_PSO_RECORD_USE (on unless "0"): the use rows, with recording on
+sw::Switch<bool> kRecordUse{"DXMT_PSO_RECORD_USE", true, sw::legacy::notZero};
+
+// gw2 (#124): one use row per recipe and session (the recorder's per-process dedup admits its key once)
+void
+noteUse(const Sha1Digest &recipe_key) {
+  static const bool on = kRecordUse();
+  if (!on)
+    return;
+  auto &r = recorder();
+  auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - r.session_start)
+                .count();
+  uint32_t first_ms = uint32_t(std::min<int64_t>(std::max<int64_t>(ms, 0), int64_t(UINT32_MAX)));
+  if (enqueue(recipeUseKey(recipe_key, r.session_id), recipeUseValue(first_ms)) == Admit::Queued)
+    r.uses.fetch_add(1, std::memory_order_relaxed);
 }
 
 } // namespace
@@ -387,6 +419,13 @@ recipePipeline(const compile::PipelineRecipe &recipe) {
   auto key = Sha1HashState::compute(b.data.data(), b.data.size());
   if (enqueue(digestKey('R', key), std::move(b.data)) == Admit::Queued)
     recorder().recipes.fetch_add(1, std::memory_order_relaxed);
+  noteUse(key); // gw2 (#124)
+}
+
+void
+recipeUse(const Sha1Digest &recipe_key) {
+  if (recipeRecording())
+    noteUse(recipe_key);
 }
 
 void

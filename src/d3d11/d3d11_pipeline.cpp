@@ -125,6 +125,7 @@ public:
     state_ = state;
     compile::completedWithoutRun(compile_job);
     gw2::warmCount(gw2::WarmCounter::LivePipelineHit);
+    gw2::recipeUse(key); // gw2 (#124): a warm hit is a use too (it never reaches recipePipeline)
     SetIsDone(true);
     return true;
   }

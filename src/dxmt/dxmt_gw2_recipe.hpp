@@ -68,6 +68,10 @@ void recipeVariantUnsupported();
 // (C3), serialized by the one canonical serializer. The recipe must carry the vertex identity.
 void recipePipeline(const compile::PipelineRecipe &recipe);
 void recipePipelineUnsupported();
+// gw2 (#124): a pipeline taken from warming's shared results instead of built: notes the recipe's use
+// for this session (a use row, DXMT_PSO_RECORD_USE), as recipePipeline does for a build. `recipe_key`
+// is the recipe's SHA-1 (compile::recipeKey with the variants' identities).
+void recipeUse(const Sha1Digest &recipe_key);
 
 // The writer thread's log lines, logged by the render thread at Present (try_lock only).
 void recipeLogPending();

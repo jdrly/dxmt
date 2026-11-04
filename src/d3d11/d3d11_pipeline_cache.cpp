@@ -460,7 +460,7 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
     std::atomic_bool ready_{false};
   };
 
-  // The warm thread: reads the recipes (first-use order, call 193), plans and submits speculative
+  // The warm thread: reads the recipes (#124: ranked by use, call 193), plans and submits speculative
   // jobs. It never calls the logger (the WARM section reports it).
   void warmThread() {
     env::setThreadName("dxmt-warm");
@@ -472,7 +472,15 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
     auto path = str::format("dxmt/", env::getExeName(), "/recipes_", gw2::kRecipeSchema, ".db");
     gw2::WarmPlan plan;
     // gw2 (#114): errors, BUSY and oversized rows are handled in warmRead and reported in WARM
-    gw2::warmRead(plan, gw2::warmEnumerateRecipes(path), metal_version, mode, max, warm_stop_);
+    // gw2 (#124): the use rows first, then the plan by use (DXMT_WARM_ORDER=rowid: #88's oldest first)
+    if (gw2::warmOrderByUse()) {
+      gw2::WarmUseTable use;
+      gw2::warmReadUses(use, gw2::warmEnumerateUses(path), warm_stop_);
+      gw2::warmRead(plan, gw2::warmEnumerateRecipes(path), metal_version, mode, max, warm_stop_, gw2::kWarmRowMax,
+                    &use);
+    } else {
+      gw2::warmRead(plan, gw2::warmEnumerateRecipes(path), metal_version, mode, max, warm_stop_);
+    }
     double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     gw2::warmPlanned(plan, ms);
     std::vector<WarmVariantJob *> variant_jobs;
