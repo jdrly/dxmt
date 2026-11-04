@@ -1,6 +1,7 @@
 #include "dxmt_gw2_metal4.hpp"
 #include "dxmt_gw2_lifetime.hpp"
 #include "dxmt_gw2_residency.hpp"
+#include "dxmt_gw2_switches.hpp"
 #include "log/log.hpp"
 #include "util_env.hpp"
 #include <atomic>
@@ -33,6 +34,18 @@ supportReason(WMTMetal4Support support) {
 }
 
 } // namespace
+
+namespace {
+// gw2 (#60): =1 only; not on the startup line (it never was). CreateSwapChain reads it too, each time.
+sw::Switch<bool> kMetalfxSpatialSwapchain{
+    "DXMT_METALFX_SPATIAL_SWAPCHAIN", false, sw::legacy::exactlyOne, sw::Line::Unlisted
+};
+} // namespace
+
+bool
+metalfxSpatialSwapchain() {
+  return kMetalfxSpatialSwapchain();
+}
 
 bool
 metal4Requested() {
@@ -74,7 +87,7 @@ metal4AttachQueue(WMT::Device device) {
     Logger::warn(std::format("Metal 4: unavailable ({}), staying on Metal 3", supportReason(support)));
     return;
   }
-  if (env::getEnvVar("DXMT_METALFX_SPATIAL_SWAPCHAIN") == "1") {
+  if (metalfxSpatialSwapchain()) {
     g_metal4.store(Metal4::Unsupported, std::memory_order_release);
     Logger::warn("Metal 4: DXMT_METALFX_SPATIAL_SWAPCHAIN=1: MetalFX upscaling stays on Metal 3, staying on Metal 3");
     return;

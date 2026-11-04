@@ -35,6 +35,8 @@
 namespace dxmt::gw2 {
 
 bool statsEnabled();
+// gw2 (#60): DXMT_STATS read from the environment now (each swapchain samples it when it is made)
+bool statsReadNow();
 
 // DXMT_HITCH_MS, resolved (default 50; 0 turns HITCH lines off)
 double hitchMs();

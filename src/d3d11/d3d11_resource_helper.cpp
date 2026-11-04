@@ -6,11 +6,19 @@
 #include "util_math.hpp"
 #include "log/log.hpp"
 #include "util_env.hpp"
+#include "dxmt_gw2_switches.hpp"
 #include <atomic>
 #include <mutex>
 #include <set>
 
 namespace dxmt {
+
+namespace {
+// gw2 (#60): =1 only (exactly "1"); the startup line reads them from the registry when it is logged,
+// as it read the environment before
+sw::Switch<bool> kStencilPfv{"DXMT_STENCIL_PFV", false, sw::legacy::exactlyOne};
+sw::Switch<bool> kDepthPfv{"DXMT_DEPTH_PFV", false, sw::legacy::exactlyOne};
+} // namespace
 
 template <>
 HRESULT ExtractEntireResourceViewDescription<D3D11_BUFFER_DESC,
@@ -378,8 +386,8 @@ CreateMTLTextureDescriptorInternal(
     // view (DEPTHVIEW, #2). GW2's 4K depth buffer is R24G8_TYPELESS with a shader view.
     // DXMT_STENCIL_PFV=1 keeps the flag on depth-stencil formats with a stencil plane.
     // gw2 (#2): DXMT_DEPTH_PFV=1 keeps it on the single-plane ones (R32_TYPELESS, R16_TYPELESS as depth).
-    static const bool stencil_pfv = env::getEnvVar("DXMT_STENCIL_PFV") == "1";
-    static const bool depth_pfv = env::getEnvVar("DXMT_DEPTH_PFV") == "1";
+    static const bool stencil_pfv = kStencilPfv();
+    static const bool depth_pfv = kDepthPfv();
     bool single_plane_depth = (BindFlags & D3D11_BIND_DEPTH_STENCIL) &&
                               (metal_format.PixelFormat == WMTPixelFormatDepth32Float ||
                                metal_format.PixelFormat == WMTPixelFormatDepth16Unorm);

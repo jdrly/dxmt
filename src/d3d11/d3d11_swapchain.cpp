@@ -20,6 +20,7 @@
 #include "dxmt_gw2_residency.hpp"
 #include "dxmt_gw2_stats.hpp"
 #include "dxmt_gw2_subsample.hpp"
+#include "dxmt_gw2_switches.hpp"
 #include "dxmt_gw2_timestamp.hpp"
 #include "dxmt_presenter.hpp"
 #include "log/log.hpp"
@@ -52,6 +53,12 @@ This value is 1 by default.
 constexpr size_t kSwapchainLatency = 1;
 
 namespace dxmt {
+
+namespace {
+// gw2 (#9, #60): DXMT_RENDER_THREAD_PRIORITY, strtoul's value (unset: 0); RaiseRenderThreadPriority
+// acts on 1-3 and logs anything above
+sw::Switch<uint32_t> kRenderThreadPriority{"DXMT_RENDER_THREAD_PRIORITY", 0, sw::legacy::strtoul32};
+} // namespace
 
 WMTPixelFormat ConvertSwapChainFormat(DXGI_FORMAT format) {
   switch (format) {
@@ -1068,7 +1075,10 @@ public:
   }
 
   // gw2 (#3): the startup line, with every fork switch's effective value, taken from the code that
-  // owns it where it is reachable from here
+  // owns it where it is reachable from here. gw2 (#60): generated in this order; a field without a
+  // value is a declared switch (sw::Switch) the registry formats. A switch declared elsewhere and not
+  // named here follows these fields, by name, before `cpus` and `refresh`: a new switch declares
+  // itself instead of adding a field here.
   void LogStartup() {
     auto &queue = device_->GetDXMTDevice().queue();
     auto &bg = bgConfig();
@@ -1079,35 +1089,48 @@ public:
     double refresh = init_refresh_rate_ != DBL_MAX ? init_refresh_rate_ : 0.0;
     std::string deadline = present_deadline_ms_ < 0 ? std::string("refresh") : std::format("{}", present_deadline_ms_);
     std::string max_latency = queue.MaxLatencyOverride() ? std::to_string(queue.MaxLatencyOverride()) : "unset";
-    gw2::logStartup(std::format(
-        "DXMT_STATS=1 DXMT_HITCH_MS={} DXMT_PRESENT_SPLIT={} DXMT_DISPLAY_SYNC={} DXMT_PRESENT_DEADLINE={} "
-        "DXMT_CAP_LIMITER={} DXMT_STENCIL_PFV={} DXMT_DEPTH_PFV={} DXMT_BG_FPS={} DXMT_BG_FPS_MINIMIZED={} "
-        "DXMT_BG_POLICY={} DXMT_RENDER_THREAD_PRIORITY={} DXMT_PSO_BLEND_HASH={} DXMT_PSO_MRU={} "
-        "DXMT_PSO_TOPOLOGY_KEEP={} DXMT_CHUNKS={} DXMT_MAX_FRAME_LATENCY={} DXMT_COMPILE_WAIT_MS={} "
-        "DXMT_PSO_ARCHIVE={} DXMT_PSO_ARCHIVE_DIR={} DXMT_PSO_FLUSH_EVERY={} DXMT_PROMOTE_FLUSH_MIN={} "
-        "DXMT_PROMOTE_FLUSH_MS={} DXMT_TIMESTAMP_MODE={} DXMT_MAP_FAST={} DXMT_SKIP_REBIND={} DXMT_CONTROL={} "
-        "DXMT_RESIDENCY_SET={} DXMT_UNRETAINED={} DXMT_LIFETIME_CHECK={} DXMT_METAL4={} "
-        "DXMT_SUBSAMPLE_METALFX={} DXMT_PSO_RECORD={} cpus={} refresh={}",
-        gw2::hitchMs(), int(queue.argument_encoding_ctx.presentSplit()), int(display_sync_vsync_), deadline,
-        int(cap_limiter_),
-        // read as d3d11_resource_helper.cpp and RaiseRenderThreadPriority read them
-        int(env::getEnvVar("DXMT_STENCIL_PFV") == "1"), int(env::getEnvVar("DXMT_DEPTH_PFV") == "1"), bg.fps,
-        bg.fps_minimized, bg.policy == BgPolicy::Occlusion ? "occlusion" : "focus",
-        std::strtoul(env::getEnvVar("DXMT_RENDER_THREAD_PRIORITY").c_str(), nullptr, 10), int(pso.blend_hash),
-        int(pso.mru), int(pso.topology_keep), queue.ChunkCount(), max_latency, compile.wait_ms, archive,
-        compile.archive_dir.empty() ? std::string("default") : compile.archive_dir, compile.flush_every,
-        gw2::promoteFlushMin(), gw2::promoteFlushMs(), // gw2 (#4): as the immediate context parsed them
-        gw2::timestampModeName(gw2::timestampMode()), // gw2 (#24)
-        int(gw2::mapFast()),                          // gw2 (#25)
-        int(gw2::skipRebind()),                       // gw2 (#30)
-        gw2::controlPath().empty() ? std::string("off") : gw2::controlPath(), // gw2 (#7)
-        gw2::residencySetState(),                     // gw2 (#29)
-        gw2::lifetime::unretainedState(),             // gw2 (#31)
-        gw2::lifetime::checkState(),                  // gw2 (#31)
-        gw2::metal4State(),                           // gw2 (#32)
-        gw2::subsampleModeName(),                     // gw2 (#56)
-        int(gw2::recipeRecording()),                  // gw2 (#57)
-        GetActiveProcessorCount(ALL_PROCESSOR_GROUPS), refresh
+    gw2::logStartup(sw::startupLine(
+        sw::processRegistry(),
+        {
+            {"DXMT_STATS", std::nullopt}, // its provider: the process's value, 1 here
+            {"DXMT_HITCH_MS", std::format("{}", gw2::hitchMs())},
+            {"DXMT_PRESENT_SPLIT", std::format("{}", int(queue.argument_encoding_ctx.presentSplit()))},
+            {"DXMT_DISPLAY_SYNC", std::format("{}", int(display_sync_vsync_))},
+            {"DXMT_PRESENT_DEADLINE", deadline},
+            {"DXMT_CAP_LIMITER", std::format("{}", int(cap_limiter_))},
+            {"DXMT_STENCIL_PFV", std::nullopt}, // read now, as d3d11_resource_helper.cpp parses it
+            {"DXMT_DEPTH_PFV", std::nullopt},
+            {"DXMT_BG_FPS", std::format("{}", bg.fps)},
+            {"DXMT_BG_FPS_MINIMIZED", std::format("{}", bg.fps_minimized)},
+            {"DXMT_BG_POLICY", bg.policy == BgPolicy::Occlusion ? "occlusion" : "focus"},
+            {"DXMT_RENDER_THREAD_PRIORITY", std::nullopt}, // read now, as RaiseRenderThreadPriority parses it
+            {"DXMT_PSO_BLEND_HASH", std::format("{}", int(pso.blend_hash))},
+            {"DXMT_PSO_MRU", std::format("{}", int(pso.mru))},
+            {"DXMT_PSO_TOPOLOGY_KEEP", std::format("{}", int(pso.topology_keep))},
+            {"DXMT_CHUNKS", std::format("{}", queue.ChunkCount())}, // the ring in effect
+            {"DXMT_MAX_FRAME_LATENCY", max_latency},
+            {"DXMT_COMPILE_WAIT_MS", std::format("{}", compile.wait_ms)},
+            {"DXMT_PSO_ARCHIVE", archive},
+            {"DXMT_PSO_ARCHIVE_DIR", compile.archive_dir.empty() ? std::string("default") : compile.archive_dir},
+            {"DXMT_PSO_FLUSH_EVERY", std::format("{}", compile.flush_every)},
+            // gw2 (#4): as the immediate context parsed them
+            {"DXMT_PROMOTE_FLUSH_MIN", std::format("{}", gw2::promoteFlushMin())},
+            {"DXMT_PROMOTE_FLUSH_MS", std::format("{}", gw2::promoteFlushMs())},
+            {"DXMT_TIMESTAMP_MODE", gw2::timestampModeName(gw2::timestampMode())}, // gw2 (#24)
+            {"DXMT_MAP_FAST", std::format("{}", int(gw2::mapFast()))},             // gw2 (#25)
+            {"DXMT_SKIP_REBIND", std::format("{}", int(gw2::skipRebind()))},       // gw2 (#30)
+            {"DXMT_CONTROL", gw2::controlPath().empty() ? std::string("off") : gw2::controlPath()}, // gw2 (#7)
+            {"DXMT_RESIDENCY_SET", gw2::residencySetState()},                      // gw2 (#29)
+            {"DXMT_UNRETAINED", gw2::lifetime::unretainedState()},                 // gw2 (#31)
+            {"DXMT_LIFETIME_CHECK", gw2::lifetime::checkState()},                  // gw2 (#31)
+            {"DXMT_METAL4", gw2::metal4State()},                                   // gw2 (#32)
+            {"DXMT_SUBSAMPLE_METALFX", gw2::subsampleModeName()},                  // gw2 (#56)
+            {"DXMT_PSO_RECORD", std::format("{}", int(gw2::recipeRecording()))},   // gw2 (#57)
+        },
+        {
+            {"cpus", std::format("{}", GetActiveProcessorCount(ALL_PROCESSOR_GROUPS))},
+            {"refresh", std::format("{}", refresh)},
+        }
     ));
   }
 
@@ -1121,10 +1144,7 @@ public:
   // thread as it was. No restore: the render thread lives as long as the game, and only the thread
   // itself can change its QoS class, which a swapchain destroyed on another thread couldn't do.
   void RaiseRenderThreadPriority() {
-    static const uint32_t s_mode = [] {
-      auto v = env::getEnvVar("DXMT_RENDER_THREAD_PRIORITY");
-      return v.empty() ? 0u : uint32_t(std::strtoul(v.c_str(), nullptr, 10));
-    }();
+    static const uint32_t s_mode = kRenderThreadPriority();
     if (!s_mode)
       return;
     static thread_local bool t_done = false;
@@ -1455,7 +1475,7 @@ public:
     double next_drawable = 0, next_drawable_max = 0, wait = 0, wait_max = 0;
     uint32_t br_plain = 0, br_deadline = 0, br_after = 0;
   } stats_;
-  bool stats_enabled_ = env::getEnvVar("DXMT_STATS") != "0";
+  bool stats_enabled_ = gw2::statsReadNow(); // gw2 (#60): the DXMT_STATS switch, read per swapchain
   std::atomic<double> stats_deadline_ms_ = 0;
   std::atomic<uint32_t> stats_sync_interval_ = 0;
 
@@ -1931,7 +1951,7 @@ CreateSwapChain(
       pDesc->BufferCount != 1) {
     WARN("CreateSwapChain: unsupported swap effect ", pDesc->SwapEffect, " with backbuffer size ", pDesc->BufferCount);
   }
-  if (env::getEnvVar("DXMT_METALFX_SPATIAL_SWAPCHAIN") == "1") {
+  if (gw2::metalfxSpatialSwapchain()) { // gw2 (#60): the switch dxmt_gw2_metal4.cpp declares
     if (pDevice->GetMTLDevice().supportsFXSpatialScaler()) {
       *ppSwapChain = new MTLD3D11SwapChain<true>(
           pFactory, pDevice, layer_factory.ptr(), hWnd, pDesc, pFullscreenDesc
