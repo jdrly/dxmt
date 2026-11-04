@@ -5,7 +5,7 @@
 // gw2 (#75): the PSO archive's generation publisher (src/winemetal/unix/pso_archive_publish.h) with a
 // fake shard writer (no Metal): round trips, a failure at every publish step leaving the last good
 // generation, corrupt shards, manifests and index, the writer lock, collection and session
-// retention. Works in the directory given (made empty first).
+// retention, and exclusion-only generations. Works in the directory given (made empty first).
 
 #include "pso_archive_publish.h"
 #include <dirent.h>
@@ -319,6 +319,39 @@ test_excluded_and_codec(void) {
   pso_gen_close(&t);
 }
 
+// #84 review: an exclusion-only generation (no shard) carries every shard and adds the shapes; a
+// failure at any of its steps (4-7; 1-3 write no shard) leaves the last good generation
+static void
+test_exclusion_only(void) {
+  for (int step = 0; step <= 7; step++) {
+    reset_dir();
+    struct pso_gen_store s = {0};
+    open_store(&s, 100, 1, 4);
+    uint64_t k[] = {1, 2};
+    CHECK(!publish(&s, "the only shard", k, 2, false));
+    pso_gen_close(&s);
+    struct pso_gen_store t = {0};
+    open_store(&t, 200, 2, 4);
+    t.fail_at = step;
+    char why[256];
+    uint64_t ex[] = {9}, bytes = 77;
+    const char *failed = pso_gen_publish(&t, NULL, NULL, NULL, 0, true, ex, 1, &bytes, why, sizeof(why));
+    bool should_fail = step >= 4;
+    CHECK(!failed == !should_fail);
+    if (!failed)
+      CHECK(bytes == 0 && t.current.generation == 2 && t.current.shard_count == 1 && t.current.excluded_count == 1 &&
+            t.current.excluded[0] == 9 && pso_gen_session_shards(&t) == 0);
+    pso_gen_close(&t);
+    struct pso_gen_store u = {0};
+    open_store(&u, 300, 3, 4);
+    CHECK(u.current.generation == (should_fail ? 1u : 2u));
+    CHECK(u.current.shard_count == 1 && u.current.shards[0].key_count == 2);
+    CHECK(u.current.excluded_count == (should_fail ? 0u : 1u));
+    CHECK(count_files(".shard") == 1 && count_files(".tmp") == 0);
+    pso_gen_close(&u);
+  }
+}
+
 int
 main(int argc, char **argv) {
   snprintf(g_dir, sizeof(g_dir), "%s", argc > 1 ? argv[1] : "/tmp/pso_archive_publish_test");
@@ -329,6 +362,7 @@ main(int argc, char **argv) {
   test_lock();
   test_sessions_kept();
   test_excluded_and_codec();
+  test_exclusion_only();
   if (failures) {
     printf("%d failures\n", failures);
     return 1;

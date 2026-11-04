@@ -351,7 +351,13 @@ pso_read_keys(NSString *path, uint64_t **out, uint64_t *count) {
 static const char *
 pso_test_fault(char *why, size_t why_size) {
 #ifdef PSO_ARCHIVE_TESTING
-  static int fake_failures = -1;
+  static int fake_failures = -1, fake_after = -1;
+  if (fake_after < 0) /* gw2 (#75): writes that succeed before the fake failures begin */
+    fake_after = getenv("PSO_ARCHIVE_TEST_AFTER") ? atoi(getenv("PSO_ARCHIVE_TEST_AFTER")) : 0;
+  if (fake_after > 0) {
+    fake_after--;
+    return NULL;
+  }
   if (fake_failures < 0)
     fake_failures = getenv("PSO_ARCHIVE_TEST_FAIL") ? atoi(getenv("PSO_ARCHIVE_TEST_FAIL")) : 0;
   if (fake_failures > 0) {
@@ -418,7 +424,8 @@ pso_write_shard(void *ctx, const char *path, char *why, size_t why_size) {
 }
 
 /* gw2 (#75): publishes `archive`, holding the records from `from` on that aren't skipped, as a new
-   generation (`merge`: replacing this session's earlier shards) */
+   generation (`merge`: replacing this session's earlier shards); nil: an exclusion-only generation
+   (the current shards and this session's excluded shapes) */
 static const char *
 pso_publish(struct pso_archive *a, id<MTLBinaryArchive> archive, uint64_t from, bool merge, uint64_t *size,
             char *why, size_t why_size) {
@@ -436,8 +443,19 @@ pso_publish(struct pso_archive *a, id<MTLBinaryArchive> archive, uint64_t from, 
   for (uint64_t i = 0; ex && i <= p->excluded_session.mask; i++)
     if (p->excluded_session.slots[i])
       ex[ex_n++] = p->excluded_session.slots[i];
-  const char *failed =
-      pso_gen_publish(&p->store, pso_write_shard, archive, keys, n, merge, ex, ex_n, size, why, why_size);
+#ifdef PSO_ARCHIVE_TESTING
+  /* tests/gw2/pso_archive_generations.zsh: PSO_GEN_TEST_FAIL_AT=<step>:<call> fails this
+     instance's <call>th publish (1-based) at the publisher's <step> */
+  static int fail_step = -1, fail_call, calls;
+  if (fail_step < 0) {
+    const char *v = getenv("PSO_GEN_TEST_FAIL_AT");
+    fail_step = v ? atoi(v) : 0;
+    fail_call = v && strchr(v, ':') ? atoi(strchr(v, ':') + 1) : 1;
+  }
+  p->store.fail_at = ++calls == fail_call ? fail_step : 0;
+#endif
+  const char *failed = pso_gen_publish(&p->store, archive ? pso_write_shard : NULL, archive, keys, n, merge, ex, ex_n,
+                                       size, why, why_size);
   free(keys);
   free(ex);
   return failed;
@@ -581,6 +599,20 @@ pso_flush_locked(struct pso_archive *a, struct pso_report *r) {
    one flush tries (each failure that names a pipeline excludes that shape and tries again) */
 enum { kSessionShards = 8, kPublishAttempts = 3 };
 
+/* this session excluded a shape the current generation doesn't record yet */
+static bool
+pso_new_exclusions(const struct pso_persist *p) {
+  const struct pso_keyset *ex = &p->excluded_session;
+  for (uint64_t i = 0; ex->slots && i <= ex->mask; i++) {
+    bool recorded = false;
+    for (uint64_t j = 0; ex->slots[i] && !recorded && j < p->store.current.excluded_count; j++)
+      recorded = p->store.current.excluded[j] == ex->slots[i];
+    if (ex->slots[i] && !recorded)
+      return true;
+  }
+  return false;
+}
+
 static void
 pso_hex12(const uint8_t *sha, char out[13]) {
   for (unsigned i = 0; i < 6; i++)
@@ -615,10 +647,17 @@ pso_flush_generations_locked(struct pso_archive *a, struct pso_report *r) {
   uint64_t size = 0, named = 0;
   char why[1024];
   const char *failed = NULL;
+  bool exclusion_only = false;
+  uint64_t generation_before = p->store.current.generation;
   for (int attempt = 0; attempt < kPublishAttempts; attempt++) {
-    if (!merge && !pso_records_kept_keys(&p->records, from, NULL)) {
-      failed = NULL; /* everything new was excluded: nothing to publish */
+    if (!pso_records_kept_keys(&p->records, from, NULL)) {
+      /* everything new is an excluded shape: no shard, but the exclusions must reach the store
+         before pending is cleared, or a later session captures them again */
+      exclusion_only = true;
       size = 0;
+      failed = pso_new_exclusions(p) ? pso_publish(a, nil, from, false, &size, why, sizeof(why)) : NULL;
+      if (failed)
+        report_line(r, "PSO archive: publish of generation %llu failed: %s", gen, failed);
       break;
     }
     bool fresh = merge || p->serialized || p->dirty;
@@ -663,8 +702,8 @@ pso_flush_generations_locked(struct pso_archive *a, struct pso_report *r) {
                 failed, (unsigned long long)p->store.current.generation);
     return -1;
   }
-  uint64_t kept = pso_records_kept_keys(&p->records, from, NULL);
-  bool published = kept || merge;
+  uint64_t kept = exclusion_only ? 0 : pso_records_kept_keys(&p->records, from, NULL);
+  bool published = p->store.current.generation != generation_before;
   p->pending = 0;
   p->published_upto = p->records.count;
   p->dirty = false;
@@ -688,13 +727,24 @@ pso_flush_generations_locked(struct pso_archive *a, struct pso_report *r) {
                 (unsigned long long)n);
     return 0;
   }
+  if (exclusion_only) {
+    atomic_fetch_add(&a->stats.flushes, 1);
+    atomic_store(&a->stats.generation, p->store.current.generation);
+    atomic_store(&a->stats.published, 0);
+    report_line(r, "PSO archive: published generation %llu: no shard, the %llu new pipelines are all excluded shapes; "
+                "%llu shards, %llu excluded shapes, in %.0f ms",
+                (unsigned long long)p->store.current.generation, (unsigned long long)n,
+                (unsigned long long)p->store.current.shard_count, (unsigned long long)p->store.current.excluded_count,
+                ms);
+    return 1;
+  }
   atomic_fetch_add(&a->stats.flushes, 1);
   atomic_store(&a->stats.flushed_bytes, size);
   atomic_store(&a->stats.generation, p->store.current.generation);
   atomic_store(&a->stats.published, kept);
   const struct pso_gen_manifest *m = &p->store.current;
   char h[13] = "", note[160] = "";
-  pso_hex12(m->shards[0].sha256, h);
+  pso_hex12(p->store.last_sha256, h);
   if (merge)
     snprintf(note, sizeof(note), " (merged this session's %llu shards into one)", (unsigned long long)merged);
   if (named)

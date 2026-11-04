@@ -7,7 +7,8 @@
 # Checks each session's report and counters for what the publisher must do: publish a delta shard per
 # flush without Metal's re-serialization failure, serve the next session's lookups, exclude a failing
 # shape by its key (now and in later sessions), fall back to the last good generation, keep one
-# writer, survive a kill, and merge a session's shards.
+# writer, survive a kill, merge a session's shards, and publish exclusions that come without a
+# shard (#84 review).
 
 emulate -L zsh
 setopt pipefail
@@ -27,7 +28,7 @@ session() {
   while [[ $1 == *=* ]]; do envs+=($1); shift; done
   step=$((step + 1))
   local out=$W/session$step.out
-  env $envs $N $W "$@" >$out 2>&1
+  env $envs $N ${D:-$W} "$@" >$out 2>&1
   local e bad=0
   for e in $expects; do
     if [[ $e == '!'* ]]; then
@@ -84,6 +85,26 @@ session "merged this session's 8 shards into one" 'published generation 18' \
 n=$(print -l $G/g*.manifest | wc -l)
 (( n == 2 )) || { print "FAIL: $n manifests on disk, want 2"; fails=$((fails + 1)) }
 ls $G | grep -q '\.tmp$' && { print "FAIL: leftover .tmp"; fails=$((fails + 1)) }
+
+# 10. a fresh store whose only new pipeline is a failing shape: the exclusion is published without a
+#     shard; the first exclusion-only publish fails at the index (publish call 2, step 6) and pending
+#     stays, so the next flush publishes it
+D=$W/sole
+session 'Metal names pipeline no. 0 of an archive' 'flush ret=-1' 'publish of generation 1 failed after' \
+  'published generation 1: no shard, the 1 new pipelines are all excluded shapes; 0 shards, 1 excluded' \
+  'skipped=1' 'generation=1 published=0' \
+  -- PSO_ARCHIVE_TEST_FAIL=1 PSO_ARCHIVE_TEST_INDEX=0 PSO_GEN_TEST_FAIL_AT=6:2 b31 f f q
+# 11. another process sees it excluded: the miss classified, the add refused, nothing to publish
+session '1 failing shapes are excluded' 'miss_excluded=1' 'miss_new=0' 'excluded=1' 'flush ret=0' 'added=0' \
+  -- b31 f q
+# 12. a sole failing delta after a successful publish: the exclusion-only generation keeps the shard
+D=$W/after
+session 'published generation 1: 1 pipelines' 'published generation 2: no shard, the 1 new pipelines are all' \
+  '1 shards, 1 excluded shapes' \
+  -- PSO_ARCHIVE_TEST_AFTER=1 PSO_ARCHIVE_TEST_FAIL=1 PSO_ARCHIVE_TEST_INDEX=0 b40 f b41 f q
+# 13. and the next process: a hit for the first, the second excluded
+session 'hits=1' 'miss_excluded=1' 'excluded=1' -- b40 b41 f q
+D=
 
 (( fails == 0 )) || { print "$fails failures (logs in $W)"; exit 1 }
 print "pso_archive_generations: ok"

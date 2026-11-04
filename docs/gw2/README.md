@@ -439,7 +439,9 @@ one rewritten file per session, from the instance's pure policy (`pso_archive_po
   a failing shape. Every pipeline of its full key is left out, the shard is rebuilt without them and
   written again (at most 3 tries a flush), and the key is excluded from capture, recorded in the
   manifest for later sessions. Nothing broader is excluded: no class of pipelines (fragment-less or
-  any other) is skipped. Excluded shapes are still built and used, only not archived.
+  any other) is skipped. Excluded shapes are still built and used, only not archived. A flush whose
+  new pipelines are all excluded publishes an exclusion-only generation (no new shard, every shard
+  carried); until that succeeds the flush counts as failed and the next one tries again.
 
 | Line | When |
 |---|---|
@@ -455,7 +457,8 @@ one rewritten file per session, from the instance's pure policy (`pso_archive_po
 | `PSO archive: publish of generation G failed: <reason>` | One try of a flush failed (Metal's error, or the step: `cannot write the manifest`, `cannot replace the index`, …) |
 | `PSO archive: Metal names pipeline no. N of an archive never serialized before: <shape> (its key is excluded from capture from now on)` | That failure named a pipeline: its shape (as in #52's line); the next try rebuilds without it |
 | `PSO archive: publish of generation G failed after T ms: <reason> (generation P stays)` | The flush gave up; `CURRENT` still names generation P |
-| `PSO archive: nothing to publish: the N new pipelines are all excluded shapes` | A flush whose new pipelines were all excluded |
+| `PSO archive: published generation G: no shard, the N new pipelines are all excluded shapes; S shards, E excluded shapes, in T ms` | A flush whose new pipelines were all excluded, with an exclusion the store didn't record yet: the exclusion-only generation |
+| `PSO archive: nothing to publish: the N new pipelines are all excluded shapes` | The same, when the store already records every one of those exclusions |
 
 ### CMDS
 
@@ -1009,4 +1012,6 @@ generation, corrupt shards, manifests and index, the writer lock, collection and
 failures, a truncated archive, the cap, retention, the exit report) through the instance with the
 publisher off and through #55's file (`tests/gw2/fixtures/legacy_pso_archive.c`, unchanged), and
 compares reports, counters, files and `.keys` byte for byte; `pso_archive_generations.zsh` checks the
-publisher across processes (hits, exclusion, last good generation, lock, a `kill -9`, merging).
+publisher across processes (hits, exclusion, last good generation, lock, a `kill -9`, merging, and
+exclusion-only generations: a fresh store's sole failing pipeline, a failing sole delta after a publish,
+a failed exclusion-only publish retried).

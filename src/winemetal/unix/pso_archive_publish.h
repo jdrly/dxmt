@@ -73,6 +73,7 @@ struct pso_gen_store {
   struct pso_gen_manifest current; /* loaded at open, replaced by each publish */
   uint64_t next_generation;
   uint64_t published; /* generations this session published */
+  uint8_t last_sha256[32]; /* the shard of the last publish that wrote one */
   /* tests only: fail publish step N (1 shard write, 2 shard sync, 3 shard rename, 4 manifest write,
      5 manifest rename, 6 index write, 7 index rename); 0: never */
   int fail_at;
@@ -99,7 +100,9 @@ uint64_t pso_gen_session_shards(const struct pso_gen_store *s);
 /* Publishes a generation: a new shard of this session, written now by `write` (its persisted
    `keys`); this session's earlier shards unless `replace_session`; the usable shards of the newest
    keep_sessions - 1 other sessions of the current generation; and the current generation's excluded
-   shapes plus `excluded`. Writer only. NULL on success (the shard's size in *bytes), else why: the
+   shapes plus `excluded`. With `write` NULL, an exclusion-only generation: no new shard (keys and
+   replace_session ignored), every current shard carried as above, the excluded shapes added. Writer
+   only. NULL on success (the shard's size in *bytes), else why: the
    callback's error text as it gave it, or the step that failed. */
 const char *pso_gen_publish(struct pso_gen_store *s, pso_gen_write_fn write, void *ctx, const uint64_t *keys,
                             uint64_t key_count, bool replace_session, const uint64_t *excluded,

@@ -609,23 +609,28 @@ pso_gen_publish(struct pso_gen_store *s, pso_gen_write_fn write, void *ctx, cons
   char tmp[PATH_MAX + 64], final[PATH_MAX + 80];
   snprintf(tmp, sizeof(tmp), "%s/shard-%llu.tmp", s->dir, (unsigned long long)s->pid);
 
-  /* 1-3: the shard, complete and synced, then in place under its content's name */
-  if (s->fail_at == 1)
-    return fail(why, why_size, "cannot write the shard (test)");
-  const char *failed = write(ctx, tmp, why, why_size);
-  if (failed) {
-    unlink(tmp);
-    return failed;
-  }
+  /* 1-3: the shard, complete and synced, then in place under its content's name (none for an
+     exclusion-only generation) */
   struct pso_gen_shard shard = {.started = s->started, .pid = s->pid, .usable = true};
-  if (s->fail_at == 2 || !sync_path(tmp) || !sha_file(tmp, &shard.size, shard.sha256)) {
-    unlink(tmp);
-    return fail(why, why_size, "cannot sync or read back the shard");
-  }
-  pso_gen_shard_path(s, &shard, final, sizeof(final));
-  if (s->fail_at == 3 || rename(tmp, final)) {
-    unlink(tmp);
-    return fail(why, why_size, "cannot rename the shard into place");
+  if (write) {
+    if (s->fail_at == 1)
+      return fail(why, why_size, "cannot write the shard (test)");
+    const char *failed = write(ctx, tmp, why, why_size);
+    if (failed) {
+      unlink(tmp);
+      return failed;
+    }
+    if (s->fail_at == 2 || !sync_path(tmp) || !sha_file(tmp, &shard.size, shard.sha256)) {
+      unlink(tmp);
+      return fail(why, why_size, "cannot sync or read back the shard");
+    }
+    pso_gen_shard_path(s, &shard, final, sizeof(final));
+    if (s->fail_at == 3 || rename(tmp, final)) {
+      unlink(tmp);
+      return fail(why, why_size, "cannot rename the shard into place");
+    }
+  } else {
+    replace_session = false; /* nothing replaces this session's shards */
   }
 
   /* the new generation: this session's new shard and (unless it replaces them) its earlier ones,
@@ -634,7 +639,7 @@ pso_gen_publish(struct pso_gen_store *s, pso_gen_write_fn write, void *ctx, cons
   bool ok = true;
   m.shards = calloc(s->current.shard_count + 1, sizeof(*m.shards));
   ok = m.shards != NULL;
-  if (ok) {
+  if (ok && write) {
     shard.key_count = key_count;
     shard.keys = dup_keys(keys, key_count, &ok);
     m.shards[m.shard_count++] = shard;
@@ -703,6 +708,8 @@ pso_gen_publish(struct pso_gen_store *s, pso_gen_write_fn write, void *ctx, cons
   s->current = m;
   s->next_generation++;
   s->published++;
+  if (write)
+    memcpy(s->last_sha256, shard.sha256, 32);
   collect(s, &s->current, &old);
   pso_gen_manifest_free(&old);
   if (bytes)
