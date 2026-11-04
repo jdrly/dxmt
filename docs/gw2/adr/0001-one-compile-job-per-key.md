@@ -16,7 +16,9 @@ kept by convention. The pointer-keyed front-end lookup stays as the fast path in
 - C2 adds the `declared` policy behind `DXMT_COMPILE_DEMAND` (off): dependencies taken at submit,
   the demand lane with closure promotion, and speculative admission (one at a time, none while a
   demand waits). Owning jobs moved on to C4, with the stable keys that need them.
-- Stable keys and shared results come with C3/C4; warming (W2/W3) acquires speculative jobs through the
+- C3 adds the pipeline recipe (`compile::PipelineRecipe`, one canonical serializer shared with
+  #57's recorder) and the builder port (`compile::PipelineBuilder`; the Metal 3 adapter builds every
+  plain graphics pipeline, a recording fake serves tests). Stable keys and shared results come with C4; warming (W2/W3) acquires speculative jobs through the
   service and keeps no queue or key table of its own.
 
 Source: GW2 on Mac `council/2026-11-04-arch-grill/final.md` §1 (ADR draft 0001).

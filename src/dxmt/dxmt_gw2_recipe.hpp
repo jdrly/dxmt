@@ -23,7 +23,9 @@
 #include <cstring>
 #include <vector>
 
-struct WMTRenderPipelineInfo;
+namespace dxmt::compile {
+struct PipelineRecipe; // dxmt_compile_recipe.hpp (C3)
+}
 
 namespace dxmt::gw2 {
 
@@ -62,10 +64,9 @@ void recipeShader(const Sha1Digest &sha1, const void *bytecode, size_t length);
 bool recipeVariant(const Sha1Digest &shader, const Sha1Digest &variant, uint32_t metal_version,
                    RecipeVariantKind kind, RecipeBytes &&inputs);
 void recipeVariantUnsupported();
-// A plain graphics pipeline's build (the compile worker, right before Metal builds it). `ps_*`
-// null for a pipeline without a pixel shader.
-void recipePipeline(const Sha1Digest &vs_shader, const Sha1Digest &vs_variant, const Sha1Digest *ps_shader,
-                    const Sha1Digest *ps_variant, uint32_t metal_version, const WMTRenderPipelineInfo &info);
+// A plain graphics pipeline's build (the compile worker, right before Metal builds it): its recipe
+// (C3), serialized by the one canonical serializer. The recipe must carry the vertex identity.
+void recipePipeline(const compile::PipelineRecipe &recipe);
 void recipePipelineUnsupported();
 
 // The writer thread's log lines, logged by the render thread at Present (try_lock only).
