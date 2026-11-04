@@ -33,6 +33,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 using namespace dxmt;
@@ -847,6 +848,120 @@ declaredUnknownDependency() {
   std::printf("%s declared, unknown dependency parks: %s %s %s\n", ok ? "ok  " : "FAIL", a.c_str(), b.c_str(), c.c_str());
 }
 
+// A check whose failure would leave a demand waiting forever: report and end the process.
+#define CHECK_OR_EXIT(cond, ...)                                                                                  \
+  do {                                                                                                            \
+    if (!(cond)) {                                                                                                \
+      std::printf("FAIL %s:%d: %s: ", __FILE__, __LINE__, #cond);                                                 \
+      std::printf(__VA_ARGS__);                                                                                   \
+      std::printf("\n1 FAILED (a demand would wait forever)\n");                                                  \
+      std::fflush(stdout);                                                                                        \
+      _exit(1);                                                                                                   \
+    }                                                                                                             \
+  } while (0)
+
+// #74 review, Blocker: a normal job parks on a dependency not submitted yet; a demand on the job;
+// then the dependency is submitted as speculative. The demand must reach it (else speculative
+// admission refuses it while the demand waits, and the demand waits for it: forever).
+static void
+declaredLateSpeculativeDependency() {
+  Scenario sc;
+  sc.add();               // 0: D, submitted late, speculative
+  auto *p = sc.add({0});  // 1: P, normal
+  Gate gate;
+  for (auto &j : sc.jobs)
+    j->gate = &gate;
+  auto *d = sc.jobs[0].get();
+  compile::Service<FakeJob *> sched(declared(2, 2));
+  sched.submit(p);
+  gatedNow(gate, 2);
+  auto a = releaseJob(gate, 1); // P parks on the unknown D
+  std::thread demander([&] { compile::demand(p->record, p->ready); });
+  while (true) {
+    std::lock_guard<std::mutex> l(g_waits_mutex);
+    if (!g_waits.empty() && g_waits.back().state == compile::JobState::Parked)
+      break;
+  }
+  sched.submit(d, compile::Lane::Speculative);
+  auto g = gatedNow(gate, 2);
+  CHECK_OR_EXIT(g == std::set<int>({0}), "late dependency: the demand reaches the speculative dependency (gated %s)",
+                str(g).c_str());
+  auto b = releaseJob(gate, 0);
+  g = gatedNow(gate, 2);
+  CHECK_OR_EXIT(g == std::set<int>({1}), "late dependency: the demanded job resumes (gated %s)", str(g).c_str());
+  auto c = releaseJob(gate, 1);
+  demander.join();
+  bool ok = a == "1->park0" && b == "0->done" && c == "1->done";
+  CHECK(ok, "late dependency: %s %s %s", a.c_str(), b.c_str(), c.c_str());
+  std::printf("%s declared, demand reaches a late speculative dependency: %s %s %s\n", ok ? "ok  " : "FAIL", a.c_str(),
+              b.c_str(), c.c_str());
+}
+
+// #74 review, High: a speculative job parked on an unknown dependency resumes through speculative
+// admission: not while a demand waits, not beside another speculative job.
+static void
+declaredSpeculativeResume() {
+  {
+    // (a) a demand pending on an unrelated job
+    Scenario sc;
+    sc.add();              // 0: U, unknown at first, normal
+    auto *s1 = sc.add({0}); // 1: S, speculative
+    auto *n = sc.add();    // 2: N, normal, demanded
+    Gate gate;
+    for (auto &j : sc.jobs)
+      j->gate = &gate;
+    compile::Service<FakeJob *> sched(declared(3, 3));
+    sched.submit(n);
+    sched.submit(s1, compile::Lane::Speculative);
+    auto g = gatedNow(gate, 3);
+    CHECK(g == std::set<int>({1, 2}), "resume (a): N and S run (gated %s)", str(g).c_str());
+    auto a = releaseJob(gate, 1); // S parks on U
+    std::thread demander([&] { compile::demand(n->record, n->ready); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    sched.submit(sc.jobs[0].get());
+    g = gatedNow(gate, 3);
+    CHECK(g == std::set<int>({0, 2}), "resume (a): U runs beside N (gated %s)", str(g).c_str());
+    releaseJob(gate, 0); // U done: S is released, but a demand waits
+    g = gatedNow(gate, 3);
+    CHECK(g == std::set<int>({2}), "resume (a): S doesn't resume while the demand waits (gated %s)", str(g).c_str());
+    releaseJob(gate, 2);
+    demander.join();
+    g = gatedNow(gate, 3);
+    CHECK(g == std::set<int>({1}), "resume (a): S resumes after the demand (gated %s)", str(g).c_str());
+    auto c = releaseJob(gate, 1);
+    CHECK(a == "1->park0" && c == "1->done", "resume (a): %s %s", a.c_str(), c.c_str());
+  }
+  {
+    // (b) another speculative job running
+    Scenario sc;
+    sc.add();               // 0: U
+    auto *s1 = sc.add({0}); // 1: S1, speculative, parks on U
+    auto *s2 = sc.add();    // 2: S2, speculative
+    Gate gate;
+    for (auto &j : sc.jobs)
+      j->gate = &gate;
+    compile::Service<FakeJob *> sched(declared(3, 3));
+    sched.submit(s1, compile::Lane::Speculative);
+    gatedNow(gate, 3);
+    releaseJob(gate, 1); // S1 parks; its slot is free
+    sched.submit(s2, compile::Lane::Speculative);
+    auto g = gatedNow(gate, 3);
+    CHECK(g == std::set<int>({2}), "resume (b): S2 takes the free slot (gated %s)", str(g).c_str());
+    sched.submit(sc.jobs[0].get());
+    g = gatedNow(gate, 3);
+    CHECK(g == std::set<int>({0, 2}), "resume (b): U runs (gated %s)", str(g).c_str());
+    releaseJob(gate, 0); // S1 released while S2 runs
+    g = gatedNow(gate, 3);
+    CHECK(g == std::set<int>({2}), "resume (b): S1 waits for S2's slot (gated %s)", str(g).c_str());
+    releaseJob(gate, 2);
+    g = gatedNow(gate, 3);
+    CHECK(g == std::set<int>({1}), "resume (b): S1 resumes once S2 is done (gated %s)", str(g).c_str());
+    releaseJob(gate, 1);
+  }
+  std::printf("%s declared, speculative resumes through admission (demand pending, another running)\n",
+              failures ? "?   " : "ok  ");
+}
+
 int
 main() {
   parity("chain", chain);
@@ -867,6 +982,8 @@ main() {
   declaredDemand();
   declaredSpeculative();
   declaredUnknownDependency();
+  declaredLateSpeculativeDependency();
+  declaredSpeculativeResume();
   declaredStress();
   std::printf(failures ? "%d FAILED\n" : "all passed\n", failures);
   return failures ? 1 : 0;

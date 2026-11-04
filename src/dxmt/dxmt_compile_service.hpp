@@ -45,6 +45,7 @@
 #include <deque>
 #include <queue>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace dxmt::compile {
@@ -198,11 +199,15 @@ private:
   };
   void makeRunnable(Job job, Node &node);
   void promote(Job job);
+  void promoteRecord(const JobRecord *record);
+  void release(Job job);
   bool takeable() const;
 
   Traits traits_;
   std::unordered_map<Job, Node> nodes_;                  // submitted, not complete
   std::unordered_map<const JobRecord *, Job> by_record_; // the same jobs, by record (demand)
+  // demanded dependencies not submitted yet (by record): promoted when they are
+  std::unordered_set<const JobRecord *> promote_on_submit_;
   std::deque<Job> demand_q_, normal_q_, speculative_q_;
   uint64_t demands_ = 0;           // demands waiting now
   uint32_t speculative_running_ = 0;
@@ -347,6 +352,8 @@ Service<Job, Traits>::submit(Job job, Lane lane) {
     gw2::compileQueue(1); // gw2 (#5)
     if (node.pending == 0)
       makeRunnable(job, node);
+    if (promote_on_submit_.erase(&record))
+      promote(job); // a demand is waiting for it (through a job that parked on it)
     if (running_.load(std::memory_order_relaxed) == threads_ && threads_ < max_threads_) {
       workers_.emplace_back([this]() { workerLoop(); });
       threads_++;
@@ -405,7 +412,38 @@ Service<Job, Traits>::promote(Job job) {
   std::vector<Job> deps;
   traits_.deps(job, deps);
   for (auto dep : deps)
-    promote(dep);
+    promoteRecord(&traits_.record(dep));
+  // and what it is parked on, declared or not
+  if (auto *dep = traits_.record(job).parked_on.load(std::memory_order_relaxed))
+    promoteRecord(dep);
+}
+
+// Promotes the job behind `record` if the service has it; if it hasn't been submitted (and isn't
+// complete), it is promoted when it is (worker_mutex_ held).
+template <typename Job, typename Traits>
+void
+Service<Job, Traits>::promoteRecord(const JobRecord *record) {
+  if (record->state.load(std::memory_order_acquire) == JobState::Complete)
+    return;
+  if (auto it = by_record_.find(record); it != by_record_.end())
+    promote(it->second);
+  else
+    promote_on_submit_.insert(record);
+}
+
+// A parked job its dependency released: back by its lane (worker_mutex_ held). A promoted job goes
+// to the demand queue, a speculative one through speculative admission again, a normal one to the
+// continuations (taken before the normal FIFO, as legacy does).
+template <typename Job, typename Traits>
+void
+Service<Job, Traits>::release(Job job) {
+  auto it = nodes_.find(job);
+  if (it != nodes_.end() && it->second.promoted)
+    demand_q_.push_back(job);
+  else if (it != nodes_.end() && it->second.lane == Lane::Speculative)
+    speculative_q_.push_back(job);
+  else
+    continuations_.push(job);
 }
 
 template <typename Job, typename Traits>
@@ -425,7 +463,8 @@ void
 Service<Job, Traits>::endDemand() {
   {
     std::unique_lock<dxmt::mutex> lock(worker_mutex_);
-    demands_--;
+    if (--demands_ == 0)
+      promote_on_submit_.clear(); // no demand left to inherit them (and records may be reused)
   }
   worker_cond_.notify_all(); // speculative admission may resume
 }
@@ -484,7 +523,7 @@ Service<Job, Traits>::workerLoopDeclared() {
         {
           std::unique_lock<dxmt::mutex> lock(worker_mutex_);
           for (auto &j : released)
-            continuations_.push(j); // parked on a dependency the service didn't know
+            release(j); // parked on a dependency the service didn't know
           if (auto it = nodes_.find(job); it != nodes_.end()) {
             for (auto dependent : it->second.dependents) {
               auto d = nodes_.find(dependent);
@@ -507,13 +546,15 @@ Service<Job, Traits>::workerLoopDeclared() {
           continue;
         parked_.insert({next, job});
         lock.unlock();
-        if (speculative) {
-          {
-            std::unique_lock<dxmt::mutex> wlock(worker_mutex_);
-            speculative_running_--;
-          }
-          worker_cond_.notify_all();
+        {
+          std::unique_lock<dxmt::mutex> wlock(worker_mutex_);
+          if (speculative)
+            speculative_running_--; // it resumes through admission again
+          // a demanded job's demand reaches what it parked on
+          if (auto it = nodes_.find(job); it != nodes_.end() && it->second.promoted)
+            promoteRecord(&traits_.record(next));
         }
+        worker_cond_.notify_all();
       }
       break;
     }
