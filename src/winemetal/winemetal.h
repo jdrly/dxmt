@@ -2035,9 +2035,23 @@ WINEMETAL_API bool CacheWriter_set(obj_handle_t writer, const void *key, uint64_
 // starts with `prefix` (256: any), after `after_rowid`, packed into `buffer` as u32 key length, key,
 // u32 value length, value (little-endian). Returns the rows written; `last_rowid` is the next call's
 // after_rowid; `more` says rows remain. 0 rows and `more` false when the database or table is missing.
+// gw2 (#114): `status` 0: read (to the end, or the buffer is full); 1: no database or table; 2: a step
+// failed, SQLite's code in `error` (SQLITE_BUSY after `busy` retries), the rows before it are valid.
+// With `more`, `need` is the size of the row that didn't fit and `need_rowid` its rowid: with 0 rows
+// it alone is larger than `capacity` (grow the buffer, or pass `need_rowid` as after_rowid to skip it).
+struct WMTCacheEnumerateResult {
+  uint64_t used;
+  uint64_t last_rowid;
+  uint64_t need;
+  uint64_t need_rowid;
+  uint32_t count;
+  uint32_t status;
+  uint32_t error;
+  uint32_t busy;
+  bool more;
+};
 WINEMETAL_API uint32_t CacheEnumerate(const char *path, uint64_t version, uint32_t prefix, uint64_t after_rowid,
-                                      void *buffer, uint64_t capacity, uint64_t *used, uint64_t *last_rowid,
-                                      bool *more);
+                                      void *buffer, uint64_t capacity, struct WMTCacheEnumerateResult *result);
 
 // gw2 (#57): the database file's size in bytes (page_count * page_size); 0 if unknown
 WINEMETAL_API uint64_t CacheWriter_byteSize(obj_handle_t writer);
