@@ -17,6 +17,7 @@
  */
 
 #include "dxmt_context.hpp"
+#include <chrono>
 #include "Metal.hpp"
 #include "dxmt_command_queue.hpp"
 #include "dxmt_deptrack.hpp"
@@ -820,11 +821,14 @@ ArgumentEncodingContext::endPass() {
 
       render_encoder->fence_wait_vertex =
           fence_locality_.collectAndSimplifyWaits(render_encoder->fence_wait_vertex, render_encoder->encoder_id_vertex);
+      encoder_current->gw2_checkpoint = fence_locality_.lastWasCheckpoint(); // gw2 (#132)
       encoder_current->fence_wait =
           fence_locality_.collectAndSimplifyWaits(encoder_current->fence_wait, encoder_last->id, true);
+      encoder_current->gw2_checkpoint |= fence_locality_.lastWasCheckpoint();
     } else {
       encoder_current->fence_wait =
           fence_locality_.collectAndSimplifyWaits(encoder_current->fence_wait, encoder_last->id);
+      encoder_current->gw2_checkpoint = fence_locality_.lastWasCheckpoint(); // gw2 (#132)
     }
   }
 
@@ -1088,6 +1092,10 @@ ArgumentEncodingContext::flushCommandsImpl(CommandBuffer &cmdbuf, uint64_t seqId
     assert(encoder_index == encoder_count);
   }
 
+  // gw2 (#132): DEPS times the relation scan and counts the fences the encoders emit after it
+  const bool deps_counting = fence_locality_.counting();
+  const auto deps_t0 = deps_counting ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+  uint64_t deps_checks = 0;
   if (encoder_count > 1) {
     unsigned j, i;
     for (j = encoder_count - 2; j != ~0u; j--) {
@@ -1097,10 +1105,43 @@ ArgumentEncodingContext::flushCommandsImpl(CommandBuffer &cmdbuf, uint64_t seqId
       for (i = j + 1; i < encoder_count; i++) {
         if (encoders[i]->type == EncoderType::Null)
           continue;
+        deps_checks++;
         if (checkEncoderRelation(encoders[j], encoders[i]) == DXMT_ENCODER_LIST_OP_SYNCHRONIZE)
           break;
       }
     }
+  }
+  if (deps_counting) {
+    auto &counters = dependencyCounters();
+    counters.relation_ns.fetch_add(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - deps_t0).count(),
+        std::memory_order_relaxed
+    );
+    counters.relation_checks.fetch_add(deps_checks, std::memory_order_relaxed);
+    uint64_t encoded = 0, waits = 0, updates = 0, checkpoint_waits = 0;
+    for (unsigned k = 0; k < encoder_count; k++) {
+      auto *data = encoders[k];
+      if (data->type == EncoderType::Null)
+        continue;
+      uint32_t w, u;
+      if (data->type == EncoderType::Render) {
+        auto *render = static_cast<RenderEncoderData *>(data);
+        w = emittedFences(render->fence_wait, &render->fence_wait_vertex);
+        u = emittedFences(render->fence_update, &render->fence_update_vertex);
+      } else {
+        w = emittedFences(data->fence_wait);
+        u = emittedFences(data->fence_update);
+      }
+      encoded++;
+      waits += w;
+      updates += u;
+      if (data->gw2_checkpoint)
+        checkpoint_waits += w;
+    }
+    counters.encoded.fetch_add(encoded, std::memory_order_relaxed);
+    counters.waits.fetch_add(waits, std::memory_order_relaxed);
+    counters.updates.fetch_add(updates, std::memory_order_relaxed);
+    counters.checkpoint_waits.fetch_add(checkpoint_waits, std::memory_order_relaxed);
   }
 
   QueryReadbacks readbacks{};
@@ -1806,6 +1847,7 @@ ArgumentEncodingContext::checkEncoderRelation(EncoderData *former, EncoderData *
           render->fence_update.merge(clear->fence_update);
           render->fence_wait.merge(clear->fence_wait);
           render->fence_wait.subtract(clear->fence_update);
+          render->gw2_checkpoint |= clear->gw2_checkpoint; // gw2 (#132)
           currentFrameStatistics().clear_pass_optimized++;
           clear->~ClearEncoderData();
           clear->next = nullptr;
@@ -1821,6 +1863,7 @@ ArgumentEncodingContext::checkEncoderRelation(EncoderData *former, EncoderData *
           render->fence_update.merge(clear->fence_update);
           render->fence_wait.merge(clear->fence_wait);
           render->fence_wait.subtract(clear->fence_update);
+          render->gw2_checkpoint |= clear->gw2_checkpoint; // gw2 (#132)
           currentFrameStatistics().clear_pass_optimized++;
           clear->~ClearEncoderData();
           clear->next = nullptr;
@@ -1850,6 +1893,7 @@ ArgumentEncodingContext::checkEncoderRelation(EncoderData *former, EncoderData *
         result.src->resolve_attachment = result.dst;
         render->fence_update.merge(resolve->fence_update);
         render->fence_wait.merge(resolve->fence_wait);
+        render->gw2_checkpoint |= resolve->gw2_checkpoint; // gw2 (#132)
         render->fence_wait.subtract(resolve->fence_update);
 
         currentFrameStatistics().resolve_pass_optimized++;
@@ -1916,19 +1960,12 @@ ArgumentEncodingContext::checkEncoderRelation(EncoderData *former, EncoderData *
       r1->ts_arg_marshal_tasks = std::move(r0->ts_arg_marshal_tasks);
       r1->use_visibility_result = r0->use_visibility_result || r1->use_visibility_result;
 
-      r1->fence_update.merge(r0->fence_update);
-      r1->fence_wait.merge(r0->fence_wait);
-      r1->fence_wait.subtract(r0->fence_update);
-      r1->fence_update_vertex.merge(r0->fence_update_vertex);
-      r1->fence_wait_vertex.merge(r0->fence_wait_vertex);
-      r1->fence_wait_vertex.subtract(r0->fence_update_vertex);
-
-      // just in case
-      r1->fence_wait.subtract(r0->fence_update_vertex);
-      /* 
-      r1->fence_wait_vertex.subtract(r0->fence_update);
-      does not make sense
-      */
+      // gw2 (#132): moved to dxmt_deptrack.hpp unchanged, so the native test fuses the same way
+      fuseRenderPassFences(
+          r1->fence_wait, r1->fence_wait_vertex, r1->fence_update, r1->fence_update_vertex, r0->fence_wait,
+          r0->fence_wait_vertex, r0->fence_update, r0->fence_update_vertex
+      );
+      r1->gw2_checkpoint |= r0->gw2_checkpoint;
 
       currentFrameStatistics().render_pass_optimized++;
       r0->~RenderEncoderData();

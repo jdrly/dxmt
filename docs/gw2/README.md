@@ -57,6 +57,7 @@ because Wine raises `0x80000005` (`STATUS_BUFFER_OVERFLOW`) for a line over its 
 | `DXMT_RETIRE_RECOVERY` | on | A refused retirement (#113; never expected, a bug) recovers instead of holding every later chunk until teardown. The retirement ledger then retires by sequence with the completion the refused token proves: the finish thread waits for every chunk in order, so a token of the queue's submission for chunk `S` means every chunk up to `S` completed, and their holds go in sequence order (the ring resumes at `S + 1`); an empty or another queue's token proves nothing, and the next chunk's token recovers. A refused hold goes once the last chunk that may use it completed (its own chunk while unretired; for a retired sequence, every chunk the ring may still have in flight), not at teardown. A refused submission retirement retires the chunk the submission last waited for. One error line per failure (see *Other log lines*); the normal path is unchanged | `0`: refused holds and retirements are kept until the queue goes, as before |
 | `DXMT_WARM_ORDER` | use | (#124) With `DXMT_WARM`: which recipes the plan takes. `use`: the use rows first (`DXMT_PSO_RECORD_USE`), then every recipe of the target; ranked by the newest session that used it, then by the number of sessions, then rowid; the first `DXMT_WARM_MAX` are planned and submitted in first-use order (the character select first), recipes without use rows (recorded before #124, or unused since) after them in rowid order. A file without use rows plans exactly as `rowid` does. Parsed once per process | `rowid`: #88's plan, the oldest recipes first, streamed |
 | `DXMT_PSO_RECORD_USE` | on | (#124) With `DXMT_PSO_RECORD`: the recipes' use data, as d9mt's state cache keeps it. One row per recipe ever used, `U` + the recipe's SHA-1 → schema, lastSession, sessionsUsed, firstUseMs (u32 each), rewritten in place; and a session counter, `Ssession` → schema, the last session's number. When it opens the file, the writer reads both (bridge call 193), takes the counter + 1 as this session's number and writes it back. A newer session always has a larger number; no clock is involved. It then merges each recipe this session used (built when its recipe is recorded, or taken from warming's shared results through `warmPipelineHit`) into its row, once per recipe and session. Bounded by the number of recipes; about 3,000–5,000 merges a session on the writer thread (`RECORD uses=`). Warming's plan ranks by them | `=0`: no use data (`DXMT_WARM_ORDER=use` then plans by rowid, as for a file without it) |
+| `DXMT_DEPENDENCY_COMPRESSION` | off | `=1` (exactly), Metal 4 only (#132, after GameSir `3170d0349a`; see [DEPS](#deps)): encoder fences follow a **checkpoint chain** instead of the per-encoder weak window. About every 64 encoder IDs one encoder (the checkpoint) waits on every encoder from the previous checkpoint's coverage to 64 IDs back, and on the previous checkpoint; every other encoder depends on the latest checkpoint (simplification usually removes that wait). So when an encoder runs, everything 127+ IDs back has finished, and the trackers keep direct dependencies up to 127 IDs back (legacy: 63). The trackers stay bounded, so the dropped dependencies need this cover (GameSir instead tracks every reader and writer by explicit ID). It also records a pass's fragment read of something the same pass wrote at pre-raster, which the legacy trackers forget. Read once per device; on Metal 3 the startup line says `unsupported` and the legacy policy stays. Encoder merging (the flush-time relation scan) is unchanged | the legacy weak window (each encoder waits on the encoders 64-127 IDs back that simplification can't reach) |
 
 Not switchable: `SetMaximumFrameLatency(0)` means the default, 3 (DXGI's definition; only
 `DXMT_MAX_FRAME_LATENCY` replaces the result). Typeless depth targets without stencil
@@ -1020,6 +1021,35 @@ At `Draw`, `DrawIndexed`, and `DrawInstanced`/`DrawIndexedInstanced` with one in
 | `SUBSAMPLE: MetalFX refused format F WxH -> WxH (…); not upscaled`, `SUBSAMPLE: MetalFX spatial scaling isn't supported on this device (…); not upscaled` | Once per shape (errors); that shape is then rejected as `metalfx` |
 | `SUBSAMPLE: 64 candidate shapes logged; no more candidate lines` | Once |
 | `RetirementLedger: refused a hold\|split hold\|retirement for chunk S (ring slot R, retired up to T, refusal N; only the first 8 are logged)` | An error, never expected (#66): a hold for a chunk that already retired or into a ring slot another unretired chunk still owns, or a retirement out of sequence. A refused hold is kept until the device's queue goes (never released early; with `DXMT_RETIRE_RECOVERY`, #113, until the last chunk that may use it completed); a refused retirement releases nothing (with `DXMT_RETIRE_RECOVERY`, it recovers: see *Other log lines*). The first 8 per command queue are logged |
+
+### DEPS
+
+`DEPS policy=legacy|compressed stages/f= strong/f= full/f= simplified/f= checkpoints/f= gaps= simplify_us/f=
+relation_checks/f= relation_us/f= encoders/f= waits/f= updates/f= checkpoint_waits/f=` (#132), after STATS with
+`DXMT_STATS` (counting is decided when the device is made), per frame of the 2 s window. Both policies
+report every field, so the two can be compared in the same place:
+
+- At `endPass` (API thread), per encoder stage (one per compute/blit/clear/present encoder, two per render
+  pass: pre-raster and fragment): `stages`; `strong`, the dependencies the resource trackers reported;
+  `full`, after the weak window (legacy) or the checkpoint (compressed) were added; `simplified`, the waits
+  left after simplification, before encoder fusion; `checkpoints`, compressed only, checkpoint stages
+  (about one per 64 IDs); `gaps` (a count), an encoder ID that didn't follow the previous one (never
+  expected; it only widens the next checkpoint's window); `simplify_us`, time in
+  `collectAndSimplifyWaits`.
+- At `flushCommands` (encode thread), per chunk after the relation scan fused encoders:
+  `relation_checks`, `checkEncoderRelation` calls; `relation_us`, time in the relation scan;
+  `encoders`, encoders left to encode; `waits` and `updates`, the `waitForFence`/`updateFence` they emit
+  (a render pass once per fence of its pre-raster and fragment sets together); `checkpoint_waits`, of
+  `waits`, those of encoders holding a checkpoint stage (the checkpoints' cost).
+
+Log lines: `Dependency compression: on (DXMT_DEPENDENCY_COMPRESSION=1): …` once when it acts, or
+`Dependency compression: requested but the queue is on Metal 3; …` once.
+
+Tests: `tests/gw2/dependency_compression_test.cpp` drives the production trackers and
+`FenceLocalityCheck` under both policies against a hazard oracle that models Metal fences (a wait on a
+slot waits for every earlier update of that slot, as Metal 4 documents) and checks every RAW/WAR/WAW pair;
+a control without window or checkpoint must fail it. A fusion case (the production
+`fuseRenderPassFences`) checks that waits on a fused pass's own updates aren't counted as emitted.
 
 ## Native tests
 

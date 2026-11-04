@@ -133,6 +133,7 @@ struct EncoderData {
   FenceSet fence_wait;
   FenceSet fence_update;
   EncoderBarrierState barrier_state;
+  bool gw2_checkpoint = false; // gw2 (#132): a stage of this encoder is a checkpoint (DEPS only)
 };
 
 struct GSDispatchArgumentsMarshal {
@@ -949,6 +950,13 @@ public:
   MTLFXMVScaleContext mv_scale_cmd;
   TileBarrierContext tile_barrier_cmd;
 
+  // gw2 (#132): DXMT_DEPENDENCY_COMPRESSION's policy, chosen by the queue before the first encoder
+  void
+  setDependencyPolicy(bool compressed, bool counting) {
+    fence_locality_.setCompressed(compressed);
+    fence_locality_.setCounting(counting);
+  }
+
 private:
   // gw2 (#32): flushCommands for both: a WMT::CommandBuffer (Metal 3) or a gw2::Mtl4Encoding
   template <typename CommandBuffer>
@@ -1105,10 +1113,11 @@ ArgumentEncodingContext::track(GenericAccessTracker &tracker, int flags) {
   EncoderBarrierState &barrier_state = current_encoder->barrier_state;
   if (flags & ResourceAccess::Write)
     tracker.accessExclusivePreRaster(
-        id, current_encoder->fence_wait_vertex, barrier_state, flags & ResourceAccess::UAV
+        id, current_encoder->fence_wait_vertex, barrier_state, flags & ResourceAccess::UAV,
+        fence_locality_.horizon() // gw2 (#132)
     );
   else
-    tracker.accessSharedPreRaster(id, current_encoder->fence_wait_vertex, barrier_state);
+    tracker.accessSharedPreRaster(id, current_encoder->fence_wait_vertex, barrier_state, fence_locality_.horizon());
 }
 
 template <>
@@ -1118,10 +1127,11 @@ ArgumentEncodingContext::track<PipelineStage::Compute>(GenericAccessTracker &tra
   EncoderBarrierState &barrier_state = current_encoder->barrier_state;
   if (flags & ResourceAccess::Write)
     tracker.accessExclusive(
-        currentEncoderId(), current_encoder->fence_wait, barrier_state, flags & ResourceAccess::UAV
+        currentEncoderId(), current_encoder->fence_wait, barrier_state, flags & ResourceAccess::UAV,
+        fence_locality_.horizon() // gw2 (#132)
     );
   else
-    tracker.accessShared(currentEncoderId(), current_encoder->fence_wait, barrier_state);
+    tracker.accessShared(currentEncoderId(), current_encoder->fence_wait, barrier_state, fence_locality_.horizon());
 }
 
 template <>
@@ -1131,10 +1141,11 @@ ArgumentEncodingContext::track<PipelineStage::Pixel>(GenericAccessTracker &track
   EncoderBarrierState &barrier_state = current_encoder->barrier_state;
   if (flags & ResourceAccess::Write)
     tracker.accessExclusiveFragment(
-        currentEncoderId(), current_encoder->fence_wait, barrier_state, flags & ResourceAccess::UAV
+        currentEncoderId(), current_encoder->fence_wait, barrier_state, flags & ResourceAccess::UAV,
+        fence_locality_.horizon() // gw2 (#132)
     );
   else
-    tracker.accessSharedFragment(currentEncoderId(), current_encoder->fence_wait, barrier_state);
+    tracker.accessSharedFragment(currentEncoderId(), current_encoder->fence_wait, barrier_state, fence_locality_.horizon());
   return;
 }
 
