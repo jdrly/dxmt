@@ -88,11 +88,11 @@ Metal3Submission::wait(uint64_t seq, uint64_t, bool timing) {
       timing, records_
   );
   // upstream's order: the last buffer's error and logs, then the split buffers'
-  return CompletedChunk(seq, records_, gw2::ReportOrder::LastFirst);
+  return issue(seq, records_, gw2::ReportOrder::LastFirst);
 }
 
 void
-Metal3Submission::retire(CompletedChunk &&chunk) {
+Metal3Submission::retireChunk(const CompletedChunk &chunk) {
   // the chunk released its last command buffer when it reset; forget the borrowed handle
   slot(chunk.seq()) = {};
 }
@@ -102,17 +102,23 @@ Metal3Submission::retire(CompletedChunk &&chunk) {
 // the command buffers retain nothing, and DXMT_LIFETIME_CHECK=1's stamps assume it. The finish thread
 // stopped without retiring every committed chunk, so wait for their command buffers first; the
 // split-off ones were committed earlier on this queue and complete before their chunk's last.
-void
+// Otherwise the command buffers retain what they use, and the chunks hold only the split buffers, which
+// a committed command buffer doesn't need. gw2 (#91): either way the chunks' holds may go (the token);
+// the borrowed handles are forgotten, as each retire() did, before the chunks release their buffers.
+gw2::DrainedQueue
 Metal3Submission::drain() {
-  if (!hooks_.wait_at_drain())
-    return;
-  for (auto &cmdbuf : last_) {
-    if (!cmdbuf)
-      continue;
-    auto status = cmdbuf.status();
-    if (status == WMTCommandBufferStatusCommitted || status == WMTCommandBufferStatusScheduled)
-      cmdbuf.waitUntilCompleted();
+  if (hooks_.wait_at_drain()) {
+    for (auto &cmdbuf : last_) {
+      if (!cmdbuf)
+        continue;
+      auto status = cmdbuf.status();
+      if (status == WMTCommandBufferStatusCommitted || status == WMTCommandBufferStatusScheduled)
+        cmdbuf.waitUntilCompleted();
+    }
   }
+  for (auto &cmdbuf : last_)
+    cmdbuf = {};
+  return drained();
 }
 
 // --- Metal 4
@@ -165,17 +171,18 @@ Metal4Submission::wait(uint64_t seq, uint64_t completion_value, bool) {
   records_.resize(commits.size());
   for (size_t i = 0; i < commits.size(); i++)
     gw2::recordMetal4Commit(*commits[i], uint32_t(i), records_[i]);
-  return CompletedChunk(seq, records_, gw2::ReportOrder::CommitOrder);
+  return issue(seq, records_, gw2::ReportOrder::CommitOrder);
 }
 
 void
-Metal4Submission::retire(CompletedChunk &&chunk) {
+Metal4Submission::retireChunk(const CompletedChunk &chunk) {
   queue_->retire(chunk.seq()); // releases the records' errors, resets the ring slot's allocator
 }
 
-void
+gw2::DrainedQueue
 Metal4Submission::drain() {
   queue_->waitIdle(); // every committed command buffer (the chunks' attached_cmdbuf is null on Metal 4)
+  return drained();
 }
 
 } // namespace dxmt

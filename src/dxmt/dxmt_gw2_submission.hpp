@@ -22,6 +22,11 @@
 //   resets the ring slot's allocator after the chunk's own reset (its readbacks read the feedback);
 //   drain() is waitIdle().
 //
+// gw2 (#91, L3): the submission is the issuer of completion tokens (dxmt_gw2_completion.hpp): wait()
+// gives the completed chunk's, which the retirement ledger needs to release the chunk's holds and which
+// retire() takes back (refusing one it didn't issue, or not its last wait's); drain() gives the
+// drained-queue token the ledger's teardown drain needs.
+//
 // Threads: begin, waitEvent, signalEvent, encode, commit on the encode thread for the chunk being
 // encoded; wait, retire on the finish thread, in sequence order, retire with the token of the last
 // wait; drain once both have stopped. The command queue's handshake (ready_for_commit, chunk_ongoing)
@@ -29,6 +34,7 @@
 
 #include "Metal.hpp"
 #include "dxmt_gw2_commit_record.hpp"
+#include "dxmt_gw2_completion.hpp"
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -44,40 +50,11 @@ class Mtl4Queue;
 // gw2 (#77): one completed command buffer of a chunk, as both finish paths read it
 using CommitRecord = gw2::BasicCommitRecord<WMT::Error>;
 
-// gw2 (#78): what wait() returns: a chunk whose commits all completed, with their records in commit
-// order (the last one is the chunk's last command buffer). The records belong to the submission and
-// stay valid until this token is retired.
-class CompletedChunk {
-public:
-  CompletedChunk(uint64_t seq, std::span<const CommitRecord> records, gw2::ReportOrder order) :
-      seq_(seq),
-      records_(records),
-      order_(order) {}
-
-  CompletedChunk(CompletedChunk &&) = default;
-  CompletedChunk &operator=(CompletedChunk &&) = default;
-  CompletedChunk(const CompletedChunk &) = delete;
-  CompletedChunk &operator=(const CompletedChunk &) = delete;
-
-  uint64_t
-  seq() const {
-    return seq_;
-  }
-  std::span<const CommitRecord>
-  records() const {
-    return records_;
-  }
-  // the backend's device-error line order (Metal 3: the last buffer first)
-  gw2::ReportOrder
-  order() const {
-    return order_;
-  }
-
-private:
-  uint64_t seq_;
-  std::span<const CommitRecord> records_;
-  gw2::ReportOrder order_;
-};
+// gw2 (#78, #91): what wait() returns: a chunk whose commits all completed, with their records in
+// commit order (the last one is the chunk's last command buffer). The records belong to the submission
+// and stay valid until this token is retired. gw2 (#91, L3): only a submission makes one (it is the
+// token's issuer), and only it authorizes the retirement ledger to release the chunk's holds.
+using CompletedChunk = gw2::BasicCompletedChunk<CommitRecord>;
 
 // gw2 (#78): the chunk's encoding, in the backend's own form (encode thread, once per chunk)
 class ChunkEncoder {
@@ -90,7 +67,7 @@ public:
   virtual void encode(gw2::Mtl4Queue &queue) = 0;
 };
 
-class ChunkSubmission {
+class ChunkSubmission : public gw2::CompletionIssuer {
 public:
   virtual ~ChunkSubmission() = default;
 
@@ -112,13 +89,37 @@ public:
   // Blocks until every commit of chunk `seq` completed (Metal 4: and its completion event reached
   // `completion_value`); `timing`: read the GPU times where that costs (Metal 3, DXMT_STATS)
   virtual CompletedChunk wait(uint64_t seq, uint64_t completion_value, bool timing) = 0;
-  // After the report and the chunk's own reset and holds: what the submission keeps of the chunk
-  virtual void retire(CompletedChunk &&chunk) = 0;
+  // After the report and the chunk's own reset and holds: takes the token back and releases what the
+  // submission keeps of the chunk (retireChunk). gw2 (#91): false: refused (not this submission's
+  // token, or not its last wait's: empty, another queue's, repeated); the token stays with the caller
+  // and nothing changes
+  [[nodiscard]] bool
+  retire(CompletedChunk &&chunk) {
+    if (!issued(chunk) || chunk.seq() != waited_)
+      return false;
+    CompletedChunk token = std::move(chunk);
+    retireChunk(token);
+    return true;
+  }
 
   // --- teardown, both threads stopped
 
-  // Blocks until the committed chunks no longer run where the backend must wait for that
-  virtual void drain() = 0;
+  // Blocks until the committed chunks no longer run where the backend must wait for that. gw2 (#91):
+  // the token says nothing committed needs the chunks' holds any more (the ledger's drain needs it)
+  virtual gw2::DrainedQueue drain() = 0;
+
+protected:
+  // gw2 (#91): an adapter's wait() returns this: the token for chunk `seq`, the one retire() takes back
+  CompletedChunk
+  issue(uint64_t seq, std::span<const CommitRecord> records, gw2::ReportOrder order) {
+    waited_ = seq;
+    return completed(seq, records, order);
+  }
+  // the adapter's part of retire(), with the token it issued for the chunk it last waited for
+  virtual void retireChunk(const CompletedChunk &chunk) = 0;
+
+private:
+  uint64_t waited_ = 0; // finish thread: the chunk of the last wait()
 };
 
 // gw2 (#78): Metal 3 (production)
@@ -140,10 +141,11 @@ public:
   void encode(uint64_t seq, ChunkEncoder &encoder) override;
   void commit(uint64_t seq) override;
   CompletedChunk wait(uint64_t seq, uint64_t completion_value, bool timing) override;
-  void retire(CompletedChunk &&chunk) override;
-  void drain() override;
+  gw2::DrainedQueue drain() override;
 
 private:
+  void retireChunk(const CompletedChunk &chunk) override;
+
   WMT::CommandBuffer &
   slot(uint64_t seq) {
     return last_[seq % last_.size()];
@@ -170,10 +172,11 @@ public:
   void encode(uint64_t seq, ChunkEncoder &encoder) override;
   void commit(uint64_t seq) override;
   CompletedChunk wait(uint64_t seq, uint64_t completion_value, bool timing) override;
-  void retire(CompletedChunk &&chunk) override;
-  void drain() override;
+  gw2::DrainedQueue drain() override;
 
 private:
+  void retireChunk(const CompletedChunk &chunk) override;
+
   std::unique_ptr<gw2::Mtl4Queue> queue_;
   WMT::SharedEvent completion_event_;
   std::vector<CommitRecord> records_; // finish thread: the last wait's

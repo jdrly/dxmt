@@ -16,6 +16,11 @@
 // - Policy parity (#69, L2): the retention policy against each call site's former gate (5f16916) in
 //   every reachable configuration (Metal 3 retained or unretained, the lifetime check, the residency
 //   set, Metal 4), and the scripted parity runs once per configuration with those gates.
+// - Tokens (#91, L3): retire() and drain() take the completion tokens of the queue's submission
+//   (dxmt_gw2_completion.hpp). Every test's ledger is bound to its own test issuer (Ledger below), whose
+//   tokens the tests pass; testTokens checks that an unbound ledger, another issuer's token (two
+//   queues, the same sequence), an empty (moved-from) token and another issuer's or an empty drained
+//   token are refused and release nothing.
 //
 // Run: tests/gw2/run.zsh pure, or the command above with $OUT set.
 
@@ -101,9 +106,47 @@ struct TestTraits {
   using SpatialScaler = Spatial;
   using TemporalScaler = Temporal;
 };
-using Ledger = dxmt::gw2::BasicRetirementLedger<TestTraits>;
+using BaseLedger = dxmt::gw2::BasicRetirementLedger<TestTraits>;
 using dxmt::gw2::HoldReason;
 using dxmt::gw2::RetentionPolicy;
+
+// gw2 (#91): a submission's tokens, without a submission (the chunk's records aren't the ledger's)
+struct TestIssuer : dxmt::gw2::CompletionIssuer {
+  struct Record {};
+  dxmt::gw2::BasicCompletedChunk<Record>
+  token(uint64_t seq) const {
+    return completed(seq, std::span<const Record>{}, dxmt::gw2::ReportOrder::CommitOrder);
+  }
+  dxmt::gw2::DrainedQueue
+  drainedToken() const {
+    return drained();
+  }
+};
+
+// a ledger bound to its own issuer, as CommandQueue binds its ledger to its submission; retire(seq)
+// and drain() pass that issuer's tokens, as RetireChunk and DrainChunks pass the submission's
+struct Ledger : BaseLedger {
+  TestIssuer issuer;
+  Ledger(uint32_t ring_slots, RetentionPolicy policy) : BaseLedger(ring_slots, policy) {
+    acceptTokensFrom(&issuer);
+  }
+  using BaseLedger::drain;
+  using BaseLedger::retire;
+  [[nodiscard]] bool
+  retire(uint64_t seq) {
+    return BaseLedger::retire(issuer.token(seq));
+  }
+  template <class F>
+  void
+  drainAll(F &&before_slot) {
+    bool drained = BaseLedger::drain(issuer.drainedToken(), std::forward<F>(before_slot));
+    CHECK(drained);
+  }
+  void
+  drainAll() {
+    drainAll([](uint32_t) {});
+  }
+};
 
 // the rule tests hold everything: the policy of DXMT_UNRETAINED=1 (the default)
 static const RetentionPolicy kAll{.unretained = true};
@@ -251,7 +294,7 @@ testRingWrap(uint32_t n) {
       CHECK_RELEASED({});
   }
   // the refused holds only now, after every slot
-  l.drain();
+  l.drainAll();
   CHECK_RELEASED({"stalesplit", "staleobject", "stale"});
   // after a retirement the slot takes its next chunk
   Ledger m(n, kAll);
@@ -289,7 +332,7 @@ testRefusedRetirements() {
   CHECK(!l.retire(1)); // repeated
   CHECK_RELEASED({});
   CHECK(l.retired() == 1);
-  l.drain();
+  l.drainAll();
   CHECK_RELEASED(allReleased(2));
   CHECK(!l.retire(2)); // after drain
   CHECK_RELEASED({});
@@ -308,7 +351,7 @@ testNoHoldAfterRetirementBegan() {
     CHECK(l.hold(2, Pres("p2")));
     CHECK(l.retire(2));
     CHECK_RELEASED({"p2"});
-    l.drain();
+    l.drainAll();
     CHECK_RELEASED({"latesplit", "late"});
   }
   {
@@ -321,18 +364,90 @@ testNoHoldAfterRetirementBegan() {
     CHECK(l.retire(1));
     CHECK(refused);
     CHECK_RELEASED({"o1", "p1"});
-    l.drain();
+    l.drainAll();
     CHECK_RELEASED({"reentrant"});
   }
   {
     // holds after drain are refused; the ledger's destructor releases them
     {
       Ledger l(32, kAll);
-      l.drain();
+      l.drainAll();
       CHECK(!l.hold(1, Pres("afterdrain")));
       CHECK_RELEASED({});
     }
     CHECK_RELEASED({"afterdrain"});
+  }
+}
+
+// gw2 (#91, L3): only the queue's own submission's tokens retire or drain it
+static void
+testTokens() {
+  {
+    // unbound (before CommandQueue binds it): every token is refused
+    TestIssuer issuer;
+    BaseLedger l(32, kAll);
+    CHECK(l.hold(1, Pres("p1")));
+    CHECK(!l.retire(issuer.token(1)));
+    CHECK(!l.drain(issuer.drainedToken()));
+    CHECK_RELEASED({});
+    CHECK(l.retired() == 0);
+    l.acceptTokensFrom(&issuer);
+    CHECK(l.retire(issuer.token(1)));
+    CHECK_RELEASED({"p1"});
+  }
+  {
+    // two queues, the same sequence: a's token doesn't retire b's chunk 1, and the reverse
+    Ledger a(32, kAll), b(32, kAll);
+    holdAll(a, 1, "a");
+    holdAll(b, 1, "b");
+    CHECK(!b.retire(a.issuer.token(1)));
+    CHECK(!a.retire(b.issuer.token(1)));
+    CHECK_RELEASED({});
+    CHECK(a.retired() == 0 && b.retired() == 0);
+    CHECK(b.retire(b.issuer.token(1)));
+    CHECK_RELEASED(allReleased(1, "b"));
+    CHECK(a.retire(a.issuer.token(1)));
+    CHECK_RELEASED(allReleased(1, "a"));
+  }
+  {
+    // an empty (moved-from) token authorizes nothing; neither does a token for the wrong sequence
+    Ledger l(32, kAll);
+    holdAll(l, 1);
+    holdAll(l, 2);
+    auto token = l.issuer.token(1);
+    auto taken = std::move(token);
+    CHECK(!token && token.seq() == 0 && token.issuer() == nullptr);
+    CHECK(!l.retire(token));
+    CHECK(!l.retire(l.issuer.token(2))); // skipped 1
+    CHECK_RELEASED({});
+    CHECK(l.retire(taken));
+    CHECK_RELEASED(allReleased(1));
+    CHECK(!l.retire(taken)); // repeated
+    CHECK_RELEASED({});
+    // another issuer's drained token, or an empty one, drains nothing; the holds stay
+    TestIssuer other;
+    CHECK(!l.drain(other.drainedToken()));
+    auto drained = l.issuer.drainedToken();
+    auto drained_taken = std::move(drained);
+    CHECK(!drained && !l.drain(drained));
+    CHECK_RELEASED({});
+    CHECK(l.retire(l.issuer.token(2))); // not drained: retirements go on
+    CHECK_RELEASED(allReleased(2));
+    holdAll(l, 3);
+    CHECK(l.drain(drained_taken));
+    CHECK_RELEASED(allReleased(3));
+    CHECK(!l.retire(l.issuer.token(3))); // after drain
+  }
+  {
+    // a refused drain releases nothing until the ledger goes
+    {
+      TestIssuer other;
+      Ledger l(32, kAll);
+      holdAll(l, 1);
+      CHECK(!l.drain(other.drainedToken(), [](uint32_t) { g_released.push_back("reset"); }));
+      CHECK_RELEASED({});
+    }
+    CHECK_RELEASED(allReleased(1));
   }
 }
 
@@ -347,7 +462,7 @@ testDrainOrder() {
   holdAll(l, 3);
   holdAll(l, 4);
   CHECK(!l.hold(6, Pres("refused6"))); // slot 2 is chunk 2's
-  l.drain([](uint32_t slot) { g_released.push_back("reset" + std::to_string(slot)); });
+  l.drainAll([](uint32_t slot) { g_released.push_back("reset" + std::to_string(slot)); });
   std::vector<std::string> want{"reset0"};
   for (auto &x : allReleased(4))
     want.push_back(x);
@@ -655,7 +770,7 @@ struct LedgerQueue {
   }
   void
   teardown() {
-    ledger_.drain([](uint32_t slot) { g_released.push_back("reset" + std::to_string(slot)); });
+    ledger_.drainAll([](uint32_t slot) { g_released.push_back("reset" + std::to_string(slot)); });
     for (unsigned i = chunk_count_; i < 128; i++)
       g_released.push_back("reset" + std::to_string(i));
   }
@@ -738,6 +853,7 @@ main() {
   testRefusedRetirements();
   testNoHoldAfterRetirementBegan();
   testDrainOrder();
+  testTokens();
   testPolicyParity();
   testParity();
   if (failures) {

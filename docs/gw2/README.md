@@ -153,6 +153,7 @@ Sections: a feature registers a function with `gw2::SectionRegistrar` (`src/dxmt
 | `Residency: the residency set is attached to this device's Metal 4 queue too (DXMT_METAL4)` | Once per device, on the Metal 4 path, after the usual `Residency:` line |
 | `Metal 4: chunk S's completion event not signalled after 1 s; still waiting` | Warning, on the Metal 4 path: the finish thread waits for a chunk's completion event (after its commits) over a second |
 | `Metal 4: chunk S not complete after 1 s (its command buffer's value V, the queue event at E); still waiting` | Warning, on the Metal 4 path, the first 8 times the finish thread waits over a second for a chunk (a GPU hang or a very long frame); counted in [METAL4](#metal4)'s `slow`. Metal 3's `waitUntilCompleted` blocks the same way without a line |
+| `RetirementLedger: refused a hold\|split hold\|retirement\|drain for chunk S (ring slot R, retired up to N, refusal K; only the first 8 are logged)`, `ChunkSubmission: refused a retirement for chunk S (…)` | An error, never expected (a bug), the first 8 per command queue. The retirement ledger (#66) refused a hold (its ring slot belongs to an unretired chunk, or chunk `S` already retired: the object is kept until teardown, never released early), a retirement (#91: not the next sequence, or not the token of this queue's submission's wait), or teardown's drain (#91: not the submission's drained token; the holds then go with the queue, `S` is 0); or the chunk submission refused to take back a token it didn't issue for its last wait. A refused retirement releases nothing |
 
 ### Render thread priority
 
@@ -1023,7 +1024,15 @@ sequence, repeated and out-of-order retirements refused, no hold after retiremen
 release), and teardown's slot-by-slot drain. Since L2 (#69) also the retention policy against every
 hold call site's former gate in each reachable configuration (Metal 3 retained or unretained, the
 lifetime check, the residency set, Metal 4), with the scripted release-trace parity run per
-configuration.
+configuration. Since L3 (#91) retirement and drain take the completion tokens: an unbound ledger,
+another issuer's token (two queues, the same sequence), an empty (moved-from) token and another
+issuer's drained token are refused and release nothing.
+
+`chunk_submission_test.mm` (Q2, #78) runs both production adapters on real Metal through the real
+bridge table, and a scripted adapter; since L3 (#91) a retirement ledger bound to each adapter is
+retired with its `wait` tokens and drained with its `drain` token, and another issuer's token is
+refused by the ledger and by the adapter. Since #86 it checks, for every Metal 4 commit, that the
+residency hook runs before the commit is submitted (the open commit's queue value still 0).
 
 The PSO archive (#75): `pso_archive_policy_test.c` (pure) checks keep, skip and classify under the
 legacy and the exact-shape policies; `pso_archive_publish_test.c` (pure, a fake shard writer) checks
