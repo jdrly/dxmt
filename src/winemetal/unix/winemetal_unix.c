@@ -18,6 +18,7 @@
 #include "pso_archive.h"
 #include "visibility_slots.h"
 #include "mtl4.h"
+#include "mtl4fx.h" // gw2 (#56)
 
 typedef int NTSTATUS;
 #define STATUS_SUCCESS 0
@@ -3556,7 +3557,9 @@ const void *__wine_unix_call_funcs[] = {
     NULL,
     NULL,
     NULL,
-    NULL,
+    NULL,    &_MTLDevice_supportsMetal4FX, /* 190: gw2 (#56) */
+    &_MTLDevice_newGW2SpatialScaler,
+    &_MTL4CommandBuffer_encodeSpatialScale,
 };
 
 #ifndef DXMT_NATIVE
@@ -3750,6 +3753,8 @@ const void *__wine_unix_call_wow64_funcs[] = {
     NULL,
     NULL,
     NULL,
-    NULL,
+    NULL,    &_MTLDevice_supportsMetal4FX, /* 190: gw2 (#56) */
+    &_MTLDevice_newGW2SpatialScaler,
+    &_MTL4CommandBuffer_encodeSpatialScale,
 };
 #endif

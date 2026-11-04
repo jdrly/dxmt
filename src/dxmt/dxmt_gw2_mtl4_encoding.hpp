@@ -44,6 +44,9 @@ public:
   void encodeSignalEvent(WMT::Event event, uint64_t value);
   // before the work committed from now on (commits the open command buffer first)
   void encodeWaitForEvent(WMT::Event event, uint64_t value);
+  // gw2 (#56): an MTL4FXSpatialScaler's work into the open command buffer, outside any encoder; color's
+  // and output's memory go into the chunk's residency set
+  void encodeSpatialScale(WMT::FXSpatialScaler scaler, WMT::Texture color, WMT::Texture output, WMT::Fence fence);
 
   // --- present (part 4)
   // the command buffers committed from now on wait for the drawable (the present pass's, and the

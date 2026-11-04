@@ -586,6 +586,24 @@ ArgumentEncodingContext::upscale(Rc<Texture> &texture, Rc<Texture> &upscaled, Rc
 }
 
 void
+ArgumentEncodingContext::upscale(
+    Rc<Texture> &input, TextureViewKey input_view, Rc<Texture> &output, Rc<SpatialScaler> &scaler
+) {
+  assert(!encoder_current);
+  auto encoder_info = allocate<SpatialUpscaleData>();
+  encoder_info->type = EncoderType::SpatialUpscale;
+  encoder_info->id = nextEncoderId();
+  encoder_info->fence_wait = {};
+  encoder_info->fence_update = {encoder_info->id};
+  encoder_info->scaler = scaler;
+
+  encoder_current = encoder_info;
+  encoder_info->backbuffer = access(input, input_view, ResourceAccess::Read).texture;
+  encoder_info->upscaled = access(output, output->fullView, ResourceAccess::Write).texture;
+  endPass();
+}
+
+void
 ArgumentEncodingContext::upscaleTemporal(
     Rc<Texture> &input, Rc<Texture> &output, Rc<Texture> &depth, Rc<Texture> &motion_vector, TextureViewKey mvViewId,
     Rc<Texture> &exposure, Rc<TemporalScaler> &scaler, const WMTFXTemporalScalerProps &props
@@ -1550,13 +1568,37 @@ ArgumentEncodingContext::flushCommandsImpl(CommandBuffer &cmdbuf, uint64_t seqId
     case EncoderType::SpatialUpscale: {
       auto data = static_cast<SpatialUpscaleData *>(current);
       if constexpr (kMetal4) {
-        // gw2 (#32): MetalFX stays on Metal 3 (DXMT_METALFX_SPATIAL_SWAPCHAIN=1 keeps the device there);
-        // a MetalFX spatial upscale through the context extension can't be encoded: its fences still pass
-        gw2Metal4Unsupported("MetalFX spatial upscale");
-        auto encoder = cmdbuf.blitCommandEncoder();
-        data->fence_wait.forEach([&](auto id) { encoder.waitForFence(fence_pool_[id]); });
-        data->fence_update.forEach([&](auto id) { encoder.updateFence(fence_pool_[id]); });
-        encoder.endEncoding();
+        if (data->scaler->metal4()) {
+          // gw2 (#56): the Subsample pass's MTL4FXSpatialScaler, ordered as on Metal 3: DXMT's fences ->
+          // the scaler's fence -> MetalFX -> the scaler's fence -> DXMT's fences
+          auto begin_scaler = cmdbuf.blitCommandEncoder();
+          data->fence_wait.forEach([&](auto id) { begin_scaler.waitForFence(fence_pool_[id]); });
+          begin_scaler.updateFence(data->scaler->fence());
+          begin_scaler.endEncoding();
+
+          cmdbuf.encodeSpatialScale(data->scaler->scaler(), data->backbuffer, data->upscaled, data->scaler->fence());
+
+          auto end_scaler = cmdbuf.blitCommandEncoder();
+          end_scaler.waitForFence(data->scaler->fence());
+          data->fence_update.forEach([&](auto id) { end_scaler.updateFence(fence_pool_[id]); });
+          end_scaler.endEncoding();
+          if (lt_on) {
+            lt(data->backbuffer, LtKind::Texture);
+            lt(data->upscaled, LtKind::Texture);
+            lt(data->scaler->scaler(), LtKind::Scaler);
+            lt(data->scaler->fence(), LtKind::Fence);
+          }
+          if (keep)
+            queue_.KeepUntilRetired(seqId, std::move(data->scaler));
+        } else {
+          // gw2 (#32): MetalFX stays on Metal 3 (DXMT_METALFX_SPATIAL_SWAPCHAIN=1 keeps the device there);
+          // a Metal 3 scaler can't be encoded here: its fences still pass
+          gw2Metal4Unsupported("MetalFX spatial upscale");
+          auto encoder = cmdbuf.blitCommandEncoder();
+          data->fence_wait.forEach([&](auto id) { encoder.waitForFence(fence_pool_[id]); });
+          data->fence_update.forEach([&](auto id) { encoder.updateFence(fence_pool_[id]); });
+          encoder.endEncoding();
+        }
       } else {
 
         auto begin_scaler = cmdbuf.blitCommandEncoder();

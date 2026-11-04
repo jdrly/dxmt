@@ -24,6 +24,9 @@
 #include "dxmt_gw2_stats.hpp"
 #include "dxmt_gw2_timestamp.hpp"
 #include "dxmt_gw2_map.hpp"
+#include "dxmt_gw2_subsample.hpp"
+#include <format>
+#include <string_view>
 #include "d3d11_annotation.hpp"
 #include "d3d11_context.hpp"
 #include "d3d11_device_child.hpp"
@@ -1332,6 +1335,9 @@ public:
     uint32_t ControlPointCount;
     if(!to_metal_primitive_type(state_.InputAssembler.Topology, Primitive, ControlPointCount))
       return;
+    Gw2SubsampleGuard gw2_subsample{this}; // gw2 (#56)
+    if (unlikely(gw2_subsample_mode_ != gw2::SubsampleMode::Off))
+      gw2SubsampleDraw(VertexCount, "Draw", gw2_subsample);
     DrawCallStatus status = PreDraw<false>();
     if (status == DrawCallStatus::Invalid)
       return;
@@ -1366,6 +1372,9 @@ public:
     uint32_t ControlPointCount;
     if(!to_metal_primitive_type(state_.InputAssembler.Topology, Primitive, ControlPointCount))
       return;
+    Gw2SubsampleGuard gw2_subsample{this}; // gw2 (#56)
+    if (unlikely(gw2_subsample_mode_ != gw2::SubsampleMode::Off))
+      gw2SubsampleDraw(IndexCount, "DrawIndexed", gw2_subsample);
     DrawCallStatus status = PreDraw<true>();
     if (status == DrawCallStatus::Invalid)
       return;
@@ -1410,6 +1419,9 @@ public:
     uint32_t ControlPointCount;
     if (!to_metal_primitive_type(state_.InputAssembler.Topology, Primitive, ControlPointCount))
       return;
+    Gw2SubsampleGuard gw2_subsample{this}; // gw2 (#56): bgfx draws one instance this way too
+    if (unlikely(gw2_subsample_mode_ != gw2::SubsampleMode::Off) && InstanceCount == 1)
+      gw2SubsampleDraw(VertexCountPerInstance, "DrawInstanced", gw2_subsample);
     DrawCallStatus status = PreDraw<false>();
     if (status == DrawCallStatus::Invalid)
       return;
@@ -1450,6 +1462,9 @@ public:
     uint32_t ControlPointCount;
     if(!to_metal_primitive_type(state_.InputAssembler.Topology, Primitive, ControlPointCount))
       return;
+    Gw2SubsampleGuard gw2_subsample{this}; // gw2 (#56): bgfx draws one instance this way too
+    if (unlikely(gw2_subsample_mode_ != gw2::SubsampleMode::Off) && InstanceCount == 1)
+      gw2SubsampleDraw(IndexCountPerInstance, "DrawIndexedInstanced", gw2_subsample);
     DrawCallStatus status = PreDraw<true>();
     if (status == DrawCallStatus::Invalid)
       return;
@@ -4343,6 +4358,305 @@ public:
   gw2::CommitWhy promote_why_ = gw2::CommitWhy::Other; // the request behind promote_flush
   uint32_t promote_requests_ = 0;                       // requests since the last commit
   bool promote_nodefer_ = false;                        // one of them is never deferred
+
+  // gw2 (#56): DXMT_SUBSAMPLE_METALFX (see dxmt_gw2_subsample.hpp). A Subsample pass found by
+  // gw2SubsampleDraw reads a MetalFX upscale of its source: the encoder's binding of that pixel shader
+  // slot points at the upscaled texture for this one draw. The D3D11 state never changes; the guard
+  // binds the game's SRV again when the draw call returns.
+  const gw2::SubsampleMode gw2_subsample_mode_ = gw2::subsampleMode();
+
+  struct Gw2SubsampleTarget {
+    WMTPixelFormat format;
+    uint32_t in_width, in_height, out_width, out_height;
+    Rc<SpatialScaler> scaler; // null: MetalFX refused this shape
+    Rc<Texture> output;
+  };
+  std::vector<Gw2SubsampleTarget> gw2_subsample_targets_;
+  ManagedShader gw2_subsample_ps_ = nullptr; // a one-entry cache of the last candidate's pixel shader
+  std::string gw2_subsample_ps_hash_;
+  gw2::DxbcCounts gw2_subsample_ps_counts_;
+
+  struct Gw2SubsampleGuard {
+    MTLD3D11DeviceContextImplBase *ctx;
+    int slot = -1; // the pixel shader slot to bind the game's SRV to again
+    ~Gw2SubsampleGuard() {
+      if (slot >= 0)
+        ctx->gw2SubsampleRestore(unsigned(slot));
+    }
+  };
+
+  void
+  gw2SubsampleRestore(unsigned slot) {
+    auto &ShaderStage = state_.ShaderStages[PipelineStage::Pixel];
+    if (ShaderStage.SRVs.test_bound(slot)) {
+      auto *srv = ShaderStage.SRVs[slot].SRV.ptr();
+      EmitST([=, texture = srv->texture(), viewId = srv->viewId()](ArgumentEncodingContext &enc) mutable {
+        enc.bindTexture<PipelineStage::Pixel>(slot, forward_rc(texture), viewId);
+      });
+    } else {
+      EmitST([=](ArgumentEncodingContext &enc) { enc.bindBuffer<PipelineStage::Pixel>(slot, {}, 0, {}); });
+    }
+    ShaderStage.SRVs.set_dirty(slot);
+  }
+
+  static bool
+  gw2SubsampleFloatFormat(WMTPixelFormat format) {
+    switch (format) {
+    case WMTPixelFormatR16Float:
+    case WMTPixelFormatR32Float:
+    case WMTPixelFormatRG16Float:
+    case WMTPixelFormatRG11B10Float:
+    case WMTPixelFormatRGB9E5Float:
+    case WMTPixelFormatRG32Float:
+    case WMTPixelFormatRGBA16Float:
+    case WMTPixelFormatRGBA32Float:
+      return true;
+    default:
+      return false;
+    }
+  }
+
+  // the scaler and output texture for this shape, created once (a failure is kept too)
+  Gw2SubsampleTarget &
+  gw2SubsampleTarget(WMTPixelFormat format, uint32_t in_w, uint32_t in_h, uint32_t out_w, uint32_t out_h) {
+    for (auto &t : gw2_subsample_targets_)
+      if (t.format == format && t.in_width == in_w && t.in_height == in_h && t.out_width == out_w &&
+          t.out_height == out_h)
+        return t;
+    if (gw2_subsample_targets_.size() >= 8) // a resize storm: keep the 4 newest
+      gw2_subsample_targets_.erase(gw2_subsample_targets_.begin(), gw2_subsample_targets_.begin() + 4);
+    auto &t = gw2_subsample_targets_.emplace_back(Gw2SubsampleTarget{format, in_w, in_h, out_w, out_h, {}, {}});
+
+    auto mtl_device = m_parent->GetMTLDevice();
+    bool metal4 = m_parent->GetDXMTDevice().queue().Metal4();
+    const char *path = metal4 ? "Metal 4" : "Metal 3";
+    if (metal4 ? !mtl_device.supportsMetal4FX() : !mtl_device.supportsFXSpatialScaler()) {
+      ERR("SUBSAMPLE: MetalFX spatial scaling isn't supported on this device (", path, "); not upscaled");
+      return t;
+    }
+    // sRGB and UNORM: perceptual (MetalFX asserts on sRGB with any other mode); float: HDR
+    uint32_t mode = gw2SubsampleFloatFormat(format) ? 2 : 0;
+    WMTGW2SpatialScalerInfo info{};
+    info.color_format = format;
+    info.output_format = format;
+    info.input_width = in_w;
+    info.input_height = in_h;
+    info.output_width = out_w;
+    info.output_height = out_h;
+    info.color_processing_mode = mode;
+    info.metal4 = metal4;
+    Rc<SpatialScaler> scaler = new SpatialScaler(mtl_device, info);
+    constexpr uint64_t kOutputUsage =
+        WMTTextureUsageShaderRead | WMTTextureUsageShaderWrite | WMTTextureUsageRenderTarget;
+    if (!scaler->scaler().handle || (info.output_usage & ~kOutputUsage)) {
+      Logger::err(std::format(
+          "SUBSAMPLE: MetalFX refused format {} {}x{} -> {}x{} ({}, output usage {:#x}); not upscaled",
+          uint32_t(format), in_w, in_h, out_w, out_h, path, info.output_usage
+      ));
+      return t;
+    }
+    WMTTextureInfo tex_info{};
+    tex_info.width = out_w;
+    tex_info.height = out_h;
+    tex_info.depth = 1;
+    tex_info.array_length = 1;
+    tex_info.mipmap_level_count = 1;
+    tex_info.pixel_format = format;
+    tex_info.sample_count = 1;
+    tex_info.type = WMTTextureType2D;
+    tex_info.usage = (WMTTextureUsage)kOutputUsage;
+    tex_info.options = WMTResourceStorageModePrivate;
+    Rc<Texture> output = new Texture(tex_info, mtl_device);
+    Flags<TextureAllocationFlag> flags;
+    flags.set(TextureAllocationFlag::GpuPrivate);
+    output->rename(output->allocate(flags));
+    t.scaler = std::move(scaler);
+    t.output = std::move(output);
+    Logger::info(std::format(
+        "SUBSAMPLE: MetalFX spatial scaler {}x{} -> {}x{} format {} ({}, {})", in_w, in_h, out_w, out_h,
+        uint32_t(format), path, mode == 2 ? "HDR" : "perceptual"
+    ));
+    return t;
+  }
+
+  // Draw, DrawIndexed and their instanced forms with one instance, before PreDraw: is this the Subsample
+  // pass? With =1, encodes the upscale and points the source slot at the result (the guard undoes it).
+  // draw: the entry point's name (a string literal), for the candidate line
+  void
+  gw2SubsampleDraw(uint32_t count, const char *draw, Gw2SubsampleGuard &guard) {
+    // a candidate: a full-screen triangle or quad with a pixel shader that reads a smaller 2D texture
+    auto topology = state_.InputAssembler.Topology;
+    if (count > 6 || (topology != D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST &&
+                      topology != D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP))
+      return;
+    auto &PS = state_.ShaderStages[PipelineStage::Pixel];
+    if (!PS.Shader || state_.ShaderStages[PipelineStage::Geometry].Shader ||
+        state_.ShaderStages[PipelineStage::Hull].Shader || state_.ShaderStages[PipelineStage::Domain].Shader)
+      return;
+    auto &OM = state_.OutputMerger;
+    if (!OM.NumRTVs || !OM.RTVs[0])
+      return;
+    auto *rtv = OM.RTVs[0].ptr();
+    auto rtv_desc = rtv->description();
+    uint32_t out_w = rtv_desc.Width, out_h = rtv_desc.Height;
+    if (!out_w || !out_h)
+      return;
+    auto managed = PS.Shader->GetManagedShader();
+    auto &refl = managed->reflection();
+
+    struct Src {
+      unsigned slot;
+      D3D11ShaderResourceView *srv;
+      uint32_t w, h;
+    };
+    std::vector<Src> srvs;
+    int small = -1, smaller = 0, fullsize = 0;
+    for (unsigned slot = 0; slot < 64; slot++) {
+      if (!(refl.SRVSlotMaskLo & (uint64_t(1) << slot)) || !PS.SRVs.test_bound(slot))
+        continue;
+      auto *srv = PS.SRVs[slot].SRV.ptr();
+      auto texture = srv->texture();
+      if (!texture)
+        continue;
+      TextureViewKey view = srv->viewId();
+      if (texture->textureType(view) != WMTTextureType2D)
+        continue;
+      uint32_t w = texture->width(view), h = texture->height(view);
+      srvs.push_back({slot, srv, w, h});
+      if (w >= out_w && h >= out_h)
+        fullsize++;
+      else if (w * 5 <= out_w * 4 && h * 5 <= out_h * 4) { // at least 1.25x smaller on both axes
+        smaller++;
+        if (small < 0)
+          small = int(srvs.size() - 1);
+      }
+    }
+    if (small < 0)
+      return; // not a candidate
+    auto &src = srvs[small];
+
+    // the shader's DXBC counts, once per pixel shader in a row
+    if (managed != gw2_subsample_ps_) {
+      gw2_subsample_ps_ = managed;
+      gw2_subsample_ps_hash_ = managed->sha1().string();
+      gw2_subsample_ps_counts_ = gw2::pixelShaderCounts(gw2_subsample_ps_hash_);
+    }
+    auto &counts = gw2_subsample_ps_counts_;
+    uint32_t sc_w, sc_h;
+    gw2::swapchainSize(sc_w, sc_h);
+    auto &vp = state_.Rasterizer.viewports[0];
+    double rx = double(out_w) / src.w, ry = double(out_h) / src.h;
+    auto source = src.srv->texture();
+    TextureViewKey src_view = src.srv->viewId();
+    WMTPixelFormat src_format = source->pixelFormat(src_view);
+    bool blend = false;
+    if (OM.BlendState) {
+      D3D11_BLEND_DESC1 bd;
+      OM.BlendState->GetDesc1(&bd);
+      blend = bd.RenderTarget[0].BlendEnable || bd.RenderTarget[0].LogicOpEnable;
+    }
+    unsigned rtv_count = 0;
+    for (unsigned i = 0; i < OM.NumRTVs; i++)
+      rtv_count += OM.RTVs[i] ? 1 : 0;
+    auto &pin = gw2::subsamplePsPin();
+
+    const char *reason = nullptr;
+    if (rtv_count != 1)
+      reason = "rtvs";
+    else if (out_w != sc_w || out_h != sc_h)
+      reason = "swapchain";
+    else if (state_.Rasterizer.NumViewports < 1 || vp.TopLeftX != 0 || vp.TopLeftY != 0 || vp.Width != out_w ||
+             vp.Height != out_h)
+      reason = "viewport";
+    else if (smaller != 1)
+      reason = "srvs";
+    else if (fullsize)
+      reason = "fullsize";
+    else if (rx > 4.0 || std::abs(rx - ry) > 0.02 * rx)
+      reason = "ratio";
+    else if (blend)
+      reason = "blend";
+    else if (!pin.empty() && gw2_subsample_ps_hash_.compare(0, pin.size(), pin) != 0)
+      reason = "pin";
+    else if (!counts.parsed)
+      reason = "ps_unparsed";
+    else if (counts.load)
+      reason = "ps_load";
+    else if (src_view.mip_start != 0 || source->miplevelCount() != 1)
+      reason = "mips";
+    else if (source->sampleCount() != 1 || rtv_desc.SampleCount > 1)
+      reason = "msaa";
+    else if (src_format & WMTPixelFormatCustomSwizzle)
+      reason = "swizzle";
+    else if (!(source->usage() & WMTTextureUsageShaderRead))
+      reason = "usage";
+
+    Gw2SubsampleTarget *target = nullptr;
+    if (!reason && gw2_subsample_mode_ == gw2::SubsampleMode::On) {
+      target = &gw2SubsampleTarget(src_format, src.w, src.h, out_w, out_h);
+      if (!target->scaler)
+        reason = "metalfx";
+    }
+    gw2::subsampleCandidate(!reason);
+
+    // once per shape: what tomorrow's capture is for
+    uint64_t key = 1469598103934665603ull;
+    auto mix = [&](uint64_t v) { key = (key ^ v) * 1099511628211ull; };
+    mix(count);
+    mix(std::hash<std::string_view>{}(draw));
+    mix(uint64_t(out_w) << 32 | out_h);
+    mix(uint64_t(src.w) << 32 | src.h);
+    mix(src_format);
+    mix(rtv->pixelFormat());
+    mix(std::hash<std::string>{}(gw2_subsample_ps_hash_));
+    mix(std::hash<std::string_view>{}(reason ? reason : "yes"));
+    if (gw2::subsampleFirstSighting(key)) {
+      std::string list;
+      for (auto &s : srvs) {
+        auto t = s.srv->texture();
+        TextureViewKey v = s.srv->viewId();
+        list += std::format(
+            "{}t{} {}x{} f{} m{}", list.empty() ? "" : ",", s.slot, s.w, s.h, uint32_t(t->pixelFormat(v)),
+            t->miplevelCount()
+        );
+      }
+      std::string dsv = "none";
+      if (OM.DSV) {
+        auto d = OM.DSV->description();
+        dsv = std::format("{}x{}", d.Width, d.Height);
+      }
+      Logger::info(std::format(
+          "SUBSAMPLE candidate: accept={} draw={} n={} rtv={}x{} f{} swapchain={}x{} viewport={},{} {}x{} "
+          "dsv={} blend={} ps={} sample={} ld={} resinfo={} instr={} src=t{} {}x{} f{} ratio={:.3f}x{:.3f} "
+          "srvs=[{}]",
+          reason ? std::string("no(") + reason + ")" : std::string("yes"), draw,
+          count, out_w, out_h, uint32_t(rtv->pixelFormat()), sc_w, sc_h, vp.TopLeftX, vp.TopLeftY, vp.Width,
+          vp.Height, dsv, blend ? "on" : "off", gw2_subsample_ps_hash_, counts.sample, counts.load,
+          counts.resinfo, counts.total, src.slot, src.w, src.h, uint32_t(src_format), rx, ry, list
+      ));
+      if (!reason && target)
+        Logger::info(std::format(
+            "SUBSAMPLE: upscaling t{} {}x{} -> {}x{} with MetalFX for pixel shader {}", src.slot, src.w, src.h,
+            out_w, out_h, gw2_subsample_ps_hash_
+        ));
+    }
+    if (reason || !target)
+      return;
+
+    // the upscale, outside the render pass; the draw then starts a new pass on the same target
+    InvalidateCurrentPass(false, gw2::PassClose::Upscale);
+    EmitOP([input = std::move(source), input_view = src_view, output = target->output,
+            scaler = target->scaler](ArgumentEncodingContext &enc) mutable {
+      enc.upscale(input, input_view, output, scaler);
+    });
+    EmitST([slot = src.slot, output = target->output](ArgumentEncodingContext &enc) mutable {
+      auto view = output->fullView;
+      enc.bindTexture<PipelineStage::Pixel>(slot, std::move(output), view);
+    });
+    PS.SRVs.set_dirty(src.slot);
+    guard.slot = int(src.slot);
+    gw2::subsampleUpscaled();
+  }
 
   // gw2 (#4): every site that sets promote_flush goes through here. Only occlusion and timestamp
   // queries may be deferred (DXMT_PROMOTE_FLUSH_MIN); events, staging copies, readbacks and command
