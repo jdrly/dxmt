@@ -30,6 +30,7 @@
 #include "dxmt_gw2_lifetime.hpp"
 #include "dxmt_gw2_mtl4_queue.hpp"
 #include "dxmt_gw2_retirement.hpp"
+#include "dxmt_gw2_submission.hpp"
 #include "dxmt_gw2_stats.hpp"
 #include "dxmt_occlusion_query.hpp"
 #include "dxmt_resource_initializer.hpp"
@@ -113,9 +114,6 @@ struct RetirementTraits {
   using TemporalScaler = Rc<dxmt::TemporalScaler>;
 };
 using RetirementLedger = gw2::BasicRetirementLedger<RetirementTraits>;
-
-// gw2 (#77, Q1): one completed command buffer of a chunk, as both finish paths read it
-using CommitRecord = gw2::BasicCommitRecord<WMT::Error>;
 
 class CommandChunk {
 public:
@@ -205,28 +203,21 @@ private:
 
   uint32_t WaitForFinishThread();
 
-  // gw2 (#32): Metal 4 (mtl4_): the encode thread's commit of a chunk, the finish thread's wait
-  void CommitChunkMetal4(CommandChunk &chunk, uint64_t seq);
-  void FinishChunkMetal4(CommandChunk &chunk, uint64_t seq);
-  // gw2 (#77): Metal 3: the finish thread's wait for chunk `seq`'s command buffers
-  void FinishChunkMetal3(CommandChunk &chunk, uint64_t seq);
-  // gw2 (#77): finish thread, after either: chunk `seq`'s report from its records (completed_): device
-  // errors (the split buffers' throttled), with `stats` the GPU line's spans and PRESENT's aftergpu
-  void ReportCompletedChunk(CommandChunk &chunk, uint64_t seq, gw2::ReportOrder order, bool stats);
+  // gw2 (#77, #78): finish thread: a completed chunk's report from its records: device errors (the
+  // split buffers' throttled), with `stats` the GPU line's spans and PRESENT's aftergpu
+  void ReportCompletedChunk(CommandChunk &chunk, const CompletedChunk &completed, bool stats);
 
-  // gw2 (#66): finish thread, chunk `seq` complete (Metal 3: its command buffers; Metal 4: its
-  // commits and completion event): releases everything it used and frees its ring slot, in this
-  // order: the lifetime check's completion, the chunk's own state (reset()), its holds (the ledger),
-  // Metal 4's allocator, the CPU fence, the ring count, the ring allocators
-  void RetireChunk(CommandChunk &chunk, uint64_t seq);
+  // gw2 (#66, #78): finish thread, `completed` from the submission's wait (Metal 3: the chunk's command
+  // buffers; Metal 4: its commits and completion event): releases everything the chunk used and frees
+  // its ring slot, in this order: the lifetime check's completion, the chunk's own state (reset()), its
+  // holds (the ledger), the submission's part (Metal 4's allocator), the CPU fence, the ring count, the
+  // ring allocators
+  void RetireChunk(CommandChunk &chunk, CompletedChunk &&completed);
   // gw2 (#66): a refused hold or retirement (a bug): the first 8 per queue are logged
   void LedgerRefused(const char *what, uint64_t seq);
   std::atomic_uint64_t ledger_refusals_ = 0; // encode thread (holds) and finish thread (retirements)
   // gw2 (#10, #32, #77): finish thread: the split buffers' error lines (the first 8, then one a second)
   gw2::BasicSplitErrorThrottle<clock::time_point> split_errors_;
-  // gw2 (#77): finish thread: the records of the chunk being finished, in commit order (reused, so
-  // no allocation per chunk); valid until the chunk retires
-  std::vector<CommitRecord> completed_;
 
   std::atomic_uint64_t ready_for_encode = 1; // we start from 1, so 0 is always coherent
   std::atomic_uint64_t ready_for_commit = 1;
@@ -270,9 +261,11 @@ private:
   dxmt::thread finishThread;
   WMT::Device device;
   WMT::Reference<WMT::CommandQueue> commandQueue;
-  // gw2 (#32): DXMT_METAL4=1: the Metal 4 queue, allocators and commits; null on Metal 3. Set in the
-  // constructor, before any chunk; destroyed after the threads stopped (it waits for the GPU first).
-  std::unique_ptr<gw2::Mtl4Queue> mtl4_;
+  // gw2 (#78): how the chunks are committed and completed: Metal3Submission, or Metal4Submission
+  // (DXMT_METAL4=1: the Metal 4 queue, allocators and commits, gw2 #32). Set in the constructor, before
+  // any chunk; destroyed after the threads stopped (Metal 4's waits for the GPU first).
+  std::unique_ptr<ChunkSubmission> submission_;
+  bool metal4_ = false; // gw2 (#32): the queue's chunks go to Metal 4
 
   obj_handle_t shared_event_listener;
   dxmt::thread event_listener_thread;
@@ -328,9 +321,8 @@ public:
   // gw2 (#31): DXMT_LIFETIME_CHECK's id of this queue
   uint32_t LifetimeId() const { return lifetime_id_; }
 
-  // gw2 (#32): this queue's Metal 4 submission, or null on Metal 3 (encode thread: begin/commit for
-  // the chunk being encoded)
-  gw2::Mtl4Queue *Metal4() { return mtl4_.get(); }
+  // gw2 (#32, #78): this queue's chunks go to Metal 4
+  bool Metal4() const { return metal4_; }
 
   // gw2 (#31): blocks until the finish thread has retired every chunk committed so far (device
   // teardown with DXMT_UNRETAINED=1 or DXMT_LIFETIME_CHECK=1, before the device's caches go)

@@ -39,6 +39,7 @@ dxmt_src = [
   'dxmt_gw2_recipe.cpp',
   'dxmt_gw2_metal4.cpp',
   'dxmt_gw2_mtl4_queue.cpp',
+  'dxmt_gw2_submission.cpp', # gw2 (#78)
   'dxmt_gw2_mtl4_encoding.cpp',
   'dxmt_gw2_subsample.cpp', # gw2 (#56)
 ]

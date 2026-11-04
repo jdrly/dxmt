@@ -78,6 +78,24 @@ recordMetal3Commit(CommandBuffer &cmdbuf, uint32_t ordinal, bool last, bool timi
   }
 }
 
+// gw2 (#78): Metal 3: the records of a whole chunk into `out`, in commit order (its `splits` split
+// buffers, then its last buffer). buffer_at(i) gives split buffer i, buffer_at(splits) the last one.
+// They are waited for and read as the finish thread always did: the last buffer first, then the
+// split buffers in commit order.
+template <class BufferAt, class Record>
+void
+recordMetal3Chunk(size_t splits, BufferAt &&buffer_at, bool timing, std::vector<Record> &out) {
+  out.resize(splits + 1);
+  {
+    auto last = buffer_at(splits);
+    recordMetal3Commit(last, uint32_t(splits), true, timing, out.back());
+  }
+  for (size_t i = 0; i < splits; i++) {
+    auto split = buffer_at(i);
+    recordMetal3Commit(split, uint32_t(i), false, timing, out[i]);
+  }
+}
+
 // Metal 4: the record of `commit` (an Mtl4Commit whose feedback is written), ordinal `ordinal`.
 // Its times are known when the feedback has them (gpu_start/gpu_end > 0), in Mtl4Commit's ns.
 template <class Commit, class Record>
