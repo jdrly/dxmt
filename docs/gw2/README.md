@@ -1036,6 +1036,18 @@ retired with its `wait` tokens and drained with its `drain` token, and another i
 refused by the ledger and by the adapter. Since #86 it checks, for every Metal 4 commit, that the
 residency hook runs before the commit is submitted (the open commit's queue value still 0).
 
+`paired_replay_test.mm` (B4, #105) replays one frame's packet stream through both interpreters of the
+bridge's unix side, through the real table: Metal 3 (`winemetal_unix.c`, on `MTLCommandQueue` command
+buffers) and Metal 4 (`mtl4.c`, through the production `gw2::Mtl4Queue` and `gw2::Mtl4Encoding`). The
+frame is GW2-shaped: a load chunk retired before it, UpdateSubresource uploads, a scene pass with
+argument buffers, `UseResource`, Map'd ring constants moved by `Set*BufferOffset`, `SetFragmentBytes`,
+indexed, depth-rejected, instanced and blended draws, 256 KB of `SetFragmentBytes` in one pass (Metal 4's
+bytes arena resumes), compute with a barrier, blits, mipmaps, and the present split into a drawable of a
+windowless layer. The scene, the rows pass, mip 2, the compute output and the drawable are read back and
+compared byte for byte between the backends and with the CPU's values at sample points. The arm64 run
+uses `MTL_SHADER_VALIDATION=1`: without it a missing residency doesn't show. A known divergence goes
+into the test's `kKnown` list with its issue (reported as XFAIL; XPASS fails the run).
+
 The PSO archive (#75): `pso_archive_policy_test.c` (pure) checks keep, skip and classify under the
 legacy and the exact-shape policies; `pso_archive_publish_test.c` (pure, a fake shard writer) checks
 the generation publisher: round trips, a failure injected at each of its 7 steps leaving the last good
