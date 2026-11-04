@@ -18,7 +18,8 @@
 //   Rosetta, which cost the render thread 2.3 ms a frame at ~21,000 scopes. A context keeps the
 //   last ApiThread that entered it (ApiThreadCache), checked by thread id; only a miss looks it up
 //   (FlsGetValue). Fiber-local, so a thread that runs D3D11 on several fibers has one block per fiber.
-//   If FlsAlloc or FlsSetValue fails, the thread keeps a block in a thread_local that is never cached.
+//   If FlsAlloc or FlsSetValue fails, the thread keeps a block in a thread_local that is never cached
+//   and always new (#121): never a reclaimed block, which an old cache may still point at.
 // - GPU spans: each command queue's finish thread hands its completed command buffers' GPU
 //   start/end, split-off buffers included, to that queue's GpuCollector; per frame, the union of
 //   those spans and the gap to the previous frame.
