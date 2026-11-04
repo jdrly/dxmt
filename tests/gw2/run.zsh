@@ -37,7 +37,8 @@ while (( $# )); do
   shift
 done
 
-T=${GW2_TEST_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/gw2-tests.XXXXXX")}
+# macOS's TMPDIR ends in "/": strip it, so no test sees a "//" in its paths
+T=${GW2_TEST_DIR:-$(mktemp -d "${${TMPDIR:-/tmp}%/}/gw2-tests.XXXXXX")}
 mkdir -p "$T"
 
 typeset -a passed failed skipped unregistered
