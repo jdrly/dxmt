@@ -11,7 +11,8 @@
 
 @interface CacheWriter : NSObject
 - (instancetype)initWithPath:(NSString *)path version:(uint64_t)version;
-- (void)set:(NSData *)key value:(dispatch_data_t)value;
+- (BOOL)set:(NSData *)key value:(dispatch_data_t)value;
+- (uint64_t)byteSize;
 @end
 
 @interface CacheReader () {
@@ -154,7 +155,7 @@ resolve_cache_dir(NSString *path, bool path_is_file) {
   return self;
 }
 
-- (void)set:(NSData *)key value:(dispatch_data_t)value {
+- (BOOL)set:(NSData *)key value:(dispatch_data_t)value {
   sqlite3_reset(_stmt);
   sqlite3_clear_bindings(_stmt);
   sqlite3_bind_blob64(_stmt, 1, key.bytes, key.length, SQLITE_STATIC);
@@ -164,12 +165,29 @@ resolve_cache_dir(NSString *path, bool path_is_file) {
   dispatch_data_t flat = dispatch_data_create_map(value, &bytes, &length);
   sqlite3_bind_blob64(_stmt, 2, bytes, length, SQLITE_STATIC);
 
-  if (sqlite3_step(_stmt) != SQLITE_DONE) {
+  BOOL ok = sqlite3_step(_stmt) == SQLITE_DONE;
+  if (!ok) {
     NSLog(@"[CacheWriter] Failed to insert: %s", sqlite3_errmsg(_db));
   }
 
   dispatch_release(flat);
   sqlite3_reset(_stmt);
+  return ok;
+}
+
+// gw2 (#57): page_count * page_size, the main file's size (the WAL is checkpointed into it)
+- (uint64_t)byteSize {
+  uint64_t v[2] = {0, 0};
+  const char *sql[2] = {"PRAGMA page_count;", "PRAGMA page_size;"};
+  for (int i = 0; i < 2; i++) {
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(_db, sql[i], -1, &stmt, NULL) != SQLITE_OK)
+      return 0;
+    if (sqlite3_step(stmt) == SQLITE_ROW)
+      v[i] = (uint64_t)sqlite3_column_int64(stmt, 0);
+    sqlite3_finalize(stmt);
+  }
+  return v[0] * v[1];
 }
 
 - (void)dealloc {
@@ -217,7 +235,8 @@ _CacheWriter_set(void *obj) {
   NSData *key =
       [[NSData alloc] initWithBytesNoCopy:(void *)params->key.ptr length:params->key_length freeWhenDone:false];
   CacheWriter *writer = (CacheWriter *)params->cache;
-  [writer set:key value:(dispatch_data_t)params->value_data];
+  params->ret_success = writer && params->key_length ? [writer set:key value:(dispatch_data_t)params->value_data] : 0;
+  params->ret_db_bytes = writer && params->query_size ? [writer byteSize] : 0;
   [key release];
   return 0;
 }

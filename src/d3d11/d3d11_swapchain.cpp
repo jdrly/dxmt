@@ -1254,6 +1254,7 @@ public:
   // control file's poll thread has queued lines to log.
   double PresentDeadlineMs() {
     gw2::controlLogPending(); // the poll thread's lines, before the change line they may explain
+    gw2::recipeLogPending();  // gw2 (#57): the recipe writer's lines (it never calls the logger)
     int32_t us = gw2::controlPresentDeadlineUs();
     double ms = us == gw2::kControlUnset ? present_deadline_ms_ : us < 0 ? -1.0 : us / 1000.0;
     if (ms == deadline_applied_ms_)

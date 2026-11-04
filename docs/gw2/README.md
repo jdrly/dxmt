@@ -48,7 +48,7 @@ because Wine raises `0x80000005` (`STATUS_BUFFER_OVERFLOW`) for a line over its 
 | `DXMT_METAL4` | on | Metal 4 for this process's devices (Metal 4 plan phase 2, #32; see [Metal 4](#metal-4)): an `MTL4CommandQueue` with one `MTL4CommandAllocator` and one residency set per chunk slot, Metal 4 command buffers with commit feedback, today's packets replayed on Metal 4 encoders through argument tables, and present through `waitForDrawable`/`signalDrawable` and the drawable's own present (the same deadline, minimum-duration and present-split behaviour). Decided once per process at the first command queue. Stays on Metal 3, with a warning, on a device without Metal 4 (macOS before 26, or not `MTLGPUFamilyMetal4`), without the residency set (`DXMT_RESIDENCY_SET`), without `DXMT_UNRETAINED=1`, or with `DXMT_METALFX_SPATIAL_SWAPCHAIN=1`. **On by default since 2026-11-04** (#32's follow-up), after Jan's 10-minute in-game session on it: no device errors, no missed resources, no visual problems | `=0`: Metal 3, exactly as before; no bridge call, no log line |
 | `DXMT_SUBSAMPLE_METALFX` | off | GW2's Render Sampling: Subsample pass with MetalFX (#56; see [SUBSAMPLE](#subsample)). `log`: capture only, every candidate draw's shape is logged once and nothing changes. `1`: an accepted pass (the full-screen draw that samples the low-resolution 3D scene into a target of the swapchain's size) samples a MetalFX spatial upscale of its source instead, on Metal 3 (`MTLFXSpatialScaler`) and Metal 4 (`MTL4FXSpatialScaler`, bridge calls 190–192); the game's pixel shader still runs, and the UI drawn after it is untouched. Anything that doesn't match runs unchanged | unset or `=0`: no detection, no counting, no bridge call |
 | `DXMT_SUBSAMPLE_METALFX_PS` | unset | With `DXMT_SUBSAMPLE_METALFX`: only a pass whose pixel shader's SHA-1 (as the candidate line prints it) starts with this hex prefix is accepted (`no(pin)` otherwise) | any pixel shader that passes the other checks |
-| `DXMT_PSO_RECORD` | on | Shader warming W1 (#57; see [RECORD](#record)): records, durably, what each pipeline was built from, so later stages (W2/W3) can prepare shaders and pipelines before GW2 asks for them. Into `$(getconf DARWIN_USER_CACHE_DIR)dxmt/<exe>/recipes_1.db` (its own sqlite file, through the bridge's cache writer): each shader's DXBC by its SHA-1, each variant's translation inputs (VS, PS, plain) by shader SHA-1 and variant digest, and each plain graphics pipeline's recipe by the SHA-1 of an explicit serialization of the vertex/pixel identities and every field of the descriptor Metal gets. Once per key and process; the callers only copy and enqueue, one lowest-priority writer thread writes from a bounded queue (16,384 records or 128 MB, then counted drops). Changes nothing that is built or drawn | `=0`: no recording, no thread, no database opened |
+| `DXMT_PSO_RECORD` | on | Shader warming W1 (#57; see [RECORD](#record)): records, durably, what each pipeline was built from, so later stages (W2/W3) can prepare shaders and pipelines before GW2 asks for them. Into `$(getconf DARWIN_USER_CACHE_DIR)dxmt/<exe>/recipes_1.db` (its own sqlite file, through the bridge's cache writer): each shader's DXBC by its SHA-1, each variant's translation inputs (VS, PS, plain) by shader SHA-1, variant digest and Metal target, and each plain graphics pipeline's recipe by the SHA-1 of an explicit serialization of the target, the vertex/pixel identities and every field of the descriptor Metal gets. Once per key and process. The callers never wait on the recorder: a fixed lock-free table of key fingerprints (2 MB) and a bounded lock-free queue (16,384 records or 128 MB), then counted drops. One lowest-priority writer thread skips rows the file already has and stops at a 256 MB file, or after 8 failed writes in a row; it never calls the logger (Present logs its lines). Changes nothing that is built or drawn | `=0`: no recording, no thread, no database opened |
 
 Not switchable: `SetMaximumFrameLatency(0)` means the default, 3 (DXGI's definition; only
 `DXMT_MAX_FRAME_LATENCY` replaces the result). Typeless depth targets without stencil
@@ -648,7 +648,7 @@ constant buffer, the GS marshal, resources outside the set). An A/B of `DXMT_RES
 
 ### RECORD
 
-`RECORD shaders= variants= recipes= unsupported=variants:N,pipelines:N written= queued= dropped= [writer=failed]`
+`RECORD shaders= variants= recipes= unsupported=variants:N,pipelines:N written= present= failed= queued= dropped=queue:N,seen:N,stopped:N [stopped=budget|writer]`
 (#57), with `DXMT_PSO_RECORD` on: the 2 s window's recording. Not logged in a window with nothing to
 report.
 
@@ -657,14 +657,18 @@ report.
 | `shaders` | Shaders new in this process whose DXBC was queued (once per SHA-1 and process) |
 | `variants` | Shader variants whose translation inputs were queued: VS (global flags, GS pass-through, rasterization disabled, the input layout's slot mask and each element's index, slot, offset, format, step function and rate), PS (global flags, sample mask, UNORM output mask, dual-source blending, no depth), plain (global flags) |
 | `recipes` | Plain graphics pipelines (a VS, an optional PS) whose recipe was queued, right before Metal builds them |
-| `unsupported` | Variants (tessellation, stream-out, geometry) and pipelines (compute, geometry, tessellation) not recorded yet |
-| `written`, `queued`, `dropped` | Records the writer wrote in the window, records waiting now, records dropped because the queue was full (they are queued again the next time they are seen) |
-| `writer=failed` | The database couldn't be opened: recording stopped for this process (a warning says why) |
+| `unsupported` | Variants (tessellation, stream-out, geometry) and pipelines (compute, geometry, tessellation, stream-out, and any whose VS or PS variant wasn't admitted) not recorded |
+| `written`, `present`, `failed` | Records the writer stored in the window; records it skipped because the file already had them (an earlier session's); writes SQLite refused (they may be queued again if seen again) |
+| `queued` | Records waiting for the writer now |
+| `dropped` | `queue`: the queue was full (queued again if seen again); `seen`: the fingerprint table's probe run was full; `stopped`: recording had stopped |
+| `stopped=budget`, `stopped=writer` | Recording stopped for this process: the file reached 256 MB (delete it to start over), or it couldn't be opened, or 8 writes in a row failed (a warning says which) |
 
-Keys in `recipes_1.db` (table `cache_1`): `D` + shader SHA-1 → DXBC; `V` + shader SHA-1 + variant
-digest → kind (1 VS, 2 PS, 3 plain) + inputs; `R` + SHA-1 of the recipe → the recipe; `Mmeta` → schema
-and `AIRCONV_VERSION`. A recipe is, in this order, little-endian: schema (u32), VS shader SHA-1 and
-variant digest, a PS flag (u8) and the PS's SHA-1 and digest, then for each of the 8 color attachments
+Keys in `recipes_1.db` (table `cache_1`), all content addressed (a key always holds the same value, so a
+key the file has is skipped): `D` + shader SHA-1 → DXBC; `V` + shader SHA-1 + variant digest + Metal
+target (u32, `SM50_SHADER_METAL_VERSION`) → schema (u32), target (u32), the `AIRCONV_VERSION` it was
+first recorded with (u32, provenance only: a warm stage translates the DXBC with its own airconv), kind
+(u8: 1 VS, 2 PS, 3 plain) + inputs; `R` + SHA-1 of the recipe → the recipe. A recipe is, in this order,
+little-endian: schema and Metal target (u32), VS shader SHA-1 and variant digest, a PS flag (u8) and the PS's SHA-1 and digest, then for each of the 8 color attachments
 the pixel format, RGB and alpha blend operations, the four blend factors (u32 each), write mask and
 blending (u8), then alpha-to-coverage, logic operation enabled (u8), logic operation (u32),
 rasterization, sample count (u8), depth and stencil formats, immutable vertex and fragment buffer
@@ -674,8 +678,13 @@ gets the same key in every process.
 
 | Line | When |
 |---|---|
-| `Recipes: recording into $(getconf DARWIN_USER_CACHE_DIR)dxmt/<exe>/recipes_1.db (DXMT_PSO_RECORD; schema 1, airconv N)` | Once, when the writer starts (the first record) |
-| `Recipes: can't open … for writing; recording stops (DXMT_PSO_RECORD)` | Warning: the database couldn't be opened |
+| `Recipes: recording into $(getconf DARWIN_USER_CACHE_DIR)dxmt/<exe>/recipes_1.db (DXMT_PSO_RECORD; schema 1, airconv N, M of 256 MB)` | Once, when the writer starts (the first record); logged at the next Present |
+| `Recipes: can't open …; recording stops (DXMT_PSO_RECORD)` | Warning: the database couldn't be opened |
+| `Recipes: … holds N MB, its budget is 256 MB; recording stops. Delete the file to start over` / `… reached its budget …` | Warning: the file is full, at the start or during the session |
+| `Recipes: 8 writes in a row into … failed; recording stops (DXMT_PSO_RECORD)` | Warning: SQLite refused the writes (disk full, I/O error); `[CacheWriter] Failed to insert` lines say why |
+
+A recipe refers to `D` and `V` rows by key. A row that was dropped or failed leaves a recipe without
+its inputs; a warm stage skips such a recipe.
 
 ### LIFECHECK
 
