@@ -192,6 +192,8 @@ public:
   compile::JobRecord compile_job; // gw2 (#46, C1): owned by the compile service
   virtual ~ThreadpoolWork() {}
   virtual ThreadpoolWork *RunThreadpoolWork() = 0;
+  // gw2 (C2): the jobs it waits for (a pipeline's shader variants); none for a variant
+  virtual void GetDependencies(std::vector<ThreadpoolWork *> &deps) {}
   virtual bool GetIsDone() = 0;
   virtual void SetIsDone(bool state) = 0;
 };

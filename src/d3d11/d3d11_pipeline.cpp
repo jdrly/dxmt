@@ -53,6 +53,14 @@ public:
     *pPipeline = {state_};
   }
 
+  // gw2 (C2): what RunThreadpoolWork probes, in its order (the declared policy waits for them)
+  void GetDependencies(std::vector<ThreadpoolWork *> &deps) final {
+    if (VertexShader)
+      deps.push_back(VertexShader);
+    if (PixelShader)
+      deps.push_back(PixelShader);
+  }
+
   ThreadpoolWork *RunThreadpoolWork() {
 
     TRACE("Start compiling 1 PSO");
@@ -169,6 +177,12 @@ public:
   void GetPipeline(MTL_COMPILED_COMPUTE_PIPELINE *pPipeline) final {
     compile::demand(compile_job, ready_); // gw2 (#5, #46, C1): the encode thread waits for this compile
     *pPipeline = {state_};
+  }
+
+  // gw2 (C2): what RunThreadpoolWork probes, in its order (the declared policy waits for them)
+  void GetDependencies(std::vector<ThreadpoolWork *> &deps) final {
+    if (ComputeShader)
+      deps.push_back(ComputeShader);
   }
 
   ThreadpoolWork *RunThreadpoolWork() {

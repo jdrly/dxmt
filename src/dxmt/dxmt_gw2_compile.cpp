@@ -1,6 +1,7 @@
 #include "dxmt_gw2_compile.hpp"
 #include "dxmt_compile_service.hpp"
 #include "dxmt_gw2_stats.hpp"
+#include "dxmt_gw2_switches.hpp"
 #include "log/log.hpp"
 #include "thread.hpp"
 #include "util_env.hpp"
@@ -15,6 +16,12 @@
 #include <string>
 
 namespace dxmt::gw2 {
+
+namespace {
+// gw2 (C2): =1 only (exactly "1"), off by default
+sw::Switch<bool> kCompileDemand{"DXMT_COMPILE_DEMAND", false, sw::legacy::exactlyOne};
+std::atomic<uint64_t> g_promoted{0};
+} // namespace
 
 namespace {
 
@@ -246,11 +253,12 @@ section(double, uint32_t) {
   auto waits = drainWaits();
   return std::format(
       "variants={} air={}/{} pso={}/{} built={} failed={} build=shader:{:.0f}/{:.1f} pipeline:{:.0f}/{:.1f} "
-      "queue={}/{} threads={} wait={}x {:.1f}/{:.1f} slow={}{}{}",
+      "queue={}/{} threads={} wait={}x {:.1f}/{:.1f} slow={}{}{}{}",
       x(w.variants), x(w.air_hit), x(w.air_miss), x(w.pso_hit), x(w.pso_miss), x(w.built), x(w.failed),
       x(w.shader_ns) / 1e6, x(g_shader_max_ns) / 1e6, x(w.pso_ns) / 1e6, x(g_pso_max_ns) / 1e6, queue_now,
       queue_max, g_threads.load(std::memory_order_relaxed), waits.total_n, waits.total_ns / 1e6,
-      x(g_wait_max_ns) / 1e6, x(g_slow_frames), windowCauses(waits), archiveSection()
+      x(g_wait_max_ns) / 1e6, x(g_slow_frames), windowCauses(waits),
+      compileDemand() ? std::format(" promoted={}", x(g_promoted)) : std::string(), archiveSection()
   );
 }
 
@@ -334,6 +342,18 @@ compileEncodeFrame(uint64_t frame) {
 bool
 compileTiming() {
   return statsEnabled();
+}
+
+bool
+compileDemand() {
+  static const bool on = kCompileDemand();
+  return on;
+}
+
+void
+compilePromoted() {
+  if (statsEnabled())
+    g_promoted.fetch_add(1, std::memory_order_relaxed);
 }
 
 int64_t

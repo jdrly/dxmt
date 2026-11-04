@@ -27,6 +27,7 @@
 #include <cstdio>
 #include <functional>
 #include <map>
+#include <random>
 #include <memory>
 #include <set>
 #include <sstream>
@@ -75,6 +76,15 @@ CompileWaitScope::CompileWaitScope(const compile::JobRecord *job) {
   g_waits.push_back({job && job->timed.load(), job ? job->state.load() : compile::JobState::Absent});
 }
 CompileWaitScope::~CompileWaitScope() {}
+std::atomic<uint64_t> g_promoted_count{0};
+bool
+compileDemand() {
+  return false;
+}
+void
+compilePromoted() {
+  g_promoted_count++;
+}
 } // namespace dxmt::gw2
 
 static int failures = 0;
@@ -140,8 +150,24 @@ struct Gate {
   }
 };
 
+std::atomic<uint64_t> g_parks{0}, g_early_runs{0};
+
 FakeJob *
 FakeJob::run() {
+  if (!gate) {
+    // ungated (stress): a declared job must find every dependency done when it starts
+    if (std::any_of(deps.begin(), deps.end(), [](FakeJob *d) { return !d->GetIsDone(); }))
+      g_early_runs++;
+    for (auto *d : deps)
+      if (!d->GetIsDone()) {
+        g_parks++;
+        return d;
+      }
+    for (volatile int spin = 0; spin < 200 + id % 300; spin = spin + 1)
+      ;
+    failed = fails;
+    return this;
+  }
   gate->enter(id);
   for (size_t i = 0; i < deps.size(); i++) {
     auto *d = deps[i];
@@ -178,6 +204,7 @@ template <> struct compile::JobTraits<FakeJob *> {
   bool done(FakeJob *job) { return job->GetIsDone(); }
   void setDone(FakeJob *job) { job->SetIsDone(true); }
   compile::JobRecord &record(FakeJob *job) { return job->record; }
+  void deps(FakeJob *job, std::vector<FakeJob *> &out) { out.insert(out.end(), job->deps.begin(), job->deps.end()); }
 };
 } // namespace dxmt
 
@@ -578,6 +605,248 @@ recordsAndDemands() {
   g_timing = false;
 }
 
+// --- C2: the declared policy (the service alone)
+
+static compile::Options
+declared(unsigned workers, unsigned max) {
+  compile::Options o;
+  o.initial_workers = workers;
+  o.max_workers = max;
+  o.policy = compile::Policy::Declared;
+  return o;
+}
+
+// Releases `id` at the gate and waits for what it returns.
+static std::string
+releaseJob(Gate &gate, int id) {
+  size_t before;
+  {
+    std::lock_guard<std::mutex> l(gate.m);
+    before = gate.outcomes.size();
+    gate.released.insert(id);
+    gate.cv.notify_all();
+  }
+  auto end = Clock::now() + std::chrono::seconds(10);
+  while (Clock::now() < end) {
+    std::lock_guard<std::mutex> l(gate.m);
+    if (gate.outcomes.size() > before)
+      return gate.outcomes[before];
+  }
+  return "timeout";
+}
+
+static std::set<int>
+gatedNow(Gate &gate, size_t workers) {
+  waitQuiescent(gate, workers, std::chrono::milliseconds(8), std::chrono::seconds(10));
+  std::lock_guard<std::mutex> l(gate.m);
+  return gate.gated;
+}
+
+static std::string
+str(const std::set<int> &s) {
+  std::string r = "{";
+  for (int i : s)
+    r += std::to_string(i) + ",";
+  return r + "}";
+}
+
+// Many threads, GW2-shaped graphs, no gate: every job completes once, none runs before its
+// dependencies are done, none parks.
+static void
+declaredStress() {
+  g_parks = 0;
+  g_early_runs = 0;
+  g_queue = 0;
+  constexpr int kThreads = 4, kOwnVariants = 75, kPipelines = 400, kShared = 40;
+  Scenario sc;
+  for (int i = 0; i < kShared; i++)
+    sc.add();
+  std::vector<std::vector<FakeJob *>> own(kThreads), pipes(kThreads);
+  std::mt19937 rng(42);
+  for (int t = 0; t < kThreads; t++) {
+    for (int i = 0; i < kOwnVariants; i++)
+      own[t].push_back(sc.add());
+    for (int i = 0; i < kPipelines; i++) {
+      auto *p = sc.add();
+      p->deps.push_back(own[t][rng() % kOwnVariants]);
+      p->deps.push_back(sc.jobs[rng() % kShared].get());
+      if (i % 3 == 0)
+        p->deps.push_back(own[t][rng() % kOwnVariants]);
+      pipes[t].push_back(p);
+    }
+  }
+  {
+    compile::Service<FakeJob *> sched(declared(2, 0));
+    for (int i = 0; i < kShared; i++)
+      sched.submit(sc.jobs[i].get());
+    std::vector<std::thread> ts;
+    for (int t = 0; t < kThreads; t++)
+      ts.emplace_back([&, t] {
+        // as a pipeline's constructor does through get_shader: its new variants first, then it
+        std::set<FakeJob *> submitted;
+        for (int i = 0; i < kPipelines; i++) {
+          for (auto *d : pipes[t][i]->deps)
+            if (d->id >= kShared && submitted.insert(d).second)
+              sched.submit(d);
+          sched.submit(pipes[t][i]);
+        }
+        for (auto *v : own[t])
+          if (submitted.insert(v).second)
+            sched.submit(v);
+      });
+    for (auto &t : ts)
+      t.join();
+    for (auto &j : sc.jobs)
+      j->ready.wait(false);
+  }
+  int once = 0;
+  for (auto &j : sc.jobs)
+    once += j->done_count.load() == 1;
+  CHECK(once == int(sc.jobs.size()), "declared stress: %d of %zu jobs completed exactly once", once, sc.jobs.size());
+  CHECK(g_queue.load() == 0, "declared stress: queue balance %lld", (long long)g_queue.load());
+  CHECK(g_early_runs.load() == 0 && g_parks.load() == 0, "declared stress: %llu jobs ran before a dependency was done, %llu parks",
+        (unsigned long long)g_early_runs.load(), (unsigned long long)g_parks.load());
+  std::printf("%s declared stress: %zu jobs from %d threads, each once; none ran early or parked\n",
+              g_early_runs.load() || g_parks.load() ? "FAIL" : "ok  ", sc.jobs.size(), kThreads);
+}
+
+// No parks when dependencies come first: a pipeline submitted while its variants run waits unqueued.
+static void
+declaredNoPark() {
+  Scenario sc;
+  sc.add();
+  sc.add();
+  auto *p = sc.add({0, 1});
+  Gate gate;
+  for (auto &j : sc.jobs)
+    j->gate = &gate;
+  compile::Service<FakeJob *> sched(declared(3, 3));
+  sched.submit(sc.jobs[0].get());
+  sched.submit(sc.jobs[1].get());
+  sched.submit(p);
+  auto g = gatedNow(gate, 3);
+  CHECK(g == std::set<int>({0, 1}), "declared: the pipeline waits for its variants, unqueued (gated %s)", str(g).c_str());
+  CHECK(p->record.state.load() == compile::JobState::Queued, "declared: the waiting pipeline is still 'queued'");
+  auto a = releaseJob(gate, 0), b = releaseJob(gate, 1);
+  g = gatedNow(gate, 3);
+  CHECK(g == std::set<int>({2}), "declared: runnable once both are done (gated %s)", str(g).c_str());
+  auto c = releaseJob(gate, 2);
+  CHECK(c == "2->done", "declared: it ran once, without parking (%s)", c.c_str());
+  std::printf("%s declared, no park: %s %s %s\n", c == "2->done" ? "ok  " : "FAIL", a.c_str(), b.c_str(), c.c_str());
+}
+
+// A demand promotes the job and its queued dependency closure ahead of the FIFO, once.
+static void
+declaredDemand() {
+  gw2::g_promoted_count = 0;
+  Scenario sc;
+  for (int i = 0; i < 4; i++)
+    sc.add();                  // 0-3: independent jobs
+  sc.add();                    // 4: a variant
+  auto *p = sc.add({4});       // 5: the pipeline on it
+  Gate gate;
+  for (auto &j : sc.jobs)
+    j->gate = &gate;
+  std::vector<std::string> order;
+  {
+    compile::Service<FakeJob *> sched(declared(1, 1));
+    for (int i = 0; i < 6; i++)
+      sched.submit(sc.jobs[i].get());
+    auto g = gatedNow(gate, 1);
+    CHECK(g == std::set<int>({0}), "demand: job 0 runs (gated %s)", str(g).c_str());
+    std::thread demander([&] { compile::demand(p->record, p->ready); });
+    while (gw2::g_promoted_count.load() < 2)
+      std::this_thread::yield();
+    // twice: promotion happens once per job
+    std::thread demander2([&] { compile::demand(p->record, p->ready); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    CHECK(gw2::g_promoted_count.load() == 2, "demand: the pipeline and its variant promoted once each (%llu)",
+          (unsigned long long)gw2::g_promoted_count.load());
+    for (int step = 0; step < 6; step++) {
+      auto gs = gatedNow(gate, 1);
+      if (gs.empty())
+        break;
+      order.push_back(releaseJob(gate, *gs.begin()));
+    }
+    demander.join();
+    demander2.join();
+  }
+  std::string got;
+  for (auto &o : order)
+    got += o + " ";
+  bool ok = got == "0->done 4->done 5->done 1->done 2->done 3->done ";
+  CHECK(ok, "demand: the variant and the pipeline run before the FIFO (%s)", got.c_str());
+  std::printf("%s declared, demand promotes the closure: %s\n", ok ? "ok  " : "FAIL", got.c_str());
+}
+
+// Speculative jobs: at most one at a time, none while a demand waits; a demand on one promotes it.
+static void
+declaredSpeculative() {
+  Scenario sc;
+  for (int i = 0; i < 3; i++)
+    sc.add(); // 0-2: speculative (warming)
+  sc.add();   // 3: normal
+  sc.add();   // 4: speculative, demanded later
+  Gate gate;
+  for (auto &j : sc.jobs)
+    j->gate = &gate;
+  compile::Service<FakeJob *> sched(declared(3, 3));
+  for (int i = 0; i < 3; i++)
+    sched.submit(sc.jobs[i].get(), compile::Lane::Speculative);
+  sched.submit(sc.jobs[3].get());
+  auto g = gatedNow(gate, 3);
+  CHECK(g == std::set<int>({0, 3}), "speculative: one speculative job beside the normal one (gated %s)", str(g).c_str());
+  // a demand pending (on the running normal job): no speculative job starts
+  auto *n = sc.jobs[3].get();
+  std::thread demander([&] { compile::demand(n->record, n->ready); });
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  releaseJob(gate, 0);
+  g = gatedNow(gate, 3);
+  CHECK(g == std::set<int>({3}), "speculative: none starts while a demand waits (gated %s)", str(g).c_str());
+  releaseJob(gate, 3);
+  demander.join();
+  g = gatedNow(gate, 3);
+  CHECK(g == std::set<int>({1}), "speculative: admission resumes after the demand (gated %s)", str(g).c_str());
+  // a demand on a queued speculative job promotes it past the speculative limit
+  auto *s4 = sc.jobs[4].get();
+  sched.submit(s4, compile::Lane::Speculative);
+  std::thread demander4([&] { compile::demand(s4->record, s4->ready); });
+  g = gatedNow(gate, 3);
+  for (int tries = 0; tries < 100 && g.size() < 2; tries++)
+    g = gatedNow(gate, 3);
+  CHECK(g == std::set<int>({1, 4}), "speculative: a demanded speculative job runs at once (gated %s)", str(g).c_str());
+  releaseJob(gate, 4);
+  demander4.join();
+  releaseJob(gate, 1);
+  g = gatedNow(gate, 3);
+  releaseJob(gate, 2);
+  std::printf("%s declared, speculative admission\n", failures ? "?   " : "ok  ");
+}
+
+// A dependency the service doesn't know (submitted after its dependent): the job parks on it as
+// legacy does and completes after it.
+static void
+declaredUnknownDependency() {
+  Scenario sc;
+  sc.add();
+  auto *p = sc.add({0});
+  Gate gate;
+  for (auto &j : sc.jobs)
+    j->gate = &gate;
+  compile::Service<FakeJob *> sched(declared(1, 1));
+  sched.submit(p);
+  gatedNow(gate, 1);
+  auto a = releaseJob(gate, 1);
+  sched.submit(sc.jobs[0].get());
+  gatedNow(gate, 1);
+  auto b = releaseJob(gate, 0);
+  gatedNow(gate, 1);
+  auto c = releaseJob(gate, 1);
+  bool ok = a == "1->park0" && b == "0->done" && c == "1->done";
+  CHECK(ok, "unknown dependency: %s %s %s", a.c_str(), b.c_str(), c.c_str());
+  std::printf("%s declared, unknown dependency parks: %s %s %s\n", ok ? "ok  " : "FAIL", a.c_str(), b.c_str(), c.c_str());
+}
+
 int
 main() {
   parity("chain", chain);
@@ -594,6 +863,11 @@ main() {
   parity("GW2 burst, STATS on", burst);
   g_timing = false;
   recordsAndDemands();
+  declaredNoPark();
+  declaredDemand();
+  declaredSpeculative();
+  declaredUnknownDependency();
+  declaredStress();
   std::printf(failures ? "%d FAILED\n" : "all passed\n", failures);
   return failures ? 1 : 0;
 }

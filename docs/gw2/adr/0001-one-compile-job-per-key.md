@@ -13,8 +13,9 @@ kept by convention. The pointer-keyed front-end lookup stays as the fast path in
   no behaviour change: the old run/park loop as is, job state owned by the service and kept with
   STATS off, one `demand()` instead of four wait copies. A parity fixture
   (`tests/gw2/compile_service_test.cpp`) holds the service to the old scheduler's traces.
-- Owning jobs, dependencies declared at creation, the demand lane and speculative admission change
-  lifetimes and order, so they come in C2 behind `DXMT_COMPILE_DEMAND` (off).
+- C2 adds the `declared` policy behind `DXMT_COMPILE_DEMAND` (off): dependencies taken at submit,
+  the demand lane with closure promotion, and speculative admission (one at a time, none while a
+  demand waits). Owning jobs moved on to C4, with the stable keys that need them.
 - Stable keys and shared results come with C3/C4; warming (W2/W3) acquires speculative jobs through the
   service and keeps no queue or key table of its own.
 

@@ -310,8 +310,13 @@ upscale_metal4(id<MTLDevice> device) API_AVAILABLE(macos(26.0)) {
 
 int
 main(void) {
+  int metal4_skipped = 0;
   @autoreleasepool {
     id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+    if (!device || ![MTLFXSpatialScalerDescriptor supportsDevice:device]) {
+      printf("no Metal device with MetalFX: skipped\n");
+      return 77; // X1: skipped, not passed
+    }
     printf("device: %s\n", [device.name UTF8String]);
     struct unixcall_generic_obj_uint64_ret s = {.handle = H(device)};
     _MTLDevice_supportsMetal4FX(&s);
@@ -323,10 +328,12 @@ main(void) {
       if (@available(macOS 26.0, *))
         upscale_metal4(device);
     } else {
-      CHECK(0, "no Metal 4 MetalFX on this Mac");
+      printf("no Metal 4 MetalFX on this Mac: the Metal 4 path is skipped\n");
+      metal4_skipped = 1;
     }
     printf(failures ? "FAILED: %d\n" : "OK\n", failures);
     [device release];
   }
-  return failures ? 1 : 0;
+  // X1: a Metal 4 path that couldn't run is skipped (77), never passed; a failure still fails
+  return failures ? 1 : metal4_skipped ? 77 : 0;
 }
