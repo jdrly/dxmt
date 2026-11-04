@@ -314,7 +314,7 @@ pipeline is built. A frame with such waits is a hitch DXMT causes.
 
 `COMPILE variants= air=hit/miss pso=hit/miss built= failed= build=shader:ms/max pipeline:ms/max
 queue=now/max threads= wait=Nx ms/max slow= [waitcause=queued:N/ms,variantq:N/ms,variant:N/ms,building:N/ms[,other:N/ms]
-[archbusy=N]] [promoted=N] [archive=hit/miss miss=new:N,known:N added= queued= unflushed= addfailed= capped= skipped= rebuilt= [gen= published= excluded= missexcl=]]`
+[archbusy=N]] [variant=lock:N/ms/max,air:…,lib:…,fn:…,xlate:…,store:…] [promoted=N] [archive=hit/miss miss=new:N,known:N added= queued= unflushed= addfailed= capped= skipped= rebuilt= [gen= published= excluded= missexcl=]]`
 
 Counts are **totals in the 2 s window**; the `COMPILE frame=` line below has them per frame. Times are ms. Without `DXMT_STATS` nothing is counted or timed (no clock reads), except the count of built pipelines that `DXMT_PSO_FLUSH_EVERY` needs.
 
@@ -329,6 +329,7 @@ Counts are **totals in the 2 s window**; the `COMPILE frame=` line below has the
 | `threads` | Compile workers (the pool starts with 2 and grows while all of them are busy) |
 | `wait` | The encode thread's waits in `GetPipeline` for a pipeline that wasn't ready: count, total ms, max ms. A ready pipeline costs no wait and isn't counted |
 | `slow` | Frames whose waits reached `DXMT_COMPILE_WAIT_MS` |
+| `variant` | (W0) Only in a window with variant builds: their stages, each count / total ms / max ms, elapsed on the compile workers (waits and compiler services included; not CPU time). `lock`: waiting for the AIR cache reader's lock (one reader, shared by all workers); `air`: the AIR read; `lib`: `newLibrary`; `fn`: `newFunction`; `xlate`: airconv's translation, on an AIR miss; `store`: writing the new AIR (its lock included). Warm jobs (#88) aren't counted here |
 | `promoted` | (C2) Only with `DXMT_COMPILE_DEMAND=1`: compile jobs a demand moved ahead (a waited-for pipeline and its unfinished variants, each once). Under the declared policy `queued` waits also include a pipeline waiting for its variants, unqueued (its state stays `queued` until a worker starts it) |
 | `waitcause` | (#46) Only in a window with waits: the same waits by what the waited-for pipeline task was doing when the wait started, count / total ms. `queued`: submitted, no worker had started it (behind other compile tasks). `variantq`: started, parked on its vertex or pixel shader variant, and that variant was still queued. `variant`: parked on a variant that was compiling (or between the two). `building`: inside Metal's pipeline build (`newRenderPipelineState`/`newComputePipelineState`). `other`: not classified (submitted while `DXMT_STATS` was off, or done but not yet flagged); shown only when non-zero. The counts add up to `wait`: both come from one drain of the per-cause counters, so a wait finishing during the drain lands in one window for both |
 | `archbusy` | (#46) Only with `DXMT_PSO_ARCHIVE=1`: waits that began while PSO archive adds were still queued on the unix side (each add compiles the pipeline again for the archive) |

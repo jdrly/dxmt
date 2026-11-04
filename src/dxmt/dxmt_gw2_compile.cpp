@@ -14,6 +14,7 @@
 #include <format>
 #include <mutex>
 #include <string>
+#include <utility>
 
 namespace dxmt::gw2 {
 
@@ -21,6 +22,14 @@ namespace {
 // gw2 (C2): =1 only (exactly "1"), off by default
 sw::Switch<bool> kCompileDemand{"DXMT_COMPILE_DEMAND", false, sw::legacy::exactlyOne};
 std::atomic<uint64_t> g_promoted{0};
+// gw2 (W0): per variant stage: count, total and max ns in the window, published and drained together
+// under the stage's own lock (STATS only; uncontended but for a drain every 2 s)
+struct StageWindow {
+  dxmt::mutex mutex;
+  uint64_t n = 0, ns = 0, max_ns = 0; // mutex
+};
+StageWindow g_stages[uint32_t(VariantStage::Count)];
+constexpr const char *kStageNames[] = {"lock", "air", "lib", "fn", "xlate", "store"};
 } // namespace
 
 namespace {
@@ -269,6 +278,27 @@ windowCauses(const WaitWindow &w) {
   return text;
 }
 
+// " variant=lock:N/ms/max,air:…,lib:…,fn:…,xlate:…,store:…" (W0), window totals; empty in a window
+// without variant builds
+std::string
+variantStages() {
+  uint64_t n[uint32_t(VariantStage::Count)], ns[uint32_t(VariantStage::Count)], mx[uint32_t(VariantStage::Count)];
+  uint64_t any = 0;
+  for (uint32_t i = 0; i < uint32_t(VariantStage::Count); i++) {
+    std::lock_guard<dxmt::mutex> lock(g_stages[i].mutex);
+    n[i] = std::exchange(g_stages[i].n, 0);
+    ns[i] = std::exchange(g_stages[i].ns, 0);
+    mx[i] = std::exchange(g_stages[i].max_ns, 0);
+    any += n[i];
+  }
+  if (!any)
+    return {};
+  std::string text = " variant=";
+  for (uint32_t i = 0; i < uint32_t(VariantStage::Count); i++)
+    text += std::format("{}{}:{}/{:.1f}/{:.1f}", i ? "," : "", kStageNames[i], n[i], ns[i] / 1e6, mx[i] / 1e6);
+  return text;
+}
+
 std::string
 section(double, uint32_t) {
   auto x = [](std::atomic<uint64_t> &v) { return v.exchange(0, std::memory_order_relaxed); };
@@ -282,7 +312,7 @@ section(double, uint32_t) {
       x(w.variants), x(w.air_hit), x(w.air_miss), x(w.pso_hit), x(w.pso_miss), x(w.built), x(w.failed),
       x(w.shader_ns) / 1e6, x(g_shader_max_ns) / 1e6, x(w.pso_ns) / 1e6, x(g_pso_max_ns) / 1e6, queue_now,
       queue_max, g_threads.load(std::memory_order_relaxed), waits.total_n, waits.total_ns / 1e6,
-      x(g_wait_max_ns) / 1e6, x(g_slow_frames), windowCauses(waits),
+      x(g_wait_max_ns) / 1e6, x(g_slow_frames), windowCauses(waits) + variantStages(),
       compileDemand() ? std::format(" promoted={}", x(g_promoted)) : std::string(), archiveSection()
   );
 }
@@ -363,6 +393,18 @@ compileEncodeFrame(uint64_t frame) {
 // --- gw2 (#46, C1): the compile jobs' timelines are kept by the compile service
 // (dxmt_compile_service.hpp); relaxed: each field has one writer at a time, and the encode thread
 // reads them only to classify and report, after the job's done flag for the end
+
+void
+compileVariantStage(VariantStage stage, int64_t t0) {
+  if (!t0)
+    return;
+  uint64_t ns = uint64_t(std::max<int64_t>(0, nowNs() - t0));
+  auto &w = g_stages[uint32_t(stage)];
+  std::lock_guard<dxmt::mutex> lock(w.mutex);
+  w.n++;
+  w.ns += ns;
+  w.max_ns = std::max(w.max_ns, ns);
+}
 
 bool
 compileTiming() {
