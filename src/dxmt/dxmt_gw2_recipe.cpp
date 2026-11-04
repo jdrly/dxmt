@@ -1,0 +1,451 @@
+#include "dxmt_gw2_recipe.hpp"
+#include "Metal.hpp"
+#include "airconv_public.h"
+#include "dxmt_gw2_stats.hpp"
+#include "log/log.hpp"
+#include "thread.hpp"
+#include "util_env.hpp"
+#include "util_string.hpp"
+#include "winemetal.h"
+#include <atomic>
+#include <format>
+#include <memory>
+#include <mutex>
+#include <string>
+
+// gw2 (#57): see dxmt_gw2_recipe.hpp.
+//
+// Keys (one table, `cache_<kRecipeSchema>`, in recipes_<kRecipeSchema>.db). Every key is content
+// addressed (the same key always holds the same value), so a key already in the file is skipped:
+//   'D' + shader SHA-1 (20)                              -> the DXBC bytes
+//   'V' + shader SHA-1 + variant digest (40) + target (4) -> schema (u32), target (u32), airconv (u32),
+//                                                           kind (u8), the variant's inputs
+//   'R' + SHA-1 of the recipe (20)                       -> the recipe: schema (u32), target (u32), ...
+// The target (SM50_SHADER_METAL_VERSION) is a translation input, so it is part of the V identity and
+// of every recipe. AIRCONV_VERSION isn't: a warm stage translates the DXBC with its own airconv, so a
+// V row only notes the airconv it was first recorded with.
+//
+// The budget is the file's own size (SQLite's page_count * page_size, from the bridge): read when
+// the writer opens it, and again after every batch; within a batch the rows' keys and values are
+// added to it. Past the budget, recording stops for the process (the file keeps what it has).
+
+namespace dxmt::gw2 {
+
+namespace {
+
+constexpr size_t kMaxQueued = 16384;                   // records waiting for the writer
+constexpr size_t kMaxQueuedBytes = 128u * 1024 * 1024;  // their keys and values
+constexpr size_t kDedupSlots = size_t(1) << 18;         // 2 MB of fingerprints, fixed
+constexpr unsigned kDedupProbe = 64;                    // slots tried before a key counts as overflow
+constexpr uint64_t kBudgetBytes = 256ull * 1024 * 1024; // the file's size
+constexpr unsigned kMaxConsecutiveFailures = 8;         // failed writes in a row before recording stops
+constexpr size_t kMaxQueuedLines = 16;
+constexpr DWORD kPollMs = 200;
+
+struct Node {
+  Node *next;
+  std::string key;
+  std::vector<uint8_t> value;
+};
+
+enum class Stop : uint32_t { None, WriterFailed, Budget };
+
+struct QueuedLine {
+  bool warn;
+  std::string text;
+};
+
+struct Recorder {
+  // what this process has admitted: 64-bit fingerprints of the keys (bit 0 clear), bit 0 set while
+  // the record is admitted (queued, or stored). Fixed size: no allocation or rehash, no lock.
+  std::unique_ptr<std::atomic<uint64_t>[]> seen{new std::atomic<uint64_t>[kDedupSlots]()};
+  std::atomic<Node *> head{nullptr}; // the producers' list (newest first); the writer takes it whole
+  std::atomic<size_t> queued{0}, queued_bytes{0};
+  std::atomic<bool> started{false};
+  std::atomic<Stop> stop{Stop::None};
+  // counters: exchanged by the RECORD section
+  std::atomic<uint64_t> shaders{0}, variants{0}, recipes{0}, unsupported_variants{0}, unsupported_pipelines{0},
+      written{0}, present{0}, failed{0}, dropped_queue{0}, dropped_seen{0}, dropped_stop{0};
+
+  // the writer thread's log lines (it never calls the logger)
+  dxmt::mutex lines_mutex;
+  std::vector<QueuedLine> lines; // lines_mutex
+  uint32_t lines_dropped = 0;    // lines_mutex
+  std::atomic<bool> lines_pending{false};
+
+  void
+  post(bool warn, std::string text) {
+    std::lock_guard<dxmt::mutex> lock(lines_mutex);
+    if (lines.size() < kMaxQueuedLines)
+      lines.push_back({warn, std::move(text)});
+    else
+      lines_dropped++;
+    lines_pending.store(true, std::memory_order_release);
+  }
+};
+
+std::atomic<Recorder *> g_recorder{nullptr}; // set once the recorder exists
+
+Recorder &
+recorder() {
+  // Never destroyed: the writer thread is detached and may outlive static destruction.
+  static auto *r = [] {
+    auto *p = new Recorder;
+    g_recorder.store(p, std::memory_order_release);
+    return p;
+  }();
+  return *r;
+}
+
+uint64_t
+fingerprint(const std::string &key) {
+  uint64_t h = 1469598103934665603ull; // FNV-1a 64
+  for (unsigned char c : key) {
+    h ^= c;
+    h *= 1099511628211ull;
+  }
+  return (h | 2) & ~uint64_t(1); // never 0, bit 0 free for the admitted flag
+}
+
+enum class Claim { New, Seen, Overflow };
+
+// Admits a key once per process: New if the caller now owns it (also a key whose earlier record
+// was dropped or failed), Seen if it is already admitted, Overflow if its probe run is full.
+Claim
+claim(Recorder &r, const std::string &key) {
+  uint64_t fp = fingerprint(key);
+  for (unsigned i = 0; i < kDedupProbe; i++) {
+    auto &slot = r.seen[((fp >> 1) + i) & (kDedupSlots - 1)];
+    uint64_t v = slot.load(std::memory_order_acquire);
+    while (true) {
+      if (v == 0) {
+        if (slot.compare_exchange_weak(v, fp | 1, std::memory_order_acq_rel))
+          return Claim::New;
+        continue; // v reloaded
+      }
+      if ((v & ~uint64_t(1)) != fp)
+        break; // another key's slot: probe on
+      if (v & 1)
+        return Claim::Seen;
+      if (slot.compare_exchange_weak(v, fp | 1, std::memory_order_acq_rel))
+        return Claim::New;
+    }
+  }
+  return Claim::Overflow;
+}
+
+// The record for `key` wasn't stored: a later sighting may admit it again.
+void
+unclaim(Recorder &r, const std::string &key) {
+  uint64_t fp = fingerprint(key);
+  for (unsigned i = 0; i < kDedupProbe; i++) {
+    auto &slot = r.seen[((fp >> 1) + i) & (kDedupSlots - 1)];
+    uint64_t v = slot.load(std::memory_order_acquire);
+    if (v == 0)
+      return;
+    if ((v & ~uint64_t(1)) == fp) {
+      slot.store(fp, std::memory_order_release);
+      return;
+    }
+  }
+}
+
+void writerThread();
+
+enum class Admit { Queued, Seen, Dropped };
+
+// Never blocks: atomics, the record's own allocation, and once per process the writer's creation.
+Admit
+enqueue(std::string &&key, std::vector<uint8_t> &&value) {
+  auto &r = recorder();
+  if (r.stop.load(std::memory_order_relaxed) != Stop::None) {
+    r.dropped_stop.fetch_add(1, std::memory_order_relaxed);
+    return Admit::Dropped;
+  }
+  switch (claim(r, key)) {
+  case Claim::Seen:
+    return Admit::Seen;
+  case Claim::Overflow:
+    r.dropped_seen.fetch_add(1, std::memory_order_relaxed);
+    return Admit::Dropped;
+  case Claim::New:
+    break;
+  }
+  size_t bytes = key.size() + value.size();
+  size_t n = r.queued.fetch_add(1, std::memory_order_relaxed);
+  size_t b = r.queued_bytes.fetch_add(bytes, std::memory_order_relaxed);
+  if (n >= kMaxQueued || b + bytes > kMaxQueuedBytes) {
+    r.queued.fetch_sub(1, std::memory_order_relaxed);
+    r.queued_bytes.fetch_sub(bytes, std::memory_order_relaxed);
+    unclaim(r, key);
+    r.dropped_queue.fetch_add(1, std::memory_order_relaxed);
+    return Admit::Dropped;
+  }
+  auto *node = new Node{nullptr, std::move(key), std::move(value)};
+  node->next = r.head.load(std::memory_order_relaxed);
+  while (!r.head.compare_exchange_weak(node->next, node, std::memory_order_release, std::memory_order_relaxed))
+    ;
+  if (!r.started.exchange(true, std::memory_order_relaxed))
+    dxmt::thread([] { writerThread(); }).detach();
+  return Admit::Queued;
+}
+
+// The writer's batch, oldest first; the queue counters are released as it is taken.
+Node *
+takeAll(Recorder &r) {
+  Node *list = r.head.exchange(nullptr, std::memory_order_acquire);
+  Node *oldest = nullptr;
+  while (list) {
+    Node *next = list->next;
+    list->next = oldest;
+    oldest = list;
+    list = next;
+  }
+  return oldest;
+}
+
+void
+release(Recorder &r, Node *node) {
+  r.queued.fetch_sub(1, std::memory_order_relaxed);
+  r.queued_bytes.fetch_sub(node->key.size() + node->value.size(), std::memory_order_relaxed);
+  delete node;
+}
+
+void
+stopRecording(Recorder &r, Stop why, std::string line) {
+  r.stop.store(why, std::memory_order_relaxed);
+  r.post(true, std::move(line));
+}
+
+void
+writerThread() {
+  env::setThreadName("dxmt-recipe-writer");
+  SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
+  auto &r = recorder();
+  auto path = str::format("dxmt/", env::getExeName(), "/recipes_", kRecipeSchema, ".db");
+  auto shown = str::format("$(getconf DARWIN_USER_CACHE_DIR)", path);
+
+  // The writer creates the file and its table; the reader then finds the rows already stored.
+  auto writer = WMT::CacheWriter::alloc_init(path.c_str(), kRecipeSchema);
+  auto reader = writer == nullptr ? WMT::Reference<WMT::CacheReader>()
+                                  : WMT::CacheReader::alloc_init(path.c_str(), kRecipeSchema);
+  uint64_t accounted = writer == nullptr ? 0 : writer.byteSize();
+  if (writer == nullptr || reader == nullptr || accounted == 0) {
+    stopRecording(r, Stop::WriterFailed,
+                  str::format("Recipes: can't open ", shown, "; recording stops (DXMT_PSO_RECORD)"));
+  } else {
+    if (accounted >= kBudgetBytes)
+      stopRecording(r, Stop::Budget,
+                    str::format("Recipes: ", shown, " holds ", accounted >> 20, " MB, its budget is ",
+                                kBudgetBytes >> 20, " MB; recording stops. Delete the file to start over"));
+    else
+      r.post(false, std::format("Recipes: recording into {} (DXMT_PSO_RECORD; schema {}, airconv {}, {} of {} MB)",
+                                shown, kRecipeSchema, AIRCONV_VERSION, accounted >> 20, kBudgetBytes >> 20));
+  }
+
+  unsigned consecutive_failures = 0;
+  while (true) {
+    Node *node = takeAll(r);
+    if (!node) {
+      Sleep(kPollMs);
+      continue;
+    }
+    bool stored_any = false;
+    while (node) {
+      Node *next = node->next;
+      if (r.stop.load(std::memory_order_relaxed) != Stop::None) {
+        r.dropped_stop.fetch_add(1, std::memory_order_relaxed);
+      } else if (reader.get(node->key.data(), node->key.size()) != nullptr) {
+        r.present.fetch_add(1, std::memory_order_relaxed); // an earlier session stored it
+      } else if (accounted + node->key.size() + node->value.size() > kBudgetBytes) {
+        r.dropped_stop.fetch_add(1, std::memory_order_relaxed);
+        stopRecording(r, Stop::Budget,
+                      str::format("Recipes: ", shown, " reached its budget (", kBudgetBytes >> 20,
+                                  " MB); recording stops. Delete the file to start over"));
+      } else if (writer.set(node->key.data(), node->key.size(),
+                            // DispatchData copies the bytes (dispatch_data_create, default destructor)
+                            WMT::MakeDispatchData(node->value.data(), node->value.size()))) {
+        accounted += node->key.size() + node->value.size();
+        stored_any = true;
+        consecutive_failures = 0;
+        r.written.fetch_add(1, std::memory_order_relaxed);
+      } else {
+        r.failed.fetch_add(1, std::memory_order_relaxed);
+        unclaim(r, node->key);
+        if (++consecutive_failures >= kMaxConsecutiveFailures)
+          stopRecording(r, Stop::WriterFailed,
+                        str::format("Recipes: ", kMaxConsecutiveFailures, " writes in a row into ", shown,
+                                    " failed; recording stops (DXMT_PSO_RECORD)"));
+      }
+      release(r, node);
+      node = next;
+    }
+    if (stored_any) {
+      if (uint64_t size = writer.byteSize())
+        accounted = size; // the file's real size again
+    }
+  }
+}
+
+std::string
+section(double, uint32_t) {
+  auto *rp = g_recorder.load(std::memory_order_acquire);
+  if (!rp)
+    return {}; // nothing recorded yet (or DXMT_PSO_RECORD=0)
+  auto &r = *rp;
+  auto x = [](std::atomic<uint64_t> &v) { return v.exchange(0, std::memory_order_relaxed); };
+  uint64_t shaders = x(r.shaders), variants = x(r.variants), recipes = x(r.recipes),
+           uv = x(r.unsupported_variants), up = x(r.unsupported_pipelines), written = x(r.written),
+           present = x(r.present), failed = x(r.failed), dq = x(r.dropped_queue), ds = x(r.dropped_seen),
+           dst = x(r.dropped_stop);
+  size_t queued = r.queued.load(std::memory_order_relaxed);
+  if (!shaders && !variants && !recipes && !uv && !up && !written && !present && !failed && !dq && !ds && !dst &&
+      !queued)
+    return {};
+  auto stop = r.stop.load(std::memory_order_relaxed);
+  return std::format("shaders={} variants={} recipes={} unsupported=variants:{},pipelines:{} written={} present={} "
+                     "failed={} queued={} dropped=queue:{},seen:{},stopped:{}{}",
+                     shaders, variants, recipes, uv, up, written, present, failed, queued, dq, ds, dst,
+                     stop == Stop::Budget ? " stopped=budget" : stop == Stop::WriterFailed ? " stopped=writer" : "");
+}
+
+SectionRegistrar g_section("RECORD", section);
+
+std::string
+digestKey(char tag, const Sha1Digest &a, const Sha1Digest *b = nullptr) {
+  std::string key(1, tag);
+  key.append(reinterpret_cast<const char *>(a.data), sizeof(a.data));
+  if (b)
+    key.append(reinterpret_cast<const char *>(b->data), sizeof(b->data));
+  return key;
+}
+
+} // namespace
+
+bool
+recipeRecording() {
+  static const bool on = env::getEnvVar("DXMT_PSO_RECORD") != "0";
+  return on;
+}
+
+void
+recipeShader(const Sha1Digest &sha1, const void *bytecode, size_t length) {
+  if (!recipeRecording() || !bytecode || !length)
+    return;
+  auto *p = static_cast<const uint8_t *>(bytecode);
+  if (enqueue(digestKey('D', sha1), std::vector<uint8_t>(p, p + length)) == Admit::Queued)
+    recorder().shaders.fetch_add(1, std::memory_order_relaxed);
+}
+
+bool
+recipeVariant(const Sha1Digest &shader, const Sha1Digest &variant, uint32_t metal_version, RecipeVariantKind kind,
+              RecipeBytes &&inputs) {
+  if (!recipeRecording())
+    return false;
+  RecipeBytes value;
+  value.u32(kRecipeSchema);
+  value.u32(metal_version);
+  value.u32(AIRCONV_VERSION);
+  value.u8(uint8_t(kind));
+  value.data.insert(value.data.end(), inputs.data.begin(), inputs.data.end());
+  auto key = digestKey('V', shader, &variant);
+  for (int i = 0; i < 4; i++)
+    key.push_back(char(uint8_t(metal_version >> (8 * i))));
+  switch (enqueue(std::move(key), std::move(value.data))) {
+  case Admit::Queued:
+    recorder().variants.fetch_add(1, std::memory_order_relaxed);
+    return true;
+  case Admit::Seen:
+    return true;
+  case Admit::Dropped:
+    return false;
+  }
+  return false;
+}
+
+void
+recipeVariantUnsupported() {
+  if (recipeRecording())
+    recorder().unsupported_variants.fetch_add(1, std::memory_order_relaxed);
+}
+
+void
+recipePipeline(const Sha1Digest &vs_shader, const Sha1Digest &vs_variant, const Sha1Digest *ps_shader,
+               const Sha1Digest *ps_variant, uint32_t metal_version, const WMTRenderPipelineInfo &info) {
+  if (!recipeRecording())
+    return;
+  // The canonical serialization: explicit fields only, in a fixed order.
+  RecipeBytes b;
+  b.u32(kRecipeSchema);
+  b.u32(metal_version);
+  b.digest(vs_shader);
+  b.digest(vs_variant);
+  b.u8(ps_shader && ps_variant);
+  if (ps_shader && ps_variant) {
+    b.digest(*ps_shader);
+    b.digest(*ps_variant);
+  }
+  for (auto &c : info.colors) {
+    b.u32(c.pixel_format);
+    b.u32(c.rgb_blend_operation);
+    b.u32(c.alpha_blend_operation);
+    b.u32(c.src_rgb_blend_factor);
+    b.u32(c.dst_rgb_blend_factor);
+    b.u32(c.src_alpha_blend_factor);
+    b.u32(c.dst_alpha_blend_factor);
+    b.u8(c.write_mask);
+    b.u8(c.blending_enabled);
+  }
+  b.u8(info.alpha_to_coverage_enabled);
+  b.u8(info.logic_operation_enabled);
+  b.u32(info.logic_operation);
+  b.u8(info.rasterization_enabled);
+  b.u8(info.raster_sample_count);
+  b.u32(info.depth_pixel_format);
+  b.u32(info.stencil_pixel_format);
+  b.u32(info.immutable_vertex_buffers);
+  b.u32(info.immutable_fragment_buffers);
+  b.u32(info.input_primitive_topology);
+  b.u32(info.tessellation_partition_mode);
+  b.u8(info.max_tessellation_factor);
+  b.u32(info.tessellation_output_winding_order);
+  b.u32(info.tessellation_factor_step);
+  b.u8(info.support_indirect_command_buffers);
+  auto key = Sha1HashState::compute(b.data.data(), b.data.size());
+  if (enqueue(digestKey('R', key), std::move(b.data)) == Admit::Queued)
+    recorder().recipes.fetch_add(1, std::memory_order_relaxed);
+}
+
+void
+recipePipelineUnsupported() {
+  if (recipeRecording())
+    recorder().unsupported_pipelines.fetch_add(1, std::memory_order_relaxed);
+}
+
+void
+recipeLogPending() {
+  auto *rp = g_recorder.load(std::memory_order_acquire);
+  if (!rp)
+    return;
+  auto &r = *rp;
+  if (!r.lines_pending.load(std::memory_order_acquire))
+    return;
+  if (!r.lines_mutex.try_lock())
+    return; // the writer is posting a line; the next Present takes it
+  std::vector<QueuedLine> lines;
+  lines.swap(r.lines);
+  uint32_t dropped = r.lines_dropped;
+  r.lines_dropped = 0;
+  r.lines_pending.store(false, std::memory_order_relaxed);
+  r.lines_mutex.unlock();
+  for (auto &line : lines) {
+    if (line.warn)
+      Logger::warn(line.text);
+    else
+      Logger::info(line.text);
+  }
+  if (dropped)
+    Logger::warn(std::format("Recipes: {} lines dropped", dropped));
+}
+
+} // namespace dxmt::gw2

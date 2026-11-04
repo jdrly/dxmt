@@ -4,6 +4,7 @@
 #include "config/config.hpp"
 #include "d3d11_input_layout.hpp"
 #include "dxmt_gw2_compile.hpp"
+#include "dxmt_gw2_recipe.hpp"
 #include "sha1/sha1_util.hpp"
 #include <mutex>
 
@@ -27,9 +28,10 @@ template <typename Proc>
 class GeneralShaderCompileTask : public CompiledShader {
 public:
   GeneralShaderCompileTask(MTLD3D11Device *pDevice, ManagedShader shader,
-                           Proc &&proc, std::string func_name, const Sha1Digest& variant_digest)
+                           Proc &&proc, std::string func_name, const Sha1Digest& variant_digest,
+                           bool recorded = false)
       : CompiledShader(), proc(std::forward<Proc>(proc)), func_name(func_name), device_(pDevice),
-        shader_(shader), variant_digest_(variant_digest) {
+        shader_(shader), variant_digest_(variant_digest), recorded_(recorded) {
     sm50_common.type = SM50_SHADER_COMMON;
     sm50_common.metal_version = (SM50_SHADER_METAL_VERSION)pDevice->GetDXMTDevice().metalVersion();
     sm50_common.flags = getGlobalShaderFlag();
@@ -107,6 +109,16 @@ public:
     return this;
   }
 
+  bool GetIdentity(Sha1Digest *pShader, Sha1Digest *pVariant) final {
+    // gw2 (#57): the AIR cache's key, for a variant whose inputs the recorder admitted (never the
+    // stream-output, hull, domain or geometry variants, whose inputs aren't recorded yet)
+    if (!recorded_)
+      return false;
+    *pShader = shader_->sha1();
+    *pVariant = variant_digest_;
+    return true;
+  }
+
   bool GetIsDone() { return ready_; }
 
   void SetIsDone(bool state) { ready_.store(state); }
@@ -118,6 +130,7 @@ private:
   MTLD3D11Device *device_;
   ManagedShader shader_;
   Sha1Digest variant_digest_;
+  bool recorded_; // gw2 (#57)
   std::atomic_bool ready_;
   WMT::Reference<WMT::Function> function_;
 };
@@ -133,6 +146,31 @@ CreateVariantShader(MTLD3D11Device *pDevice, ManagedShader shader,
   if (variant.input_layout_handle)
     h.update(variant.input_layout_handle->sha1());
   auto variant_digest = h.final();
+  bool recorded = false; // gw2 (#57): its inputs were admitted
+  if (gw2::recipeRecording()) {
+    // gw2 (#57): the variant's translation inputs, explicitly
+    gw2::RecipeBytes in;
+    in.u32(getGlobalShaderFlag());
+    in.u32(variant.gs_passthrough);
+    in.u8(variant.rasterization_disabled);
+    in.u8(variant.input_layout_handle ? 1 : 0);
+    if (variant.input_layout_handle) {
+      MTL_SHADER_INPUT_LAYOUT_ELEMENT_DESC *elements = nullptr;
+      uint32_t n = variant.input_layout_handle->input_layout_element(&elements);
+      in.u32(variant.input_layout_handle->input_slot_mask());
+      in.u32(n);
+      for (uint32_t k = 0; k < n; k++) {
+        in.u32(elements[k].Index);
+        in.u32(elements[k].Slot);
+        in.u32(elements[k].Offset);
+        in.u32(elements[k].Format);
+        in.u32(uint32_t(elements[k].StepFunction));
+        in.u32(elements[k].InstanceStepRate);
+      }
+    }
+    recorded = gw2::recipeVariant(shader->sha1(), variant_digest, pDevice->GetDXMTDevice().metalVersion(),
+                                   gw2::RecipeVariantKind::Vertex, std::move(in));
+  }
   std::string func_name = "vs_" + shader->sha1().string().substr(0, 8) + "_" + variant_digest.string();
 
   auto proc = [=](const char *func_name, SM50_SHADER_COMMON_DATA *common) -> sm50_bitcode_t  {
@@ -165,7 +203,7 @@ CreateVariantShader(MTLD3D11Device *pDevice, ManagedShader shader,
     return compile_result;
   };
   return std::make_unique<GeneralShaderCompileTask<decltype(proc)>>(
-      pDevice, shader, std::move(proc), func_name, variant_digest);
+      pDevice, shader, std::move(proc), func_name, variant_digest, recorded);
 };
 
 template <>
@@ -179,6 +217,18 @@ CreateVariantShader(MTLD3D11Device *pDevice, ManagedShader shader,
   h.update(variant.dual_source_blending);
   h.update(variant.disable_depth_output);
   auto variant_digest = h.final();
+  bool recorded = false; // gw2 (#57): its inputs were admitted
+  if (gw2::recipeRecording()) {
+    // gw2 (#57): the variant's translation inputs, explicitly
+    gw2::RecipeBytes in;
+    in.u32(getGlobalShaderFlag());
+    in.u32(variant.sample_mask);
+    in.u32(variant.unorm_output_reg_mask);
+    in.u8(variant.dual_source_blending);
+    in.u8(variant.disable_depth_output);
+    recorded = gw2::recipeVariant(shader->sha1(), variant_digest, pDevice->GetDXMTDevice().metalVersion(),
+                                   gw2::RecipeVariantKind::Pixel, std::move(in));
+  }
   std::string func_name = "ps_" + shader->sha1().string().substr(0, 8) + "_" + variant_digest.string();
 
   auto proc = [=](const char *func_name, SM50_SHADER_COMMON_DATA *common) -> sm50_bitcode_t  {
@@ -203,7 +253,7 @@ CreateVariantShader(MTLD3D11Device *pDevice, ManagedShader shader,
     return compile_result;
   };
   return std::make_unique<GeneralShaderCompileTask<decltype(proc)>>(
-      pDevice, shader, std::move(proc), func_name, variant_digest);
+      pDevice, shader, std::move(proc), func_name, variant_digest, recorded);
 };
 
 template <>
@@ -213,6 +263,13 @@ CreateVariantShader(MTLD3D11Device *pDevice, ManagedShader shader,
   Sha1HashState h;
   h.update(getGlobalShaderFlag());
   auto variant_digest = h.final();
+  bool recorded = false; // gw2 (#57): its inputs were admitted
+  if (gw2::recipeRecording()) {
+    gw2::RecipeBytes in; // gw2 (#57): only the global shader flags
+    in.u32(getGlobalShaderFlag());
+    recorded = gw2::recipeVariant(shader->sha1(), variant_digest, pDevice->GetDXMTDevice().metalVersion(),
+                                   gw2::RecipeVariantKind::Plain, std::move(in));
+  }
   std::string func_name = "cs_" + shader->sha1().string().substr(0, 8) + "_" + variant_digest.string();
   auto proc = [=](const char *func_name, SM50_SHADER_COMMON_DATA *common) -> sm50_bitcode_t  {
     sm50_bitcode_t compile_result = nullptr;
@@ -226,7 +283,7 @@ CreateVariantShader(MTLD3D11Device *pDevice, ManagedShader shader,
     return compile_result;
   };
   return std::make_unique<GeneralShaderCompileTask<decltype(proc)>>(
-      pDevice, shader, std::move(proc), func_name, variant_digest);
+      pDevice, shader, std::move(proc), func_name, variant_digest, recorded);
 };
 
 template <>
@@ -241,6 +298,7 @@ CreateVariantShader(MTLD3D11Device *pDevice, ManagedShader shader,
   if (variant.input_layout_handle)
     h.update(variant.input_layout_handle->sha1());
   auto variant_digest = h.final();
+  gw2::recipeVariantUnsupported(); // gw2 (#57): not recorded yet
   std::string func_name = "vshs_" + shader->sha1().string().substr(0, 8) + "_" +  variant_digest.string();
   auto proc = [=](const char *func_name, SM50_SHADER_COMMON_DATA *common) -> sm50_bitcode_t  {
     SM50_SHADER_IA_INPUT_LAYOUT_DATA ia_layout;
@@ -288,6 +346,7 @@ CreateVariantShader(MTLD3D11Device *pDevice, ManagedShader shader,
   h.update(variant.rasterization_disabled);
   h.update(variant.max_potential_tess_factor);
   auto variant_digest = h.final();
+  gw2::recipeVariantUnsupported(); // gw2 (#57): not recorded yet
   std::string func_name = "ds_" + shader->sha1().string().substr(0, 8) + "_" + variant_digest.string();
   auto proc = [=](const char *func_name, SM50_SHADER_COMMON_DATA *common) -> sm50_bitcode_t  {
     SM50_SHADER_GS_PASS_THROUGH_DATA gs_passthrough;
@@ -326,6 +385,7 @@ CreateVariantShader(MTLD3D11Device *pDevice, ManagedShader shader,
   if (variant.input_layout_handle)
     h.update(variant.input_layout_handle->sha1());
   auto variant_digest = h.final();
+  gw2::recipeVariantUnsupported(); // gw2 (#57): not recorded yet
   std::string func_name = "vsso_" + shader->sha1().string().substr(0, 8) + "_" + variant_digest.string();
   auto proc = [=](const char *func_name, SM50_SHADER_COMMON_DATA *common) -> sm50_bitcode_t  {
     SM50_SHADER_EMULATE_VERTEX_STREAM_OUTPUT_DATA data_so;
@@ -378,6 +438,7 @@ CreateVariantShader(MTLD3D11Device *pDevice, ManagedShader shader,
   if (variant.input_layout_handle)
     h.update(variant.input_layout_handle->sha1());
   auto variant_digest = h.final();
+  gw2::recipeVariantUnsupported(); // gw2 (#57): not recorded yet
   std::string func_name = "vsgs_" + shader->sha1().string().substr(0, 8) + "_" + variant_digest.string();
   auto proc = [=](const char *func_name, SM50_SHADER_COMMON_DATA *common) -> sm50_bitcode_t  {
     SM50_SHADER_IA_INPUT_LAYOUT_DATA ia_layout;
@@ -425,6 +486,7 @@ CreateVariantShader(MTLD3D11Device *pDevice, ManagedShader shader,
   h.update(variant.vertex_shader_handle->sha1());
   h.update(variant.strip_topology);
   auto variant_digest = h.final();
+  gw2::recipeVariantUnsupported(); // gw2 (#57): not recorded yet
   std::string func_name = "gs_" + shader->sha1().string().substr(0, 8) + "_" + variant_digest.string();
   auto proc = [=](const char *func_name, SM50_SHADER_COMMON_DATA *common) -> sm50_bitcode_t  {
     SM50_SHADER_PSO_GEOMETRY_SHADER_DATA geometry;

@@ -347,6 +347,11 @@ struct unixcall_cache_set {
   struct WMTConstMemoryPointer key;
   uint64_t key_length;
   obj_handle_t value_data;
+  // gw2 (#57): with query_size, also return the database file's size (pages in use and free);
+  // with query_size and no key, only that
+  uint64_t query_size;
+  uint64_t ret_success; // the row was stored
+  uint64_t ret_db_bytes;
 };
 
 struct unixcall_setmetalcachepath {

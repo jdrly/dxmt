@@ -12,6 +12,7 @@
 #include "dxmt_gw2_compile.hpp"
 #include "dxmt_gw2_control.hpp"
 #include "dxmt_gw2_lifetime.hpp"
+#include "dxmt_gw2_recipe.hpp"
 #include "dxmt_gw2_present.hpp"
 #include "dxmt_gw2_map.hpp"
 #include "dxmt_gw2_metal4.hpp"
@@ -1086,7 +1087,7 @@ public:
         "DXMT_PSO_ARCHIVE={} DXMT_PSO_ARCHIVE_DIR={} DXMT_PSO_FLUSH_EVERY={} DXMT_PROMOTE_FLUSH_MIN={} "
         "DXMT_PROMOTE_FLUSH_MS={} DXMT_TIMESTAMP_MODE={} DXMT_MAP_FAST={} DXMT_SKIP_REBIND={} DXMT_CONTROL={} "
         "DXMT_RESIDENCY_SET={} DXMT_UNRETAINED={} DXMT_LIFETIME_CHECK={} DXMT_METAL4={} "
-        "DXMT_SUBSAMPLE_METALFX={} cpus={} refresh={}",
+        "DXMT_SUBSAMPLE_METALFX={} DXMT_PSO_RECORD={} cpus={} refresh={}",
         gw2::hitchMs(), int(queue.argument_encoding_ctx.presentSplit()), int(display_sync_vsync_), deadline,
         int(cap_limiter_),
         // read as d3d11_resource_helper.cpp and RaiseRenderThreadPriority read them
@@ -1105,6 +1106,7 @@ public:
         gw2::lifetime::checkState(),                  // gw2 (#31)
         gw2::metal4State(),                           // gw2 (#32)
         gw2::subsampleModeName(),                     // gw2 (#56)
+        int(gw2::recipeRecording()),                  // gw2 (#57)
         GetActiveProcessorCount(ALL_PROCESSOR_GROUPS), refresh
     ));
   }
@@ -1252,6 +1254,7 @@ public:
   // control file's poll thread has queued lines to log.
   double PresentDeadlineMs() {
     gw2::controlLogPending(); // the poll thread's lines, before the change line they may explain
+    gw2::recipeLogPending();  // gw2 (#57): the recipe writer's lines (it never calls the logger)
     int32_t us = gw2::controlPresentDeadlineUs();
     double ms = us == gw2::kControlUnset ? present_deadline_ms_ : us < 0 ? -1.0 : us / 1000.0;
     if (ms == deadline_applied_ms_)
