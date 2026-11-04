@@ -23,9 +23,14 @@
 //    event; the pixels and buffers are checked.
 //    Then the same again with nothing made resident by hand: the replays put every allocation the
 //    packets name (pipelines, buffers, textures, attachments, UseResource's) into a chunk set (part 3).
-// 2. Probe (the issue's question, with --metallibs <copy of a DXMT shaders_*.db> [--limit n]):
-//    airconv's metallibs (GW2's own shaders, from DXMT's shader cache) load; their vertex and kernel
-//    functions build pipelines both through the device (today's path) and through MTL4Compiler; the
+// 2. Part 4: a fence orders two separately committed command buffers (A fills 64 MB, B copies its
+//    end), as the present split and queue-level events rely on; and the present path on a layer
+//    without a window (waitForDrawable, a pass, signalDrawable, present at a deadline), skipped if
+//    the layer gives no drawable.
+// 3. Probe (the issue's question, with --metallibs <copy of a DXMT shaders_*.db> [--limit n]):
+//    airconv's metallibs (GW2's own shaders, from DXMT's shader cache) load; their vertex functions
+//    (with a constant fragment function of the test's) and kernel functions build pipelines both
+//    through the device (today's path) and through MTL4Compiler; the
 //    device-built ones bind on MTL4 encoders (SetPSO through the replay) and the commit reports no
 //    error. Fragment functions are counted (they need their vertex shader to link). Copy the
 //    database first; never open the live one while GW2 runs.
@@ -37,6 +42,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #define WINEMETAL_API
 #include "winemetal_thunks.h"
 #include "mtl4.h"
@@ -64,6 +70,7 @@ static const char *kSource =
     "  VOut o; o.pos = float4(args.pos[vid], 0, 1); return o;\n"
     "}\n"
     "vertex VOut vs_position_only(uint vid [[vertex_id]]) { VOut o; o.pos = float4(0, 0, 0, 1); return o; }\n"
+    "fragment float4 fs_constant() { return float4(0, 0, 0, 1); }\n"
     "fragment float4 fs(constant float4 &color [[buffer(0)]], constant FArgs &args [[buffer(1)]],\n"
     "                   constant float4 &add [[buffer(2)]]) {\n"
     "  return color * args.tex.read(uint2(0, 0)) + add;\n"
@@ -495,6 +502,177 @@ test_replay(struct mtl4 *m) {
   [lib release];
 }
 
+/* --- part 4: a fence across two commits, and a drawable */
+
+static void
+commit_one(struct mtl4 *m, obj_handle_t cmdbuf, struct WMTMtl4CommitFeedback *fb, id<MTLSharedEvent> event,
+           uint64_t value) {
+  struct unixcall_generic_obj_noret end = {.handle = cmdbuf};
+  _MTL4CommandBuffer_endCommandBuffer(&end);
+  memset(fb, 0, sizeof(*fb));
+  struct unixcall_mtl4_queue_commit p = {.queue = m->queue, .count = 1, .event = H(event), .event_value = value};
+  p.cmdbufs.ptr = &cmdbuf;
+  p.feedback.ptr = fb;
+  _MTL4CommandQueue_commit(&p);
+}
+
+static void
+wait_value(id<MTLSharedEvent> event, uint64_t value, const char *what) {
+  if (![event waitUntilSignaledValue:value timeoutMS:10000]) {
+    printf("FAIL %s: not complete in 10 s; exiting without cleanup\n", what);
+    fflush(stdout);
+    _Exit(EXIT_FAILURE);
+  }
+}
+
+/* the event is forward-only: a later commit's handler may raise it past an earlier record before
+   that one's handler ran, so each record's own flag says it was written (acquire) */
+static void
+wait_done(struct WMTMtl4CommitFeedback *fb, const char *what) {
+  for (int i = 0; i < 10000; i++) {
+    if (atomic_load_explicit((_Atomic uint64_t *)&fb->done, memory_order_acquire))
+      return;
+    usleep(1000);
+  }
+  printf("FAIL %s: feedback not written in 10 s; exiting without cleanup\n", what);
+  fflush(stdout);
+  _Exit(EXIT_FAILURE);
+}
+
+/* DXMT orders the present split's two command buffers (and the buffers around queue-level events)
+   with MTLFences only. Command buffer A fills 64 MB and updates a fence; B, committed separately,
+   waits for it and copies the fill's last bytes: they must be the fill's. */
+static void
+test_cross_commit_fence(struct mtl4 *m) {
+  const NSUInteger big_size = 64u << 20;
+  id<MTLBuffer> big = [m->device newBufferWithLength:big_size
+                                             options:MTLResourceStorageModePrivate | MTLResourceHazardTrackingModeUntracked];
+  id<MTLBuffer> small = resident_buffer(m, 16);
+  [m->residency addAllocation:big];
+  id<MTLFence> fence = [m->device newFence];
+  id<MTLSharedEvent> event = [m->device newSharedEvent];
+  struct unixcall_generic_obj_obj_ret nb = {.handle = H(m->device)};
+  _MTLDevice_newMTL4CommandBuffer(&nb);
+  obj_handle_t second = nb.ret;
+  struct WMTMtl4BindingState state;
+  memset(&state, 0, sizeof(state));
+  struct WMTMtl4CommitFeedback fa, fbb;
+
+  begin(m);
+  {
+    obj_handle_t enc = compute_encoder(m, &state);
+    struct chain c = {0};
+    struct wmtcmd_blit_fillbuffer *fill = chain_add(&c, sizeof(*fill), WMTBlitCommandFillBuffer);
+    fill->buffer = H(big), fill->offset = 0, fill->length = big_size, fill->value = 0x7e;
+    struct wmtcmd_blit_fence_op *update = chain_add(&c, sizeof(*update), WMTBlitCommandUpdateFence);
+    update->fence = H(fence);
+    replay(_MTL4ComputeCommandEncoder_encodeBlitCommands, enc, &state, &c);
+    [(id<MTL4ComputeCommandEncoder>)enc endEncoding];
+  }
+  [m->residency commit];
+  commit_one(m, m->cmdbuf, &fa, event, 1);
+
+  {
+    struct unixcall_generic_obj_obj_noret b = {.handle = second, .arg = m->allocator};
+    _MTL4CommandBuffer_beginCommandBuffer(&b);
+    struct unixcall_mtl4_new_encoder e = {.cmdbuf = second};
+    e.state.ptr = &state;
+    _MTL4CommandBuffer_computeCommandEncoder(&e);
+    struct chain c = {0};
+    struct wmtcmd_blit_fence_op *wait = chain_add(&c, sizeof(*wait), WMTBlitCommandWaitForFence);
+    wait->fence = H(fence);
+    struct wmtcmd_blit_copy_from_buffer_to_buffer *copy =
+        chain_add(&c, sizeof(*copy), WMTBlitCommandCopyFromBufferToBuffer);
+    copy->src = H(big), copy->src_offset = big_size - 16, copy->dst = H(small), copy->copy_length = 16;
+    replay(_MTL4ComputeCommandEncoder_encodeBlitCommands, e.ret, &state, &c);
+    [(id<MTL4ComputeCommandEncoder>)e.ret endEncoding];
+  }
+  commit_one(m, second, &fbb, event, 2);
+  wait_value(event, 2, "cross-commit fence");
+  wait_done(&fa, "cross-commit fence A");
+  wait_done(&fbb, "cross-commit fence B");
+  CHECK(!fa.error && !fbb.error, "cross-commit fence: GPU error");
+  const uint8_t *bytes = small.contents;
+  bool ok = true;
+  for (int i = 0; i < 16; i++)
+    ok &= bytes[i] == 0x7e;
+  CHECK(ok, "cross-commit fence: the second command buffer read 0x%02x, want 0x7e (the fence didn't order it)",
+        bytes[0]);
+  printf("cross-commit fence: %s (A %.3f-%.3f ms, B %.3f-%.3f ms)\n", ok ? "ok" : "FAILED", fa.gpu_start * 1e3,
+         fa.gpu_end * 1e3, fbb.gpu_start * 1e3, fbb.gpu_end * 1e3);
+  struct unixcall_generic_obj_uint64_ret reset = {.handle = m->allocator};
+  _MTL4CommandAllocator_reset(&reset);
+  [(id)second release];
+  [m->residency removeAllocation:big];
+  [m->residency commit];
+  [big release];
+  [fence release];
+  [event release];
+}
+
+/* the present path: waitForDrawable, a pass into the drawable (kept out of the chunk's set; the
+   layer's set on the queue), commit, signalDrawable, present. Headless, a layer may give no
+   drawable: then it's skipped. */
+static void
+test_drawable(struct mtl4 *m) {
+  CAMetalLayer *layer = [CAMetalLayer layer];
+  layer.device = m->device;
+  layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+  layer.drawableSize = CGSizeMake(64, 64);
+  id<CAMetalDrawable> drawable = [layer nextDrawable];
+  if (!drawable) {
+    printf("drawable: the layer gave none without a window: skipped\n");
+    return;
+  }
+  struct unixcall_generic_obj_obj_ret ls = {.handle = H(layer)};
+  _MetalLayer_residencySet(&ls);
+  CHECK(ls.ret, "the layer has no residency set");
+  struct unixcall_generic_obj_obj_noret add = {.handle = m->queue, .arg = ls.ret};
+  if (ls.ret)
+    _MTL4CommandQueue_addResidencySet(&add);
+  struct unixcall_generic_obj_obj_noret wd = {.handle = m->queue, .arg = H(drawable)};
+  _MTL4CommandQueue_waitForDrawable(&wd);
+  id<MTLResidencySet> chunk = [m->device newResidencySetWithDescriptor:[[MTLResidencySetDescriptor new] autorelease]
+                                                                 error:nil];
+  struct WMTMtl4BindingState state;
+  memset(&state, 0, sizeof(state));
+  state.residency_set = H(chunk);
+  state.flags = WMT_MTL4_NO_ATTACHMENT_RESIDENCY;
+  begin(m);
+  struct WMTRenderPassInfo info;
+  memset(&info, 0, sizeof(info));
+  info.colors[0].texture = H(drawable.texture);
+  info.colors[0].load_action = WMTLoadActionClear;
+  info.colors[0].store_action = WMTStoreActionStore;
+  info.colors[0].clear_color = (struct WMTClearColor){1, 0, 0, 1};
+  info.default_raster_sample_count = 1;
+  info.render_target_width = 64;
+  info.render_target_height = 64;
+  obj_handle_t enc = render_encoder(m, &info, &state);
+  [(id<MTL4RenderCommandEncoder>)enc endEncoding];
+  CHECK(state.residency_adds == 0, "the drawable went into the chunk's set (%u adds)", state.residency_adds);
+  [chunk commit];
+  struct unixcall_generic_obj_obj_noret use = {.handle = m->cmdbuf, .arg = H(chunk)};
+  _MTL4CommandBuffer_useResidencySet(&use);
+  id<MTLSharedEvent> event = [m->device newSharedEvent];
+  struct WMTMtl4CommitFeedback fb;
+  commit_one(m, m->cmdbuf, &fb, event, 1);
+  _MTL4CommandQueue_signalDrawable(&wd);
+  struct unixcall_mtl4_drawable_present pr = {.drawable = H(drawable), .mode = WMTDrawablePresentWithDeadline,
+                                              .value = 1.0 / 60};
+  _MetalDrawable_present(&pr);
+  wait_value(event, 1, "drawable");
+  wait_done(&fb, "drawable");
+  CHECK(!fb.error, "drawable: GPU error %s", fb.error ? [((NSError *)fb.error).description UTF8String] : "");
+  printf("drawable: wait, pass, signal, present at a deadline: %s\n", fb.error ? "FAILED" : "ok");
+  struct unixcall_generic_obj_uint64_ret reset = {.handle = m->allocator};
+  _MTL4CommandAllocator_reset(&reset);
+  if (ls.ret)
+    _MTL4CommandQueue_removeResidencySet(&add);
+  [chunk release];
+  [event release];
+}
+
 /* --- the probe: airconv's metallibs from a copy of DXMT's shader cache */
 
 static void
@@ -521,12 +699,18 @@ probe_metallibs(struct mtl4 *m, const char *db_path, int limit) {
   NSError *err = nil;
   id<MTLLibrary> own = [m->device newLibraryWithSource:@(kSource) options:nil error:&err];
   id<MTLFunction> position_only = [own newFunctionWithName:@"vs_position_only"];
+  /* an airconv vertex function returns its outputs, so it needs rasterization and a fragment
+     function: this one reads no varyings, so it links with any */
+  id<MTLFunction> constant_fragment = [own newFunctionWithName:@"fs_constant"];
+  MTL4LibraryFunctionDescriptor *constant_fd = [[MTL4LibraryFunctionDescriptor new] autorelease];
+  constant_fd.name = @"fs_constant";
+  constant_fd.library = own;
   id<MTL4Compiler> compiler = [m->device newCompilerWithDescriptor:[[MTL4CompilerDescriptor new] autorelease]
                                                              error:&err];
   CHECK(compiler, "newCompilerWithDescriptor: %s", err.description.UTF8String);
   NSMutableArray *render_psos = [NSMutableArray array], *compute_psos = [NSMutableArray array];
   int libs = 0, lib_fail = 0, vertex = 0, fragment = 0, kernel = 0;
-  int dev_ok = 0, dev_fail = 0, mtl4c_ok = 0, mtl4c_fail = 0, frag_ok = 0;
+  int dev_ok = 0, dev_fail = 0, mtl4c_ok = 0, mtl4c_fail = 0, frag_ok = 0, rasterless = 0;
   char first_error[512] = "";
   while (sqlite3_step(st) == SQLITE_ROW) {
     @autoreleasepool {
@@ -552,12 +736,29 @@ probe_metallibs(struct mtl4 *m, const char *db_path, int limit) {
           vertex++;
           MTLRenderPipelineDescriptor *rd = [[MTLRenderPipelineDescriptor new] autorelease];
           rd.vertexFunction = fn;
-          rd.rasterizationEnabled = NO;
+          rd.fragmentFunction = constant_fragment;
+          rd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
           dev = [m->device newRenderPipelineStateWithDescriptor:rd error:&e1];
           MTL4RenderPipelineDescriptor *r4 = [[MTL4RenderPipelineDescriptor new] autorelease];
           r4.vertexFunctionDescriptor = fd;
-          r4.rasterizationEnabled = NO;
+          r4.fragmentFunctionDescriptor = constant_fd;
+          r4.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
           m4 = [compiler newRenderPipelineStateWithDescriptor:r4 compilerTaskOptions:nil error:&e2];
+          if (!dev && !m4) {
+            /* a vertex function that returns nothing (stream output): DXMT builds it with
+               rasterization off and no fragment function */
+            [dev release];
+            rd.fragmentFunction = nil;
+            rd.rasterizationEnabled = NO;
+            e1 = nil;
+            dev = [m->device newRenderPipelineStateWithDescriptor:rd error:&e1];
+            r4.fragmentFunctionDescriptor = nil;
+            r4.rasterizationEnabled = NO;
+            e2 = nil;
+            m4 = [compiler newRenderPipelineStateWithDescriptor:r4 compilerTaskOptions:nil error:&e2];
+            if (dev)
+              rasterless++;
+          }
           if (dev)
             [render_psos addObject:dev];
           break;
@@ -605,9 +806,9 @@ probe_metallibs(struct mtl4 *m, const char *db_path, int limit) {
   sqlite3_close(db);
   printf("probe: %d metallibs (%d failed to load): %d vertex, %d fragment, %d kernel functions\n", libs, lib_fail,
          vertex, fragment, kernel);
-  printf("probe: device-built pipelines %d ok, %d failed; MTL4Compiler pipelines %d ok, %d failed; "
-         "fragment-only links %d\n",
-         dev_ok, dev_fail, mtl4c_ok, mtl4c_fail, frag_ok);
+  printf("probe: device-built pipelines %d ok, %d failed; MTL4Compiler pipelines %d ok, %d failed (%d vertex "
+         "functions without outputs, built with rasterization off); fragment-only links %d\n",
+         dev_ok, dev_fail, mtl4c_ok, mtl4c_fail, rasterless, frag_ok);
   if (first_error[0])
     printf("probe: first failure: %s\n", first_error);
   CHECK(libs > 0 && !lib_fail, "airconv metallibs load");
@@ -660,6 +861,7 @@ probe_metallibs(struct mtl4 *m, const char *db_path, int limit) {
     [m->residency removeAllocation:pso];
   [m->residency commit];
   [compiler release];
+  [constant_fragment release];
   [position_only release];
   [own release];
 }
@@ -707,6 +909,8 @@ main(int argc, char **argv) {
     test_replay(&m);
     [m.chunk release];
     m.chunk = nil;
+    test_cross_commit_fence(&m);
+    test_drawable(&m);
     if (db)
       probe_metallibs(&m, db, limit);
 

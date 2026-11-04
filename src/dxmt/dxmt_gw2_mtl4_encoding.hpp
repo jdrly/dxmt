@@ -35,13 +35,27 @@ public:
   Mtl4Encoding &operator=(const Mtl4Encoding &) = delete;
 
   // --- as WMT::CommandBuffer's
-  WMT::MTL4RenderCommandEncoder renderCommandEncoder(WMTRenderPassInfo &info);
+  // flags: WMTMtl4BindingState::flags for this encoder (WMT_MTL4_NO_ATTACHMENT_RESIDENCY: the present
+  // pass's drawable stays out of the chunk's set; the layer's own set covers it)
+  WMT::MTL4RenderCommandEncoder renderCommandEncoder(WMTRenderPassInfo &info, uint32_t flags = 0);
   WMT::MTL4ComputeCommandEncoder computeCommandEncoder(bool concurrent);
   WMT::MTL4BlitCommandEncoder blitCommandEncoder();
   // after the work committed so far (commits the open command buffer first)
   void encodeSignalEvent(WMT::Event event, uint64_t value);
   // before the work committed from now on (commits the open command buffer first)
   void encodeWaitForEvent(WMT::Event event, uint64_t value);
+
+  // --- present (part 4)
+  // the command buffers committed from now on wait for the drawable (the present pass's, and the
+  // open one if there is one: it isn't committed yet)
+  void waitForDrawable(WMT::MetalDrawable drawable);
+  // commits the open command buffer (the present pass), then signals the drawable at the queue
+  void signalDrawable(WMT::MetalDrawable drawable);
+
+  Mtl4Queue &
+  queue() {
+    return queue_;
+  }
 
   // --- the chunk
   // the chunk's position in flushCommands (2 x the encoders done), for the timestamp segments
@@ -71,7 +85,7 @@ public:
 
 private:
   enum class Kind { Render, Compute, Blit };
-  void prepare(Kind kind);
+  void prepare(Kind kind, uint32_t flags = 0);
   // a new bytes arena of at least `size` (the old one stays with the chunk until it retires)
   void newArena(uint64_t size);
   static void refill(void *context, WMTMtl4BindingState *state);

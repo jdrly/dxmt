@@ -5389,6 +5389,13 @@ public:
 
   void STDMETHODCALLTYPE TemporalUpscale(const MTL_TEMPORAL_UPSCALE_D3D11_DESC *pDesc) final {
     std::lock_guard<typename ContextInternalState::device_mutex_t> lock(ctx_->mutex);
+    // gw2 (#32): MetalFX stays on Metal 3: a device on Metal 4 doesn't offer it (CheckFeatureSupport)
+    if (ctx_->device->GetDXMTDevice().queue().Metal4()) {
+      static std::atomic<bool> s_logged{false};
+      if (!s_logged.exchange(true))
+        ERR("TemporalUpscale: MetalFX isn't available on the Metal 4 path (DXMT_METAL4=1); not upscaled");
+      return;
+    }
     Rc<Texture> input, output, depth, motion_vector, exposure;
     if (!(input = static_cast<D3D11ResourceCommon *>(pDesc->Color)->texture()))
       return;
@@ -5549,7 +5556,9 @@ public:
     case MTL_FEATURE_METALFX_TEMPORAL_SCALER: {
       if (FeatureSupportDataSize != sizeof(BOOL))
         return E_INVALIDARG;
-      *reinterpret_cast<BOOL *>(pFeatureSupportData) = ctx_->device->GetMTLDevice().supportsFXTemporalScaler();
+      // gw2 (#32): not on a device that takes the Metal 4 path (MetalFX stays on Metal 3)
+      *reinterpret_cast<BOOL *>(pFeatureSupportData) =
+          !ctx_->device->GetDXMTDevice().queue().Metal4() && ctx_->device->GetMTLDevice().supportsFXTemporalScaler();
       return S_OK;
     }
     }

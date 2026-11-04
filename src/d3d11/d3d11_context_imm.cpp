@@ -1,6 +1,7 @@
 #include "config/config.hpp"
 #include "dxmt_gw2_stats.hpp"
 #include "dxmt_gw2_map.hpp"
+#include "dxmt_gw2_metal4.hpp"
 #include "d3d11_context_state.hpp"
 #include "d3d11_fence.hpp"
 #include "d3d11_private.h"
@@ -687,6 +688,9 @@ public:
 
     Com<MTLD3D11CommandList, false> cmdlist = static_cast<MTLD3D11CommandList *>(pCommandList);
     auto seq_id = ctx_state.cmd_queue.CurrentSeqId();
+    // gw2 (#32): deferred command lists replay through the same packets on Metal 4, untested there
+    if (ctx_state.cmd_queue.Metal4())
+      gw2::metal4Untested("deferred command lists (ExecuteCommandList)");
 
     // gw2 (#4): upstream replaces a pending promote_flush with the command list's; a commit that
     // DXMT_PROMOTE_FLUSH_MIN deferred stays pending
