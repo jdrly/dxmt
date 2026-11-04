@@ -369,9 +369,9 @@ struct unixcall_cache_enumerate {
   uint64_t ret_used;                 // bytes written
   uint64_t ret_last_rowid;           // the last row written (the next call's after_rowid)
   uint32_t ret_more;                 // rows remain (the buffer was full)
-  uint32_t ret_status;               // 0: read; 1: no database or table; 2: a step failed (ret_error)
+  uint32_t ret_status;               // 0: read; 1: no database or table; 2: open, prepare or step failed (#117)
   // gw2 (#114): why a read ended early, and the row that didn't fit
-  uint32_t ret_error;                // status 2: SQLite's result code (SQLITE_BUSY after the retries)
+  uint32_t ret_error;                // status 2: SQLite's result code (SQLITE_BUSY after the retries; #117: …)
   uint32_t ret_busy;                 // SQLITE_BUSY retries made (each after a 2 ms sleep; at most 50)
   uint64_t ret_need;                 // with more: the bytes the row that didn't fit needs (8 + key + value)
   uint64_t ret_need_rowid;           // with more: that row's rowid (to skip it: the next after_rowid)

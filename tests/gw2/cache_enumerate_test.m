@@ -13,6 +13,10 @@
 //   SQLITE_BUSY, not an empty table; one released after 30 ms is waited out (busy > 0, every row).
 //   A row larger than the buffer says its size and rowid (need, need_rowid), so the caller can grow
 //   the buffer or skip it, and the rows after it are still read.
+// - #117: only a missing file, an empty file or a schema without the table is status 1 ("no table");
+//   a file that isn't a database is status 2 with SQLITE_NOTADB, a damaged one status 2 with
+//   SQLITE_CORRUPT, and a file that won't open (a WAL database without its -shm, read-only; a directory)
+//   status 2 with SQLITE_CANTOPEN, never 0.
 #import <Foundation/Foundation.h>
 #include <mach/mach_time.h>
 #include <sqlite3.h>
@@ -77,16 +81,32 @@ cachePath(const char *path) {
 }
 
 static struct unixcall_cache_enumerate
-enumerate(const char *path, uint32_t prefix, uint64_t after, void *buf, uint64_t cap) {
+enumerateVersion(const char *path, uint64_t version, uint32_t prefix, uint64_t after, void *buf, uint64_t cap) {
   struct unixcall_cache_enumerate p = {0};
   p.path.ptr = path;
-  p.version = 1;
+  p.version = version;
   p.after_rowid = after;
   p.buffer.ptr = buf;
   p.capacity = cap;
   p.prefix = prefix;
   _CacheEnumerate(&p);
   return p;
+}
+
+static struct unixcall_cache_enumerate
+enumerate(const char *path, uint32_t prefix, uint64_t after, void *buf, uint64_t cap) {
+  return enumerateVersion(path, 1, prefix, after, buf, cap);
+}
+
+// #117: a scratch file next to the test's databases
+static void
+writeFile(const char *path, NSData *data) {
+  NSString *full = cachePath(path);
+  [[NSFileManager defaultManager] createDirectoryAtPath:[full stringByDeletingLastPathComponent]
+                            withIntermediateDirectories:YES
+                                             attributes:nil
+                                                  error:nil];
+  [data writeToFile:full atomically:NO];
 }
 
 int
@@ -231,6 +251,66 @@ main(void) {
     CHECK(b3.ret_count == 1 && vl == 2 << 20 && b3.ret_more && b4.ret_count == 1 && !b4.ret_more && number == 2,
           "grown to it: the row is read; skipped past its rowid: the next row is read");
     free(grown);
+
+    // #117: what "no table" (status 1) is, and what it isn't
+    char other_path[256];
+    snprintf(other_path, sizeof(other_path), "dxmt/cache-enumerate-test-%d.exe/other_1.db", getpid());
+    NSMutableData *text = [NSMutableData data];
+    for (int i = 0; i < 200; i++)
+      [text appendBytes:"not a database, just text\n" length:26];
+    writeFile(other_path, text);
+    struct unixcall_cache_enumerate notadb = enumerate(other_path, 'R', 0, buf, 1 << 20);
+    CHECK(notadb.ret_status == 2 && notadb.ret_error == SQLITE_NOTADB && notadb.ret_count == 0 && !notadb.ret_more,
+          "a file that isn't a database: status %u, error %u (SQLITE_NOTADB), not \"no table\"", notadb.ret_status,
+          notadb.ret_error);
+
+    char damaged_path[256];
+    snprintf(damaged_path, sizeof(damaged_path), "dxmt/cache-enumerate-test-%d.exe/damaged_1.db", getpid());
+    writeRows(damaged_path, 10, ^size_t(int i) { return 100; });
+    NSData *whole = [NSData dataWithContentsOfFile:cachePath(damaged_path)];
+    for (NSString *suffix in @[ @"-wal", @"-shm" ])
+      [[NSFileManager defaultManager] removeItemAtPath:[cachePath(damaged_path) stringByAppendingString:suffix]
+                                                 error:nil];
+    // the writer's WAL database without its -shm (a copied file): a read-only connection can't open it
+    writeFile(damaged_path, whole);
+    struct unixcall_cache_enumerate noshm = enumerate(damaged_path, 'R', 0, buf, 1 << 20);
+    CHECK(noshm.ret_status == 2 && noshm.ret_error == SQLITE_CANTOPEN && noshm.ret_count == 0,
+          "a WAL database without its -shm: status %u, error %u (SQLITE_CANTOPEN), not \"no table\"",
+          noshm.ret_status, noshm.ret_error);
+    // as a rollback-journal database (header bytes 18-19), the schema's page (page 1) keeps SQLite's
+    // header (100 bytes) and its b-tree header is overwritten
+    NSMutableData *damaged = [whole mutableCopy];
+    if (damaged.length >= 512) {
+      ((uint8_t *)damaged.mutableBytes)[18] = ((uint8_t *)damaged.mutableBytes)[19] = 1;
+      memset((uint8_t *)damaged.mutableBytes + 100, 0xa5, 412);
+    }
+    writeFile(damaged_path, damaged);
+    struct unixcall_cache_enumerate corrupt = enumerate(damaged_path, 'R', 0, buf, 1 << 20);
+    CHECK(damaged.length >= 512 && corrupt.ret_status == 2 && corrupt.ret_error == SQLITE_CORRUPT &&
+              corrupt.ret_count == 0,
+          "a database whose schema page is damaged: status %u, error %u (SQLITE_CORRUPT)", corrupt.ret_status,
+          corrupt.ret_error);
+    [damaged release];
+
+    char empty_path[256];
+    snprintf(empty_path, sizeof(empty_path), "dxmt/cache-enumerate-test-%d.exe/empty_1.db", getpid());
+    writeFile(empty_path, [NSData data]);
+    struct unixcall_cache_enumerate empty = enumerate(empty_path, 'R', 0, buf, 1 << 20);
+    struct unixcall_cache_enumerate notable = enumerateVersion(path, 2, 'R', 0, buf, 1 << 20);
+    CHECK(empty.ret_status == 1 && empty.ret_error == 0 && empty.ret_count == 0 && notable.ret_status == 1 &&
+              notable.ret_error == 0 && notable.ret_count == 0,
+          "an empty file, and a database without the table (cache_2): status 1, no error (\"no table\" is right)");
+
+    char dir_path[256];
+    snprintf(dir_path, sizeof(dir_path), "dxmt/cache-enumerate-test-%d.exe/dir_1.db", getpid());
+    [[NSFileManager defaultManager] createDirectoryAtPath:cachePath(dir_path)
+                              withIntermediateDirectories:YES
+                                               attributes:nil
+                                                    error:nil];
+    struct unixcall_cache_enumerate dir = enumerate(dir_path, 'R', 0, buf, 1 << 20);
+    CHECK(dir.ret_status == 2 && dir.ret_error == SQLITE_CANTOPEN && dir.ret_count == 0,
+          "a directory where the database should be: status %u, error %u (%s)", dir.ret_status, dir.ret_error,
+          sqlite3_errstr((int)dir.ret_error));
     free(buf);
 
     // remove the scratch databases
