@@ -58,6 +58,13 @@ _Avoid_: hash (alone), persisted key
 **Variant**:
 One translation of a shader for one set of translation inputs.
 
+**Lane**:
+Where a compile job queues under the declared policy: demand (taken first), normal, or speculative
+(warming: one at a time, none while a demand waits).
+
+**Promotion**:
+A demand moving its job and the job's unfinished dependencies to the demand lane, once each.
+
 ### Chunks and retirement
 
 **Chunk**:

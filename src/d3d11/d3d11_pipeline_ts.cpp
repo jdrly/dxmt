@@ -98,6 +98,16 @@ public:
                   hull_reflection.ThreadsPerPatch};
   }
 
+  // gw2 (C2): what RunThreadpoolWork probes, in its order (the declared policy waits for them)
+  void GetDependencies(std::vector<ThreadpoolWork *> &deps) final {
+    if (VertexHullShader)
+      deps.push_back(VertexHullShader);
+    if (DomainShader)
+      deps.push_back(DomainShader);
+    if (PixelShader)
+      deps.push_back(PixelShader);
+  }
+
   ThreadpoolWork *RunThreadpoolWork() {
 
     WMT::Reference<WMT::Error> err;

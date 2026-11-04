@@ -883,13 +883,17 @@ main(int argc, char **argv) {
     }
     struct mtl4 m = {0};
     m.device = MTLCreateSystemDefaultDevice();
+    if (!m.device) {
+      printf("no Metal device: skipped\n");
+      return 77; // X1: skipped, not passed
+    }
     struct unixcall_generic_obj_uint64_ret support = {.handle = H(m.device)};
     _MTLDevice_metal4Support(&support);
     printf("device: %s, metal4Support=%llu (0 = supported)\n", m.device.name.UTF8String,
            (unsigned long long)support.ret);
     if (support.ret != WMTMetal4Supported) {
-      printf("no Metal 4 here: nothing to test\n");
-      return 1;
+      printf("no Metal 4 here: skipped\n");
+      return 77; // X1: skipped, not passed
     }
     struct unixcall_generic_obj_obj_ret p = {.handle = H(m.device)};
     _MTLDevice_newMTL4CommandQueue(&p);

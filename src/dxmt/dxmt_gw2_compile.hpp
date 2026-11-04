@@ -45,6 +45,12 @@ void compileEncodeFrame(uint64_t frame);
 bool compileTiming();   // DXMT_STATS on
 int64_t compileNowNs(); // the timeline's clock
 
+// gw2 (C2): DXMT_COMPILE_DEMAND=1 (off by default): the compile service's declared policy (dependencies
+// taken at submit, a demand lane, speculative admission). Parsed once per process.
+bool compileDemand();
+// A demand promoted a job (counted for COMPILE's promoted=, with DXMT_STATS).
+void compilePromoted();
+
 // Around a demand for a job that isn't done yet (compile::demand); with the job's record, the wait
 // is classified by what the job was doing when it started (#46).
 class CompileWaitScope {

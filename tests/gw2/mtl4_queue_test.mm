@@ -92,10 +92,14 @@ int
 main() {
   @autoreleasepool {
     id<MTLDevice> mtl_device = MTLCreateSystemDefaultDevice();
+    if (!mtl_device) {
+      std::printf("no Metal device: skipped\n");
+      return 77; // X1: skipped, not passed
+    }
     WMT::Device device{(obj_handle_t)(uintptr_t)(__bridge void *)mtl_device};
     if (device.metal4Support() != WMTMetal4Supported) {
-      std::printf("no Metal 4 here: nothing to test\n");
-      return 1;
+      std::printf("no Metal 4 here: skipped\n");
+      return 77; // X1: skipped, not passed
     }
     constexpr uint32_t kSlots = 4;
     constexpr uint64_t kChunks = 24;

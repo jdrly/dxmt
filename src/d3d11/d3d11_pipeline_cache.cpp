@@ -184,6 +184,7 @@ template <> struct compile::JobTraits<ThreadpoolWork *> {
   bool done(ThreadpoolWork *job) { return job->GetIsDone(); }
   void setDone(ThreadpoolWork *job) { job->SetIsDone(true); }
   compile::JobRecord &record(ThreadpoolWork *job) { return job->compile_job; }
+  void deps(ThreadpoolWork *job, std::vector<ThreadpoolWork *> &out) { job->GetDependencies(out); } // C2
 };
 
 class PipelineCache : public MTLD3D11PipelineCacheBase {
@@ -312,7 +313,8 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
 
   ShaderCache& scache_;
 
-  compile::Service<ThreadpoolWork *> scheduler_; // gw2 (C1): the compile service, legacy policy
+  // gw2 (C1): the compile service; C2: the declared policy with DXMT_COMPILE_DEMAND=1
+  compile::Service<ThreadpoolWork *> scheduler_;
 
   MTLD3D11Device *device;
   StateObjectCache<D3D11_BLEND_DESC1, IMTLD3D11BlendState> blend_states;
@@ -604,6 +606,7 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
 public:
   PipelineCache(MTLD3D11Device *pDevice) :
       scache_(ShaderCache::getInstance(pDevice->GetDXMTDevice().metalVersion())),
+      scheduler_(compile::Options{.policy = gw2::compileDemand() ? compile::Policy::Declared : compile::Policy::Legacy}),
       device(pDevice),
       blend_states(pDevice),
       so_layouts(pDevice) {

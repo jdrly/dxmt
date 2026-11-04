@@ -69,6 +69,16 @@ public:
     *pPipeline = {state_mesh_};
   }
 
+  // gw2 (C2): what RunThreadpoolWork probes, in its order (the declared policy waits for them)
+  void GetDependencies(std::vector<ThreadpoolWork *> &deps) final {
+    if (VertexShader)
+      deps.push_back(VertexShader);
+    if (GeometryShader)
+      deps.push_back(GeometryShader);
+    if (PixelShader)
+      deps.push_back(PixelShader);
+  }
+
   ThreadpoolWork *RunThreadpoolWork() {
 
     WMT::Reference<WMT::Error> err;
