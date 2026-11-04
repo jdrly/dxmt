@@ -36,6 +36,7 @@ dxmt_src = [
   'dxmt_gw2_metal4.cpp',
   'dxmt_gw2_mtl4_queue.cpp',
   'dxmt_gw2_mtl4_encoding.cpp',
+  'dxmt_gw2_subsample.cpp', # gw2 (#56)
 ]
 
 dxmt_shaders = [

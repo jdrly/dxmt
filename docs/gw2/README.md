@@ -46,6 +46,8 @@ because Wine raises `0x80000005` (`STATUS_BUFFER_OVERFLOW`) for a line over its 
 | `DXMT_UNRETAINED` | on | A chunk's command buffers (the frame's and the present split's) come from `commandBufferWithUnretainedReferences` (bridge call 154), so Metal retains nothing they use; DXMT holds it until the finish thread retires the chunk (see [LIFECHECK](#lifecheck)): the drawable, the presenter, events and MetalFX scalers go into the chunk's keep list instead of being released after encoding, and device teardown waits for every committed chunk before the D3D11 device's pipeline, depth-stencil and sampler caches go (the same with `DXMT_LIFETIME_CHECK=1`). Metal 4 plan phase 1 (#31), groundwork for the Metal 4 queue (#32). On by default since the lifetime check (20+ min of busy Lion's Arch with a map change and alt-tabs) found 0 early releases | `=0`: `[queue commandBuffer]`, as upstream |
 | `DXMT_LIFETIME_CHECK` | off | **Diagnostic build only** (meson `-Dgw2_lifetime_check=true`; in any other build it is compiled out and `=1` is ignored with a warning). `=1`: as d9mt's `D9MT_LIFETIME_CHECK`. Every object a chunk's command buffers use is stamped with the chunk's sequence on the encode thread; releasing DXMT's last reference to one before the GPU completed that chunk logs a `LIFETIME` line (once per object type) and counts in [LIFECHECK](#lifecheck). Works with `DXMT_UNRETAINED` on or off (it checks DXMT's own bookkeeping, not Metal's retains). It also turns on the keep lists and teardown waits that `DXMT_UNRETAINED=1` uses. Costs a lock and a hash lookup per stamp, retain and release: for test runs only | `=0`: no stamps, no counting; a normal build has no code for them at all |
 | `DXMT_METAL4` | on | Metal 4 for this process's devices (Metal 4 plan phase 2, #32; see [Metal 4](#metal-4)): an `MTL4CommandQueue` with one `MTL4CommandAllocator` and one residency set per chunk slot, Metal 4 command buffers with commit feedback, today's packets replayed on Metal 4 encoders through argument tables, and present through `waitForDrawable`/`signalDrawable` and the drawable's own present (the same deadline, minimum-duration and present-split behaviour). Decided once per process at the first command queue. Stays on Metal 3, with a warning, on a device without Metal 4 (macOS before 26, or not `MTLGPUFamilyMetal4`), without the residency set (`DXMT_RESIDENCY_SET`), without `DXMT_UNRETAINED=1`, or with `DXMT_METALFX_SPATIAL_SWAPCHAIN=1`. **On by default since 2026-11-04** (#32's follow-up), after Jan's 10-minute in-game session on it: no device errors, no missed resources, no visual problems | `=0`: Metal 3, exactly as before; no bridge call, no log line |
+| `DXMT_SUBSAMPLE_METALFX` | off | GW2's Render Sampling: Subsample pass with MetalFX (#56; see [SUBSAMPLE](#subsample)). `log`: capture only, every candidate draw's shape is logged once and nothing changes. `1`: an accepted pass (the full-screen draw that samples the low-resolution 3D scene into a target of the swapchain's size) samples a MetalFX spatial upscale of its source instead, on Metal 3 (`MTLFXSpatialScaler`) and Metal 4 (`MTL4FXSpatialScaler`, bridge calls 190–192); the game's pixel shader still runs, and the UI drawn after it is untouched. Anything that doesn't match runs unchanged | unset or `=0`: no detection, no counting, no bridge call |
+| `DXMT_SUBSAMPLE_METALFX_PS` | unset | With `DXMT_SUBSAMPLE_METALFX`: only a pass whose pixel shader's SHA-1 (as the candidate line prints it) starts with this hex prefix is accepted (`no(pin)` otherwise) | any pixel shader that passes the other checks |
 
 Not switchable: `SetMaximumFrameLatency(0)` means the default, 3 (DXGI's definition; only
 `DXMT_MAX_FRAME_LATENCY` replaces the result). Typeless depth targets without stencil
@@ -100,7 +102,7 @@ Sections: a feature registers a function with `gw2::SectionRegistrar` (`src/dxmt
 
 | Line | When |
 |---|---|
-| `GW2 fork <commit>: DXMT_STATS=1 DXMT_HITCH_MS=… DXMT_PRESENT_SPLIT=… DXMT_DISPLAY_SYNC=… DXMT_PRESENT_DEADLINE=… DXMT_CAP_LIMITER=… DXMT_STENCIL_PFV=… DXMT_DEPTH_PFV=… DXMT_BG_FPS=… DXMT_BG_FPS_MINIMIZED=… DXMT_BG_POLICY=… DXMT_RENDER_THREAD_PRIORITY=… DXMT_PSO_BLEND_HASH=… DXMT_PSO_MRU=… DXMT_PSO_TOPOLOGY_KEEP=… DXMT_CHUNKS=… DXMT_MAX_FRAME_LATENCY=… DXMT_COMPILE_WAIT_MS=… DXMT_PSO_ARCHIVE=… DXMT_PSO_ARCHIVE_DIR=… DXMT_PSO_FLUSH_EVERY=… DXMT_PROMOTE_FLUSH_MIN=… DXMT_PROMOTE_FLUSH_MS=… DXMT_TIMESTAMP_MODE=… DXMT_MAP_FAST=… DXMT_SKIP_REBIND=… DXMT_CONTROL=… DXMT_RESIDENCY_SET=… DXMT_UNRETAINED=… DXMT_LIFETIME_CHECK=… DXMT_METAL4=… cpus=… refresh=…` then `GW2 fork <commit> set: …` | Two lines (#43; one before), once per process, at the first Present: the build, the **effective** value of every switch above (defaults included; `DXMT_PRESENT_DEADLINE=refresh` is one refresh, `DXMT_CHUNKS` is the ring size in effect, `DXMT_MAX_FRAME_LATENCY=unset` leaves the game's value, `DXMT_PSO_ARCHIVE` is `1` when the archives are on, `0` when not asked for, `failed` when asked for but they couldn't start, `DXMT_PSO_ARCHIVE_DIR=default` is the user cache dir, `DXMT_PROMOTE_FLUSH_MIN`/`_MS` as the immediate context parsed them: `MS` is at least 1 and is shown even when `MIN=0` turns it off, `DXMT_TIMESTAMP_MODE` is `exact`, `estimate` or `boundary`, `DXMT_MAP_FAST` and `DXMT_SKIP_REBIND` are `1` or `0`, `DXMT_CONTROL` is the path or `off`, `DXMT_RESIDENCY_SET` is `1` when the set is on, `0` when switched off, `failed` when asked for but unavailable, `DXMT_UNRETAINED` is `1` or `0`, `DXMT_LIFETIME_CHECK` is `1`, `0` or `unbuilt` (asked for in a build without it), `DXMT_METAL4` is `1` (Metal 4 in use, the default), `0` (`DXMT_METAL4=0`), or `unsupported` (on, but the device, macOS or another setting keeps Metal 3; a warning says which)), the CPUs the game sees, the refresh rate (0 if unknown); the second line lists every `DXMT_*`, `WINENCPU` and `WINEMSYNC` variable set (`set: none` if none). A PR that adds a switch adds its effective value here |
+| `GW2 fork <commit>: DXMT_STATS=1 DXMT_HITCH_MS=… DXMT_PRESENT_SPLIT=… DXMT_DISPLAY_SYNC=… DXMT_PRESENT_DEADLINE=… DXMT_CAP_LIMITER=… DXMT_STENCIL_PFV=… DXMT_DEPTH_PFV=… DXMT_BG_FPS=… DXMT_BG_FPS_MINIMIZED=… DXMT_BG_POLICY=… DXMT_RENDER_THREAD_PRIORITY=… DXMT_PSO_BLEND_HASH=… DXMT_PSO_MRU=… DXMT_PSO_TOPOLOGY_KEEP=… DXMT_CHUNKS=… DXMT_MAX_FRAME_LATENCY=… DXMT_COMPILE_WAIT_MS=… DXMT_PSO_ARCHIVE=… DXMT_PSO_ARCHIVE_DIR=… DXMT_PSO_FLUSH_EVERY=… DXMT_PROMOTE_FLUSH_MIN=… DXMT_PROMOTE_FLUSH_MS=… DXMT_TIMESTAMP_MODE=… DXMT_MAP_FAST=… DXMT_SKIP_REBIND=… DXMT_CONTROL=… DXMT_RESIDENCY_SET=… DXMT_UNRETAINED=… DXMT_LIFETIME_CHECK=… DXMT_METAL4=… DXMT_SUBSAMPLE_METALFX=… cpus=… refresh=…` then `GW2 fork <commit> set: …` | Two lines (#43; one before), once per process, at the first Present: the build, the **effective** value of every switch above (defaults included; `DXMT_PRESENT_DEADLINE=refresh` is one refresh, `DXMT_CHUNKS` is the ring size in effect, `DXMT_MAX_FRAME_LATENCY=unset` leaves the game's value, `DXMT_PSO_ARCHIVE` is `1` when the archives are on, `0` when not asked for, `failed` when asked for but they couldn't start, `DXMT_PSO_ARCHIVE_DIR=default` is the user cache dir, `DXMT_PROMOTE_FLUSH_MIN`/`_MS` as the immediate context parsed them: `MS` is at least 1 and is shown even when `MIN=0` turns it off, `DXMT_TIMESTAMP_MODE` is `exact`, `estimate` or `boundary`, `DXMT_MAP_FAST` and `DXMT_SKIP_REBIND` are `1` or `0`, `DXMT_CONTROL` is the path or `off`, `DXMT_RESIDENCY_SET` is `1` when the set is on, `0` when switched off, `failed` when asked for but unavailable, `DXMT_UNRETAINED` is `1` or `0`, `DXMT_LIFETIME_CHECK` is `1`, `0` or `unbuilt` (asked for in a build without it), `DXMT_METAL4` is `1` (Metal 4 in use, the default), `0` (`DXMT_METAL4=0`), or `unsupported` (on, but the device, macOS or another setting keeps Metal 3; a warning says which), `DXMT_SUBSAMPLE_METALFX` is `0`, `log` or `1`), the CPUs the game sees, the refresh rate (0 if unknown); the second line lists every `DXMT_*`, `WINENCPU` and `WINEMSYNC` variable set (`set: none` if none). A PR that adds a switch adds its effective value here |
 | `HITCH frame=… ms=… commit=…x… sync=…x… bgsleep=… dxmt(ms/calls): …` | A Present-to-Present interval of at least `DXMT_HITCH_MS`, logged at the top of the Present that ends it. `frame` is the frame that Present presents (1-based, as the latency fence counts); the interval holds the previous Present and the game's work on this frame. `commit` (waits for a free chunk) and `sync` (Map's waits for the GPU) are ms × count, from the same interval; they overlap the categories they happen in. `bgsleep` is whether the background throttle was on. The categories are as `PACE`'s `dxmt` (`presentwait` is the latency wait) |
 | `SetMaximumFrameLatency(n)` | Every call; 0 is taken as 3 |
 | `SetMaximumFrameLatency(n): DXMT_MAX_FRAME_LATENCY keeps m` | Every call while `DXMT_MAX_FRAME_LATENCY` is set: the game asked for `n`, `m` stays in effect |
@@ -818,3 +820,60 @@ sequence on a layer without a window.
 | `unsupported` | Packets the replays couldn't encode on Metal 4 (skipped). Must stay 0 |
 | `bytesover` | `Set*Bytes` with no bytes arena to go to (skipped). Must stay 0 |
 | `blitbar` | Barriers the blit replay put between consecutive copies |
+
+### SUBSAMPLE
+
+`SUBSAMPLE mode= candidates= accepted= upscaled=` (jdrly/dxmt #56), with `DXMT_SUBSAMPLE_METALFX` set
+and `DXMT_STATS`; per frame over the window.
+
+GW2's Render Sampling: Subsample draws the 3D scene into a target smaller than the backbuffer, then
+one full-screen draw samples it into a target of the swapchain's size, and the UI is drawn on top of
+that. The idea is World of Warcraft's render scale: only the 3D scene is below 4K, the UI stays
+native. `DXMT_METALFX_SPATIAL_SWAPCHAIN` is not this: it upscales the whole swapchain, UI included.
+
+At `Draw`, `DrawIndexed`, and `DrawInstanced`/`DrawIndexedInstanced` with one instance (bgfx, GW2's renderer, draws single instances through the instanced calls), before the pipeline is set up; never indirect draws:
+
+- **Candidate**: at most 6 vertices or indices (per instance), triangle list or strip, no GS/HS/DS, a pixel shader,
+  a render target in slot 0, and among the pixel shader's bound 2D SRVs one at least 1.25× smaller
+  than that target on both axes.
+- **Accepted** if, in this order (the first failure is the reason): exactly one render target
+  (`rtvs`); its size is the swapchain's buffers' (`swapchain`); viewport 0 is the whole target
+  (`viewport`); exactly one SRV is smaller like that (`srvs`); no SRV as large as the target, which
+  would make it a composite with a native-resolution image (`fullsize`); the SRV is the same fraction
+  on both axes (within 2%) and at most 4× smaller (`ratio`); blending and logic ops are off on render
+  target 0 (`blend`); `DXMT_SUBSAMPLE_METALFX_PS` matches (`pin`); the shader's DXBC could be read
+  (`ps_unparsed`) and has no `ld`/`ld_ms`, which fetch texels at integer coordinates and would read
+  the wrong ones from a larger texture (`ps_load`); the SRV is mip 0 of a texture with one mip
+  (`mips`); nothing is multisampled (`msaa`); the view has no component swizzle (`swizzle`); the
+  texture can be sampled (`usage`); with `=1`, MetalFX takes the format (`metalfx`).
+- **With `=1`**, an accepted draw closes the open render pass, encodes a MetalFX spatial upscale of the
+  SRV's view into a private texture of the target's size and the view's format (one scaler and
+  texture per shape, kept by the context; sRGB and UNORM formats in perceptual mode, which MetalFX
+  requires for sRGB; float formats in HDR mode), points the encoder's binding of that pixel shader
+  slot at it, and runs the draw in a new pass on the same target (load action Load). When the draw
+  call returns, the slot is bound to the game's SRV again. The D3D11 state never changes. The game's
+  pixel shader still runs: whatever it does besides sampling (tone mapping, grading) is kept; it now
+  samples a texture at the target's resolution with the same normalized coordinates.
+- On Metal 4 the scaler is an `MTL4FXSpatialScaler`, built with an `MTL4Compiler` and encoded into the
+  chunk's open `MTL4CommandBuffer` between two compute encoders that carry the fences (as Metal 3's
+  `BeginScaler`/`EndScaler`); its input and output go into the chunk's residency set.
+  `tests/gw2/mtl4fx_test.m` runs the bridge natively on both paths.
+
+| Field | Meaning |
+|---|---|
+| `mode` | `log` or `1` |
+| `candidates` | Candidate draws per frame (accepted or not) |
+| `accepted` | Of those, the ones every check passed |
+| `upscaled` | MetalFX upscales encoded per frame (0 with `log`) |
+
+| Line | When |
+|---|---|
+| `SUBSAMPLE: capture only (…)`, `SUBSAMPLE: on (…)` | Once, when the switch is read |
+| `SUBSAMPLE: DXMT_SUBSAMPLE_METALFX=… is not 0, log or 1; off` | Once, a warning for any other value |
+| `SUBSAMPLE: only a pass whose pixel shader's SHA-1 starts with … (DXMT_SUBSAMPLE_METALFX_PS)` | Once, when the pin is set |
+| `SUBSAMPLE candidate: accept=yes\|no(<reason>) draw= n= rtv=WxH f<format> swapchain=WxH viewport=x,y WxH dsv=none\|WxH blend=on\|off ps=<sha1> sample= ld= resinfo= instr= src=t<slot> WxH f<format> ratio=XxY srvs=[t<slot> WxH f<format> m<mips>,…]` | Once per distinct shape (sizes, formats, draw kind and count, pixel shader, outcome), at most 64 per process. Formats are `MTLPixelFormat` numbers (80 BGRA8Unorm, 81 its sRGB, 70 RGBA8Unorm, 71 its sRGB, 92 RG11B10Float, 115 RGBA16Float). `sample`, `ld`, `resinfo`, `instr` are the pixel shader's DXBC counts (`instr` includes declarations) |
+| `SUBSAMPLE: upscaling t<slot> WxH -> WxH with MetalFX for pixel shader <sha1>` | With `=1`, after the candidate line of each accepted shape |
+| `SUBSAMPLE: MetalFX spatial scaler WxH -> WxH format F (Metal 3\|Metal 4, perceptual\|HDR)` | Once per shape, when its scaler is built |
+| `SUBSAMPLE: MetalFX refused format F WxH -> WxH (…); not upscaled`, `SUBSAMPLE: MetalFX spatial scaling isn't supported on this device (…); not upscaled` | Once per shape (errors); that shape is then rejected as `metalfx` |
+| `SUBSAMPLE: 64 candidate shapes logged; no more candidate lines` | Once |
+

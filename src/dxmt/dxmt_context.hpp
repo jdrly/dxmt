@@ -756,6 +756,8 @@ public:
   );
 
   void upscale(Rc<Texture> &texture, Rc<Texture> &upscaled, Rc<SpatialScaler> &scaler);
+  // gw2 (#56): the Subsample pass: input through one of its views (the game's SRV), on either Metal path
+  void upscale(Rc<Texture> &input, TextureViewKey input_view, Rc<Texture> &output, Rc<SpatialScaler> &scaler);
 
   void upscaleTemporal(
       Rc<Texture> &input, Rc<Texture> &output, Rc<Texture> &depth, Rc<Texture> &motion_vector, TextureViewKey mvViewId,

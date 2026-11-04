@@ -119,6 +119,14 @@ Mtl4Encoding::encodeWaitForEvent(WMT::Event event, uint64_t value) {
 }
 
 void
+Mtl4Encoding::encodeSpatialScale(WMT::FXSpatialScaler scaler, WMT::Texture color, WMT::Texture output, WMT::Fence fence) {
+  auto &commit = open();
+  WMT::MTL4CommandBuffer{commit.cmdbuf.handle}.encodeSpatialScale(
+      scaler, color, output, fence, WMT::ResidencySet{state_.residency_set}
+  );
+}
+
+void
 Mtl4Encoding::waitForDrawable(WMT::MetalDrawable drawable) {
   queue_.queue().waitForDrawable(drawable);
 }
