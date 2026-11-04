@@ -2037,6 +2037,8 @@ WINEMETAL_API bool CacheWriter_set(obj_handle_t writer, const void *key, uint64_
 // after_rowid; `more` says rows remain. 0 rows and `more` false when the database or table is missing.
 // gw2 (#114): `status` 0: read (to the end, or the buffer is full); 1: no database or table; 2: a step
 // failed, SQLite's code in `error` (SQLITE_BUSY after `busy` retries), the rows before it are valid.
+// gw2 (#117): status 1 only for a missing file or a schema without the table (a new or empty file); a
+// file that won't open or whose statement won't prepare (SQLITE_NOTADB, SQLITE_CORRUPT, …) is status 2.
 // With `more`, `need` is the size of the row that didn't fit and `need_rowid` its rowid: with 0 rows
 // it alone is larger than `capacity` (grow the buffer, or pass `need_rowid` as after_rowid to skip it).
 struct WMTCacheEnumerateResult {

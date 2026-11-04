@@ -255,6 +255,22 @@ cache_enumerate_busy(struct unixcall_cache_enumerate *params, int rc) {
   return true;
 }
 
+// gw2 (#117): whether the schema reads and has no table cache_<version>. False when the schema itself
+// can't be read (the prepare's error is then the answer), or the table is there (and failed otherwise).
+static bool
+cache_enumerate_table_missing(sqlite3 *db, uint64_t version) {
+  char name[32];
+  snprintf(name, sizeof(name), "cache_%llu", (unsigned long long)version);
+  sqlite3_stmt *stmt = NULL;
+  if (sqlite3_prepare_v2(db, "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?;", -1, &stmt, NULL) !=
+      SQLITE_OK)
+    return false;
+  sqlite3_bind_text(stmt, 1, name, -1, SQLITE_TRANSIENT);
+  bool missing = sqlite3_step(stmt) == SQLITE_DONE;
+  sqlite3_finalize(stmt);
+  return missing;
+}
+
 // gw2 (W2/W3): see struct unixcall_cache_enumerate. Read-only, its own connection per call (a batch
 // is hundreds of KB; the warm thread makes a handful of calls).
 int
@@ -275,8 +291,11 @@ _CacheEnumerate(void *obj) {
     if (!dbPath || ![[NSFileManager defaultManager] fileExistsAtPath:dbPath])
       return 0;
     sqlite3 *db = NULL;
-    if (sqlite3_open_v2([dbPath fileSystemRepresentation], &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, NULL) !=
-        SQLITE_OK) {
+    int rc = sqlite3_open_v2([dbPath fileSystemRepresentation], &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, NULL);
+    if (rc != SQLITE_OK) {
+      // gw2 (#117): the file is there but won't open (e.g. SQLITE_CANTOPEN): say so, not "no database"
+      params->ret_status = 2;
+      params->ret_error = (uint32_t)rc;
       sqlite3_close(db);
       return 0;
     }
@@ -284,14 +303,15 @@ _CacheEnumerate(void *obj) {
                                                @"AND (? = 256 OR substr(key, 1, 1) = ?) ORDER BY rowid;",
                                                params->version];
     sqlite3_stmt *stmt = NULL;
-    int rc;
     // gw2 (#114): preparing reads the schema, so a lock can refuse it too: retried, then status 2
     // (a missing table stays status 1)
     while ((rc = sqlite3_prepare_v2(db, sql.UTF8String, -1, &stmt, NULL)) != SQLITE_OK &&
            cache_enumerate_busy(params, rc))
       ;
     if (rc != SQLITE_OK) {
-      if ((rc & 0xff) == SQLITE_BUSY) {
+      // gw2 (#117): only a table the schema doesn't have is status 1 (a new or empty file); anything
+      // else (SQLITE_BUSY after the retries, SQLITE_NOTADB, SQLITE_CORRUPT, …) is status 2 with its code
+      if (!cache_enumerate_table_missing(db, params->version)) {
         params->ret_status = 2;
         params->ret_error = (uint32_t)rc;
       }
