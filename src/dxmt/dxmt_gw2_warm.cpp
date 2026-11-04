@@ -46,7 +46,8 @@ std::atomic<uint64_t> g_read_error{0}, g_busy{0}, g_oversized{0}, g_buffer_bytes
 std::atomic<double> g_read_ms{0};
 // gw2 (#124): the plan by use
 std::atomic<bool> g_by_use{false};
-std::atomic<uint64_t> g_used_planned{0}, g_used_total{0}, g_sessions{0}, g_use_error{0};
+std::atomic<uint64_t> g_used_planned{0}, g_used_total{0}, g_newest{0}, g_use_error{0};
+constinit std::atomic<WarmHitUse> g_hit_use{nullptr};
 std::atomic<int64_t> g_oldest{-1};
 std::atomic<bool> g_planned_now{false};
 
@@ -71,8 +72,8 @@ section(double, uint32_t) {
             std::format(" readerror={} busy={} oversized={} buffer={}KB", g_read_error.load(), g_busy.load(),
                         g_oversized.load(), g_buffer_bytes.load() >> 10) +
             // gw2 (#124): the order, and how much of the plan the use rows chose
-            (g_by_use.load() ? std::format(" order=use used={}/{} sessions={} oldest={} useerror={}",
-                                           g_used_planned.load(), g_used_total.load(), g_sessions.load(),
+            (g_by_use.load() ? std::format(" order=use used={}/{} newest={} oldest={} useerror={}",
+                                           g_used_planned.load(), g_used_total.load(), g_newest.load(),
                                            g_oldest.load() < 0 ? std::string("-") : std::to_string(g_oldest.load()),
                                            g_use_error.load())
                              : std::string(" order=rowid"));
@@ -227,7 +228,7 @@ warmRead(WarmPlan &plan, const WarmEnumerate &enumerate, uint32_t metal_version,
     // gw2 (#124): every recipe of the target, then the plan by use
     struct Candidate {
       compile::PipelineRecipe recipe;
-      const WarmUse *use;
+      const RecipeUse *use;
       uint64_t index; // rowid order
     };
     std::vector<Candidate> all;
@@ -242,7 +243,7 @@ warmRead(WarmPlan &plan, const WarmEnumerate &enumerate, uint32_t metal_version,
                  plan.other_target++;
                  return;
                }
-               const WarmUse *u = nullptr;
+               const RecipeUse *u = nullptr;
                if (key_length == 21) {
                  auto it = use->recipes.find(std::string(reinterpret_cast<const char *>(key) + 1, 20));
                  if (it != use->recipes.end())
@@ -282,16 +283,14 @@ warmRead(WarmPlan &plan, const WarmEnumerate &enumerate, uint32_t metal_version,
       planRecipe(plan, c->recipe, mode);
       if (c->use) {
         plan.used_planned++;
-        oldest_session = std::min(oldest_session, c->use->last_session);
+        oldest_session = std::min<uint64_t>(oldest_session, c->use->last_session);
       }
     }
     plan.by_use = true;
-    plan.sessions = use->sessions.size();
+    plan.newest = use->newest;
     plan.use_error = use->read_error;
-    if (oldest_session != UINT64_MAX) {
-      auto it = std::find(use->sessions.begin(), use->sessions.end(), oldest_session);
-      plan.oldest = it == use->sessions.end() ? -1 : int64_t(it - use->sessions.begin());
-    }
+    if (oldest_session != UINT64_MAX)
+      plan.oldest = int64_t(use->newest) - int64_t(oldest_session);
   }
   plan.read_error = status.read_error;
   plan.busy += status.busy;
@@ -301,17 +300,15 @@ warmRead(WarmPlan &plan, const WarmEnumerate &enumerate, uint32_t metal_version,
 
 void
 warmUseAdd(WarmUseTable &table, const uint8_t *key, size_t key_length, const uint8_t *value, size_t value_length) {
-  RecipeUseRow row;
-  if (!parseRecipeUse(key, key_length, value, value_length, row)) {
+  std::string id;
+  RecipeUse u;
+  if (!parseRecipeUse(key, key_length, value, value_length, id, u)) {
     table.malformed++;
     return;
   }
   table.rows++;
-  auto &u = table.recipes[std::string(reinterpret_cast<const char *>(row.recipe.data), sizeof(row.recipe.data))];
-  u.last_session = std::max(u.last_session, row.session);
-  u.sessions++;
-  u.first_ms = std::min(u.first_ms, row.first_ms);
-  table.sessions.push_back(row.session);
+  table.newest = std::max(table.newest, u.last_session);
+  table.recipes[id] = u;
 }
 
 void
@@ -322,8 +319,26 @@ warmReadUses(WarmUseTable &table, const WarmEnumerate &enumerate, const std::ato
              warmUseAdd(table, key, key_length, value, length);
            });
   table.read_error = status.read_error;
-  std::sort(table.sessions.begin(), table.sessions.end(), std::greater<uint64_t>());
-  table.sessions.erase(std::unique(table.sessions.begin(), table.sessions.end()), table.sessions.end());
+}
+
+uint32_t
+warmReadRows(const WarmEnumerate &enumerate, const std::atomic<bool> &stop,
+             const std::function<void(const uint8_t *, uint32_t, const uint8_t *, uint32_t)> &row, uint64_t row_max) {
+  ReadStatus status;
+  readRows(enumerate, stop, row_max, status, row);
+  return status.read_error;
+}
+
+void
+setWarmHitUse(WarmHitUse hook) {
+  g_hit_use.store(hook, std::memory_order_release);
+}
+
+void
+warmPipelineHit(const Sha1Digest &recipe_key) {
+  warmCount(WarmCounter::LivePipelineHit);
+  if (auto hook = g_hit_use.load(std::memory_order_acquire))
+    hook(recipe_key);
 }
 
 std::string
@@ -353,7 +368,7 @@ warmPlanned(const WarmPlan &plan, double read_ms) {
   g_by_use = plan.by_use;
   g_used_planned = plan.used_planned;
   g_used_total = plan.used_total;
-  g_sessions = plan.sessions;
+  g_newest = plan.newest;
   g_oldest = plan.oldest;
   g_use_error = plan.use_error;
   g_planned_now = true;

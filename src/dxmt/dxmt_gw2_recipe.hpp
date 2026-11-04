@@ -69,9 +69,12 @@ void recipeVariantUnsupported();
 void recipePipeline(const compile::PipelineRecipe &recipe);
 void recipePipelineUnsupported();
 // gw2 (#124): a pipeline taken from warming's shared results instead of built: notes the recipe's use
-// for this session (a use row, DXMT_PSO_RECORD_USE), as recipePipeline does for a build. `recipe_key`
-// is the recipe's SHA-1 (compile::recipeKey with the variants' identities).
+// for this session (its U row, DXMT_PSO_RECORD_USE), as recipePipeline does for a build. `recipe_key`
+// is the recipe's SHA-1 (compile::recipeKey with the variants' identities). Installed as warming's
+// hit hook (setWarmHitUse); warmPipelineHit calls it.
 void recipeUse(const Sha1Digest &recipe_key);
+// gw2 (#124): DXMT_PSO_RECORD_USE (on unless "0") with DXMT_PSO_RECORD on, parsed once.
+bool recipeUseRecording();
 
 // The writer thread's log lines, logged by the render thread at Present (try_lock only).
 void recipeLogPending();

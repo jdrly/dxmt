@@ -2,7 +2,7 @@
 // gw2-build: clang -c -O1 src/util/sha1/sha1.c -o ${OUT}_sha1.o
 // gw2-build: clang -c -x objective-c -std=gnu17 -fno-objc-arc -O1 -DDXMT_NO_PRIVATE_API -Isrc/winemetal -Isrc/winemetal/unix src/winemetal/unix/cache.c -o ${OUT}_cache.o
 // gw2-build: clang -c -x objective-c -std=gnu17 -fno-objc-arc -O1 -DDXMT_NO_PRIVATE_API -Isrc/winemetal -Isrc/winemetal/unix tests/gw2/warm_use_db.m -o ${OUT}_db.o
-// gw2-build: clang++ -std=c++20 -O1 -g -fsanitize=address -Itests/gw2/shim -Itests/gw2 -Isrc/dxmt -Isrc/util -Isrc/winemetal tests/gw2/warm_use_test.cpp src/dxmt/dxmt_gw2_warm.cpp src/dxmt/dxmt_compile_recipe.cpp src/dxmt/dxmt_gw2_stats.cpp src/dxmt/dxmt_gw2_switches.cpp src/util/sha1/sha1_util.cpp ${OUT}_sha1.o ${OUT}_cache.o ${OUT}_db.o -framework Foundation -lsqlite3 -o $OUT
+// gw2-build: clang++ -std=c++20 -O1 -g -fsanitize=address -Itests/gw2/shim -Itests/gw2 -Isrc/dxmt -Isrc/util -Isrc/winemetal -DGW2_SRC_ROOT="\"$PWD\"" tests/gw2/warm_use_test.cpp src/dxmt/dxmt_gw2_warm.cpp src/dxmt/dxmt_compile_recipe.cpp src/dxmt/dxmt_gw2_stats.cpp src/dxmt/dxmt_gw2_switches.cpp src/util/sha1/sha1_util.cpp ${OUT}_sha1.o ${OUT}_cache.o ${OUT}_db.o -framework Foundation -lsqlite3 -o $OUT
 //
 // gw2 (#124): warming's plan by use, natively, on a real recipe database written and read through the
 // bridge's unix side (src/winemetal/unix/cache.c: CacheWriter_set and CacheEnumerate, call 193), in a
@@ -15,6 +15,9 @@
 //   first-use order, and the oldest unused ones are left out.
 // - A cap above the file: the used recipes first (by first use), then the rest in rowid order.
 // - A use row without its recipe is ignored; a malformed one is counted.
+// - Bounded: the file holds one U row per recipe ever used (merged by the writer's UseLedger, as in
+//   production) and one session counter; sessions are the counter's numbers, never a clock.
+// - The warm-hit seam (warmPipelineHit → the recorder's hook) and its two call sites.
 #include "dxmt_compile_recipe.hpp"
 #include "dxmt_gw2_recipe_use.hpp"
 #include "dxmt_gw2_warm.hpp"
@@ -125,12 +128,35 @@ writeExistingFile() {
   write(rows);
 }
 
-static void
-useSession(uint64_t session, const std::vector<std::pair<int, uint32_t>> &uses) {
-  std::vector<Row> rows;
-  for (auto [i, first_ms] : uses)
-    rows.push_back({gw2::recipeUseKey(g_keys[i], session), gw2::recipeUseValue(first_ms)});
+// One session as the recorder's writer runs it: load every U row and the counter (call 193), begin
+// (the counter + 1, written back), merge each use into the recipe's one U row (INSERT OR REPLACE).
+static uint32_t
+useSession(const std::vector<std::pair<int, uint32_t>> &uses) {
+  gw2::UseLedger ledger;
+  std::atomic<bool> stop{false};
+  auto load = [&](const uint8_t *k, uint32_t kl, const uint8_t *v, uint32_t vl) { ledger.load(k, kl, v, vl); };
+  uint32_t err = gw2::warmReadRows(enumerator(gw2::kUseTag), stop, load) |
+                 gw2::warmReadRows(enumerator(gw2::kSessionTag), stop, load);
+  CHECK(err == 0, "ledger read error %u", err);
+  uint32_t session = ledger.begin();
+  std::vector<Row> rows{{gw2::kSessionKey, gw2::sessionValue(session)}};
+  for (auto [i, first_ms] : uses) {
+    std::vector<uint8_t> value;
+    if (ledger.note(gw2::recipeUseId(g_keys[i]), first_ms, value))
+      rows.push_back({gw2::recipeUseKey(gw2::recipeUseId(g_keys[i])), value});
+    std::vector<uint8_t> again;
+    CHECK(!ledger.note(gw2::recipeUseId(g_keys[i]), first_ms + 1, again), "a second use in one session merged");
+  }
   write(rows);
+  return session;
+}
+
+static uint64_t
+countRows(char prefix) {
+  uint64_t n = 0;
+  std::atomic<bool> stop{false};
+  gw2::warmReadRows(enumerator(prefix), stop, [&](const uint8_t *, uint32_t, const uint8_t *, uint32_t) { n++; });
+  return n;
 }
 
 struct Planned {
@@ -195,10 +221,10 @@ realFile(const char *path) {
   for (size_t i = 0; same && p.use.rows == 0 && i < p.plan.pipelines.size(); i++)
     same = compile::recipeKey(p.plan.pipelines[i]) == compile::recipeKey(old.plan.pipelines[i]);
   CHECK(same && p.plan.read_error == 0 && p.use.read_error == 0, "real file: differs from the rowid plan, or read errors %u/%u (a WAL copy needs its -shm: copy it with journal_mode=delete)", p.plan.read_error, p.use.read_error);
-  std::printf("%s real file %s: %llu recipes planned (cap 8192), %llu capped, %zu functions, %llu use rows, "
-              "%llu sessions; read and plan %.1f ms; %s\n",
+  std::printf("%s real file %s: %llu recipes planned (cap 8192), %llu capped, %zu functions, %llu use rows, newest session "
+              "%llu; read and plan %.1f ms; %s\n",
               same ? "ok  " : "FAIL", path, (unsigned long long)p.plan.recipes, (unsigned long long)p.plan.capped,
-              p.plan.variants.size(), (unsigned long long)p.use.rows, (unsigned long long)p.plan.sessions, ms,
+              p.plan.variants.size(), (unsigned long long)p.use.rows, (unsigned long long)p.plan.newest, ms,
               p.use.rows ? "has use rows (no rowid comparison)" : "the same plan as rowid order");
 }
 
@@ -236,13 +262,13 @@ main() {
     std::vector<std::pair<int, uint32_t>> u;
     for (int i = 70; i <= 99; i++)
       u.push_back({i, uint32_t(100 + (99 - i))});
-    useSession(1000, u);
+    uint32_t session = useSession(u);
     auto p = planNow(30);
-    bool ok = p.order == range(99, 70, -1) && p.plan.capped == 70 && p.plan.used_planned == 30 &&
-              p.plan.used_total == 30 && p.plan.sessions == 1 && p.plan.oldest == 0;
-    CHECK(ok, "session 1: order %s used %llu/%llu sessions %llu oldest %lld", show(p.order).c_str(),
+    bool ok = session == 1 && p.order == range(99, 70, -1) && p.plan.capped == 70 && p.plan.used_planned == 30 &&
+              p.plan.used_total == 30 && p.plan.newest == 1 && p.plan.oldest == 0;
+    CHECK(ok, "session %u: order %s used %llu/%llu newest %llu oldest %lld", session, show(p.order).c_str(),
           (unsigned long long)p.plan.used_planned, (unsigned long long)p.plan.used_total,
-          (unsigned long long)p.plan.sessions, (long long)p.plan.oldest);
+          (unsigned long long)p.plan.newest, (long long)p.plan.oldest);
     std::printf("%s session 1: the plan is the 30 recipes it used (70..99), in first-use order\n",
                 ok ? "ok  " : "FAIL");
   }
@@ -254,15 +280,15 @@ main() {
       u.push_back({i, uint32_t(30 + i)});
     for (int i = 70; i <= 79; i++)
       u.push_back({i, uint32_t(50 + (i - 70))});
-    useSession(2000, u);
+    uint32_t session = useSession(u);
     auto p = planNow(30);
     // ranked: 70..79 (session 2, two sessions), 0..9 (session 2), then 80..89 of session 1's 80..99 (rowid)
     auto want = cat({range(0, 9), range(70, 79), range(89, 80, -1)});
-    bool ok = p.order == want && p.plan.capped == 70 && p.plan.used_planned == 30 && p.plan.used_total == 40 &&
-              p.plan.sessions == 2 && p.plan.oldest == 1;
-    CHECK(ok, "session 2: order %s want %s used %llu/%llu sessions %llu oldest %lld", show(p.order).c_str(),
+    bool ok = session == 2 && p.order == want && p.plan.capped == 70 && p.plan.used_planned == 30 &&
+              p.plan.used_total == 40 && p.plan.newest == 2 && p.plan.oldest == 1;
+    CHECK(ok, "session 2: order %s want %s used %llu/%llu newest %llu oldest %lld", show(p.order).c_str(),
           show(want).c_str(), (unsigned long long)p.plan.used_planned, (unsigned long long)p.plan.used_total,
-          (unsigned long long)p.plan.sessions, (long long)p.plan.oldest);
+          (unsigned long long)p.plan.newest, (long long)p.plan.oldest);
     std::printf("%s session 2: newest first, ties by sessions then rowid; submitted by first use\n",
                 ok ? "ok  " : "FAIL");
   }
@@ -272,18 +298,27 @@ main() {
     std::vector<std::pair<int, uint32_t>> u;
     for (int i = 40; i <= 59; i++)
       u.push_back({i, uint32_t(1 + (i - 40))});
-    useSession(3000, u);
+    uint32_t session = useSession(u);
     uint32_t x = 4242;
-    write({{gw2::recipeUseKey(Sha1HashState::compute(&x, 4), 3000), gw2::recipeUseValue(0)},
-           {"U" + std::string(20, 'z') + std::string(8, '\0'), std::vector<uint8_t>(3, 0)}});
+    gw2::RecipeUse orphan;
+    orphan.last_session = 3;
+    orphan.sessions = 1;
+    orphan.first_ms = 0;
+    write({{gw2::recipeUseKey(gw2::recipeUseId(Sha1HashState::compute(&x, 4))), gw2::recipeUseValue(orphan)},
+           {"U" + std::string(20, 'z'), std::vector<uint8_t>(3, 0)}});
     auto p = planNow(30);
     auto want = cat({range(40, 59), range(70, 79)});
-    bool ok = p.order == want && p.plan.capped == 70 && p.plan.used_planned == 30 && p.plan.used_total == 60 &&
-              p.plan.sessions == 3 && p.plan.oldest == 1 && p.use.malformed == 1 && p.use.rows == 71;
-    CHECK(ok, "session 3: order %s want %s used %llu/%llu sessions %llu oldest %lld malformed %llu rows %llu",
+    // bounded: one U row per recipe ever used (70..99, 0..9, 40..59: 60), the orphan and the malformed one
+    uint64_t u_rows = countRows(gw2::kUseTag), s_rows = countRows(gw2::kSessionTag);
+    bool ok = session == 3 && p.order == want && p.plan.capped == 70 && p.plan.used_planned == 30 &&
+              p.plan.used_total == 60 && p.plan.newest == 3 && p.plan.oldest == 1 && p.use.malformed == 1 &&
+              p.use.rows == 61 && u_rows == 62 && s_rows == 1;
+    CHECK(ok, "session 3: order %s want %s used %llu/%llu newest %llu oldest %lld malformed %llu rows %llu, file U %llu "
+              "S %llu",
           show(p.order).c_str(), show(want).c_str(), (unsigned long long)p.plan.used_planned,
-          (unsigned long long)p.plan.used_total, (unsigned long long)p.plan.sessions, (long long)p.plan.oldest,
-          (unsigned long long)p.use.malformed, (unsigned long long)p.use.rows);
+          (unsigned long long)p.plan.used_total, (unsigned long long)p.plan.newest, (long long)p.plan.oldest,
+          (unsigned long long)p.use.malformed, (unsigned long long)p.use.rows, (unsigned long long)u_rows,
+          (unsigned long long)s_rows);
     std::printf("%s session 3: the oldest unused recipes (10..39, 60..69) and session 1's alone are left out; "
                 "an orphan use row is ignored, a malformed one counted\n",
                 ok ? "ok  " : "FAIL");
@@ -298,6 +333,62 @@ main() {
     CHECK(full, "cap 200: order %s", show(all.order).c_str());
     std::printf("%s cap above the file: 60 used recipes by first use, then the 40 unused by rowid\n",
                 full ? "ok  " : "FAIL");
+  }
+
+  // the counter, not a clock: a file whose counter row was lost still numbers past every U row
+  {
+    gw2::UseLedger l;
+    gw2::RecipeUse u;
+    u.last_session = 41;
+    u.sessions = 3;
+    auto key = gw2::recipeUseKey(std::string(20, 'a'));
+    auto value = gw2::recipeUseValue(u);
+    l.load(reinterpret_cast<const uint8_t *>(key.data()), key.size(), value.data(), value.size());
+    bool past = l.begin() == 42;
+    std::vector<uint8_t> merged;
+    bool once = l.note(std::string(20, 'a'), 7, merged) && !l.note(std::string(20, 'a'), 3, merged) &&
+                l.recipes[std::string(20, 'a')].sessions == 4 && l.recipes[std::string(20, 'a')].first_ms == 7;
+    CHECK(past && once, "ledger: begin %u, merge once per session", l.session);
+    std::printf("%s ledger: sessions come from the file's counter (past every U row), one merge per recipe and "
+                "session\n",
+                past && once ? "ok  " : "FAIL");
+  }
+
+  // the warm-hit seam: CompleteFromShared and the run-time claim call warmPipelineHit, which counts the
+  // hit and calls the recorder's hook (recipeUse)
+  {
+    static Sha1Digest seen{};
+    static int calls = 0;
+    gw2::setWarmHitUse([](const Sha1Digest &k) {
+      seen = k;
+      calls++;
+    });
+    uint32_t x = 7;
+    auto k = Sha1HashState::compute(&x, 4);
+    gw2::warmPipelineHit(k);
+    gw2::setWarmHitUse(nullptr);
+    gw2::warmPipelineHit(k);
+    bool hooked = calls == 1 && seen == k;
+    // and the production call sites still go through it (a source guard: d3d11_pipeline.cpp isn't
+    // buildable natively)
+    std::string src;
+    if (FILE *f = std::fopen(GW2_SRC_ROOT "/src/d3d11/d3d11_pipeline.cpp", "r")) {
+      char buf[4096];
+      size_t n;
+      while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0)
+        src.append(buf, n);
+      std::fclose(f);
+    }
+    auto body = [&](const char *from) {
+      size_t a = src.find(from);
+      return a == std::string::npos ? std::string() : src.substr(a, 1500);
+    };
+    bool sites = body("bool CompleteFromShared() final").find("gw2::warmPipelineHit(key);") != std::string::npos &&
+                 body("case decltype(shared_->pipelines)::Claim::Done:").find("gw2::warmPipelineHit(key);") !=
+                     std::string::npos;
+    CHECK(hooked && sites, "seam: %d hook calls, call sites %s", calls, sites ? "found" : "missing");
+    std::printf("%s warm-hit seam: warmPipelineHit calls the use hook; CompleteFromShared and the claim call it\n",
+                hooked && sites ? "ok  " : "FAIL");
   }
 
   warmUseDbRemove(g_path.c_str());

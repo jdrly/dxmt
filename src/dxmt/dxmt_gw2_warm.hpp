@@ -18,6 +18,7 @@
 // This file: the switches, the plan (pure: tests/gw2/warm_test.cpp) and the WARM section's counters.
 
 #include "dxmt_compile_recipe.hpp"
+#include "dxmt_gw2_recipe_use.hpp"
 #include "sha1/sha1_util.hpp"
 #include <atomic>
 #include <cstdint>
@@ -59,20 +60,15 @@ struct WarmPlan {
   // gw2 (#124): with use data (warmRead's `use`)
   bool by_use = false;
   uint64_t used_planned = 0, used_total = 0; // planned recipes with use rows / every recipe with them
-  uint64_t sessions = 0;                     // distinct sessions in the use rows
+  uint64_t newest = 0;                       // the newest session in the use rows (the file's counter)
   uint32_t use_error = 0;                    // the use rows' read (as read_error); the plan goes on without them
   int64_t oldest = -1; // the planned recipes' oldest lastSession, in sessions before the newest (-1: none)
 };
 
-// gw2 (#124): what the use rows say about each recipe (dxmt_gw2_recipe_use.hpp)
-struct WarmUse {
-  uint64_t last_session = 0; // the newest session that used it (unix ms of its start)
-  uint32_t sessions = 0;     // sessions that used it
-  uint32_t first_ms = UINT32_MAX; // the least first use, ms from a session's start
-};
+// gw2 (#124): the use rows ('U', dxmt_gw2_recipe_use.hpp), by recipe
 struct WarmUseTable {
-  std::unordered_map<std::string, WarmUse> recipes; // by the recipe's SHA-1 (20 bytes)
-  std::vector<uint64_t> sessions;                   // distinct sessions, newest first (after warmReadUses)
+  std::unordered_map<std::string, RecipeUse> recipes; // by the recipe's SHA-1 (20 bytes)
+  uint32_t newest = 0;                                // the newest lastSession
   uint64_t rows = 0, malformed = 0;
   uint32_t read_error = 0; // as WarmPlan's
 };
@@ -98,12 +94,25 @@ constexpr uint64_t kWarmRowMax = 16ull << 20; // a larger row is skipped (a reci
 void warmRead(WarmPlan &plan, const WarmEnumerate &enumerate, uint32_t metal_version, WarmMode mode, uint32_t max,
               const std::atomic<bool> &stop, uint64_t row_max = kWarmRowMax, const WarmUseTable *use = nullptr);
 
-// gw2 (#124): reads the use rows ('U') into `table`, then sorts its sessions newest first.
+// gw2 (#124): reads the use rows ('U') into `table`.
 void warmReadUses(WarmUseTable &table, const WarmEnumerate &enumerate, const std::atomic<bool> &stop,
                   uint64_t row_max = kWarmRowMax);
 // gw2 (#124): adds one use row (a 'U' row's key and value); malformed rows are counted and skipped.
 void warmUseAdd(WarmUseTable &table, const uint8_t *key, size_t key_length, const uint8_t *value,
                 size_t value_length);
+// gw2 (#124): every row of one prefix through `row`, in rowid order (warmRead's batches, growth and
+// skips); returns SQLite's code if a batch failed (the rows before it were read), else 0.
+uint32_t warmReadRows(const WarmEnumerate &enumerate, const std::atomic<bool> &stop,
+                      const std::function<void(const uint8_t *key, uint32_t key_length, const uint8_t *value,
+                                               uint32_t value_length)> &row,
+                      uint64_t row_max = kWarmRowMax);
+
+// gw2 (#124): a live pipeline taken done from the shared results (a warm hit): counts WARM's live hit
+// and notes the recipe's use through the hook the recorder installs (recipeUse), so a warm hit keeps the
+// recipe ranked. The one call site for both (CompleteFromShared and the run-time claim).
+using WarmHitUse = void (*)(const Sha1Digest &recipe_key);
+void setWarmHitUse(WarmHitUse hook);
+void warmPipelineHit(const Sha1Digest &recipe_key);
 
 // Adds one recorded recipe (an R row's value). Recipes for another Metal target are skipped, and past
 // `max` recipes everything is counted as capped.

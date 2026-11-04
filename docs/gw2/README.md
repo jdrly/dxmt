@@ -56,7 +56,7 @@ because Wine raises `0x80000005` (`STATUS_BUFFER_OVERFLOW`) for a line over its 
 | `DXMT_PSO_GENERATIONS` | off | `=1` (exactly), with `DXMT_PSO_ARCHIVE=1` (#75; see [COMPILE](#compile), *Generations*): the archives are published as generations in `…/os-<OS build>-<GPU>/gen1/` instead of one file per session: each flush writes the pipelines added since the last one into an immutable shard of their own (never re-serializing an archive, which Metal fails at), a checksummed manifest lists the shards and their keys, and one index file (`CURRENT`) is replaced atomically, so a kill or a failed write leaves the last good generation. A pipeline Metal's packer names is excluded by its key from capture, in this and later sessions. One process writes a store; another gets lookup only | the session files of #52, unchanged (they and a store sit side by side; neither reads the other) |
 | `DXMT_RETIRE_RECOVERY` | on | A refused retirement (#113; never expected, a bug) recovers instead of holding every later chunk until teardown. The retirement ledger then retires by sequence with the completion the refused token proves: the finish thread waits for every chunk in order, so a token of the queue's submission for chunk `S` means every chunk up to `S` completed, and their holds go in sequence order (the ring resumes at `S + 1`); an empty or another queue's token proves nothing, and the next chunk's token recovers. A refused hold goes once the last chunk that may use it completed (its own chunk while unretired; for a retired sequence, every chunk the ring may still have in flight), not at teardown. A refused submission retirement retires the chunk the submission last waited for. One error line per failure (see *Other log lines*); the normal path is unchanged | `0`: refused holds and retirements are kept until the queue goes, as before |
 | `DXMT_WARM_ORDER` | use | (#124) With `DXMT_WARM`: which recipes the plan takes. `use`: the use rows first (`DXMT_PSO_RECORD_USE`), then every recipe of the target; ranked by the newest session that used it, then by the number of sessions, then rowid; the first `DXMT_WARM_MAX` are planned and submitted in first-use order (the character select first), recipes without use rows (recorded before #124, or unused since) after them in rowid order. A file without use rows plans exactly as `rowid` does. Parsed once per process | `rowid`: #88's plan, the oldest recipes first, streamed |
-| `DXMT_PSO_RECORD_USE` | on | (#124) With `DXMT_PSO_RECORD`: once per recipe and session, a use row (`U` + the recipe's SHA-1 + the session's start in unix ms → schema, first use in ms from the session's start) for a pipeline built (when its recipe is recorded) or taken from warming's shared results. About 3,000–5,000 rows of 37 B a session, on the recorder's writer thread; `RECORD uses=` counts them. Warming's plan ranks by them | `=0`: no use rows (`DXMT_WARM_ORDER=use` then plans the remaining file by rowid) |
+| `DXMT_PSO_RECORD_USE` | on | (#124) With `DXMT_PSO_RECORD`: the recipes' use data, as d9mt's state cache keeps it. One row per recipe ever used, `U` + the recipe's SHA-1 → schema, lastSession, sessionsUsed, firstUseMs (u32 each), rewritten in place; and a session counter, `Ssession` → schema, the last session's number. When it opens the file, the writer reads both (bridge call 193), takes the counter + 1 as this session's number and writes it back. A newer session always has a larger number; no clock is involved. It then merges each recipe this session used (built when its recipe is recorded, or taken from warming's shared results through `warmPipelineHit`) into its row, once per recipe and session. Bounded by the number of recipes; about 3,000–5,000 merges a session on the writer thread (`RECORD uses=`). Warming's plan ranks by them | `=0`: no use data (`DXMT_WARM_ORDER=use` then plans by rowid, as for a file without it) |
 
 Not switchable: `SetMaximumFrameLatency(0)` means the default, 3 (DXGI's definition; only
 `DXMT_MAX_FRAME_LATENCY` replaces the result). Typeless depth targets without stencil
@@ -723,7 +723,7 @@ report.
 | `shaders` | Shaders new in this process whose DXBC was queued (once per SHA-1 and process) |
 | `variants` | Shader variants whose translation inputs were queued: VS (global flags, GS pass-through, rasterization disabled, the input layout's slot mask and each element's index, slot, offset, format, step function and rate), PS (global flags, sample mask, UNORM output mask, dual-source blending, no depth), plain (global flags) |
 | `recipes` | Plain graphics pipelines (a VS, an optional PS) whose recipe was queued, right before Metal builds them |
-| `uses` | (#124) Use rows queued (`DXMT_PSO_RECORD_USE`): recipes this session used for the first time, built or taken from warming's results |
+| `uses` | (#124) Use rows written (`DXMT_PSO_RECORD_USE`): recipes this session used for the first time, built or taken from warming's results, merged into their U row. A use the session already counted, or one while the use data couldn't be read, counts as `present` |
 | `unsupported` | Variants (tessellation, stream-out, geometry) and pipelines (compute, geometry, tessellation, stream-out, and any whose VS or PS variant wasn't admitted) not recorded |
 | `written`, `present`, `failed` | Records the writer stored in the window; records it skipped because the file already had them (an earlier session's); writes SQLite refused (they may be queued again if seen again) |
 | `queued` | Records waiting for the writer now |
@@ -735,7 +735,7 @@ Keys in `recipes_1.db` (table `cache_1`), all content addressed (a key always ho
 key the file has is skipped): `D` + shader SHA-1 → DXBC; `V` + shader SHA-1 + variant digest + Metal
 target (u32, `SM50_SHADER_METAL_VERSION`) → schema (u32), target (u32), the `AIRCONV_VERSION` it was
 first recorded with (u32, provenance only: a warm stage translates the DXBC with its own airconv), kind
-(u8: 1 VS, 2 PS, 3 plain) + inputs; `R` + SHA-1 of the recipe → the recipe; (#124) `U` + SHA-1 of the recipe + the session (u64, its start in unix ms) → schema (u32), first use (u32, ms from the session's start), one row per recipe and session (`src/dxmt/dxmt_gw2_recipe_use.hpp`). A recipe is, in this order,
+(u8: 1 VS, 2 PS, 3 plain) + inputs; `R` + SHA-1 of the recipe → the recipe; (#124) `U` + SHA-1 of the recipe → schema, lastSession, sessionsUsed, firstUseMs (u32 each; the one row the writer replaces) and `Ssession` → schema, the last session's number (`src/dxmt/dxmt_gw2_recipe_use.hpp`). A recipe is, in this order,
 little-endian: schema and Metal target (u32), VS shader SHA-1 and variant digest, a PS flag (u8) and the PS's SHA-1 and digest, then for each of the 8 color attachments
 the pixel format, RGB and alpha blend operations, the four blend factors (u32 each), write mask and
 blending (u8), then alpha-to-coverage, logic operation enabled (u8), logic operation (u32),
@@ -751,6 +751,8 @@ against #57's code and a golden key).
 |---|---|
 | `Recipes: recording into $(getconf DARWIN_USER_CACHE_DIR)dxmt/<exe>/recipes_1.db (DXMT_PSO_RECORD; schema 1, airconv N, M of 256 MB)` | Once, when the writer starts (the first record); logged at the next Present |
 | `Recipes: can't open …; recording stops (DXMT_PSO_RECORD)` | Warning: the database couldn't be opened |
+| `Recipes: session N (M recipes with use data; DXMT_PSO_RECORD_USE)` | (#124) Once, when the writer starts: this session's number and the recipes the file has use data for |
+| `Recipes: can't read or start the use data (error E); no use rows this session (DXMT_PSO_RECORD_USE)` | (#124) Warning: the U or S rows couldn't be read (SQLite's code) or the counter not written; recording goes on without use data |
 | `Recipes: … holds N MB, its budget is 256 MB; recording stops. Delete the file to start over` / `… reached its budget …` | Warning: the file is full, at the start or during the session |
 | `Recipes: 8 writes in a row into … failed; recording stops (DXMT_PSO_RECORD)` | Warning: SQLite refused the writes (disk full, I/O error); `[CacheWriter] Failed to insert` lines say why |
 
@@ -761,7 +763,7 @@ its inputs; a warm stage skips such a recipe.
 
 `WARM functions= pipelines= skipped= airmiss= failed= nofunctions= live=variants:N,pipelines:N joins=
 [planned=recipes:N,functions:N,pipelines:N read=ms capped= othertarget= malformed= readerror= busy= oversized=
-buffer=KB order=use used=N/M sessions= oldest= useerror=|order=rowid]` (W2/W3), with
+buffer=KB order=use used=N/M newest= oldest= useerror=|order=rowid]` (W2/W3), with
 `DXMT_WARM` on, every 2 s window.
 
 | Field | Meaning |
@@ -780,8 +782,8 @@ buffer=KB order=use used=N/M sessions= oldest= useerror=|order=rowid]` (W2/W3), 
 | `buffer` | With `planned` (#114): the read buffer's final size: 1024 KB, or larger when a row didn't fit in 1 MiB (the buffer grows to it, up to 16 MiB) |
 | `order` | With `planned` (#124): `use` or `rowid` (`DXMT_WARM_ORDER`) |
 | `used` | With `order=use`: planned recipes that have use rows / every recipe of the target that has them |
-| `sessions` | With `order=use`: distinct sessions in the use rows |
-| `oldest` | With `order=use`: the oldest session among the planned recipes' newest uses, in sessions before the newest (0: all used in the newest session); `-` when no planned recipe has use rows |
+| `newest` | With `order=use`: the newest session number in the use rows (the file's counter) |
+| `oldest` | With `order=use`: how many sessions before `newest` the planned recipe used longest ago was last used (0: all in the newest session); `-` when no planned recipe has use data |
 | `useerror` | With `order=use`: the use rows' read, as `readerror`; the plan goes on with the rows read before it |
 
 The warm thread never calls the logger: this section is its report.
