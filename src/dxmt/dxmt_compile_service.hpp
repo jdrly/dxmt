@@ -174,7 +174,13 @@ template <typename Job, typename Traits> Service<Job, Traits>::Service(Options o
 }
 
 template <typename Job, typename Traits> Service<Job, Traits>::~Service() {
-  destroyed_.store(true);
+  {
+    // gw2 (#72): under the lock. A worker checks its wait's predicate under worker_mutex_ and then
+    // blocks; an unlocked store and notify could fall between the two, the worker would never wake,
+    // and the join below would hang the device's teardown (upstream's task_scheduler had the same).
+    std::unique_lock<dxmt::mutex> lock(worker_mutex_);
+    destroyed_.store(true);
+  }
   worker_cond_.notify_all();
 
   for (auto &worker : workers_) {
