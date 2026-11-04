@@ -1,6 +1,5 @@
 #include <stdatomic.h>
 #include <stdbool.h>
-#include <pthread.h>
 #include <dlfcn.h>
 #include <os/lock.h>
 #import <Cocoa/Cocoa.h>
@@ -2718,6 +2717,7 @@ _MTLSharedEvent_signalValue(void *obj) {
 
 #ifndef DXMT_NATIVE
 
+/* gw2 (#127): ported from athei/dxmt 0cd8b76e9a; tests/gw2/shared_event_listener_test.m runs it */
 /*
  * A listener is shared by the PE thread that owns it (create and destroy),
  * the PE thread that runs its run loop (start), and Metal's notification
