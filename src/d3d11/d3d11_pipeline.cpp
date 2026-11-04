@@ -124,7 +124,7 @@ public:
       return false;
     state_ = state;
     compile::completedWithoutRun(compile_job);
-    gw2::warmCount(gw2::WarmCounter::LivePipelineHit);
+    gw2::warmPipelineHit(key); // gw2 (#124): the live hit, and the recipe's use (it never reaches recipePipeline)
     SetIsDone(true);
     return true;
   }
@@ -178,7 +178,7 @@ public:
         switch (shared_->pipelines.claim(key, this, &state, &owner)) {
         case decltype(shared_->pipelines)::Claim::Done:
           state_ = state;
-          gw2::warmCount(gw2::WarmCounter::LivePipelineHit);
+          gw2::warmPipelineHit(key); // gw2 (#124)
           return this;
         case decltype(shared_->pipelines)::Claim::Busy:
           gw2::warmCount(gw2::WarmCounter::LiveJoin);

@@ -11,12 +11,12 @@
 
 namespace dxmt::gw2 {
 
-// The recipe rows ('R') of the recipe database at `path` (as CacheReader_alloc_init's).
+// The rows of one prefix of the recipe database at `path` (as CacheReader_alloc_init's).
 inline WarmEnumerate
-warmEnumerateRecipes(std::string path) {
-  return [path = std::move(path)](uint64_t after, uint8_t *buffer, uint64_t capacity) {
+warmEnumeratePrefix(std::string path, char prefix) {
+  return [path = std::move(path), prefix](uint64_t after, uint8_t *buffer, uint64_t capacity) {
     WMTCacheEnumerateResult r{};
-    CacheEnumerate(path.c_str(), kRecipeSchema, 'R', after, buffer, capacity, &r);
+    CacheEnumerate(path.c_str(), kRecipeSchema, uint8_t(prefix), after, buffer, capacity, &r);
     WarmBatch b;
     b.used = r.used;
     b.last_rowid = r.last_rowid;
@@ -29,6 +29,18 @@ warmEnumerateRecipes(std::string path) {
     b.more = r.more;
     return b;
   };
+}
+
+// The recipe rows ('R').
+inline WarmEnumerate
+warmEnumerateRecipes(std::string path) {
+  return warmEnumeratePrefix(std::move(path), 'R');
+}
+
+// gw2 (#124): the use rows ('U', dxmt_gw2_recipe_use.hpp).
+inline WarmEnumerate
+warmEnumerateUses(std::string path) {
+  return warmEnumeratePrefix(std::move(path), 'U');
 }
 
 } // namespace dxmt::gw2
