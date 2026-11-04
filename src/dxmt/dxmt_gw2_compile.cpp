@@ -128,7 +128,7 @@ finishFrame() {
 
 constexpr uint32_t kKeepSessions = 4;
 constexpr uint32_t kMaxPipelines = 8192;
-constexpr auto kFlushPeriod = std::chrono::seconds(120);
+constexpr auto kFlushPeriod = std::chrono::seconds(30); // gw2 (#52): was 120; a kill loses less
 
 struct ArchiveState {
   std::atomic<bool> on = false;
@@ -188,9 +188,11 @@ archiveSection() {
   WMTPSOArchiveQuery(&s);
   auto d = [&](uint64_t now, uint64_t before) { return now >= before ? now - before : now; };
   auto text = std::format(
-      " archive={}/{} added={} queued={} unflushed={} addfailed={} capped={}", d(s.lookup_hits, a.last.lookup_hits),
-      d(s.lookup_misses, a.last.lookup_misses), d(s.added, a.last.added), s.queued, s.unflushed, s.add_failed,
-      s.capped
+      " archive={}/{} miss=new:{},known:{} added={} queued={} unflushed={} addfailed={} capped={} skipped={} "
+      "rebuilt={}",
+      d(s.lookup_hits, a.last.lookup_hits), d(s.lookup_misses, a.last.lookup_misses),
+      d(s.miss_new, a.last.miss_new), d(s.miss_known, a.last.miss_known), d(s.added, a.last.added), s.queued,
+      s.unflushed, s.add_failed, s.capped, s.skipped, s.rebuilds
   );
   a.last = s;
   return text;

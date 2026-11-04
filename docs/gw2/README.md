@@ -35,7 +35,7 @@ because Wine raises `0x80000005` (`STATUS_BUFFER_OVERFLOW`) for a line over its 
 | `DXMT_COMPILE_WAIT_MS` | 2 | A `COMPILE frame=…` line for a frame whose encode-thread pipeline waits add up to at least this many ms (at most 5 lines a second); `0` turns them off. Needs `DXMT_STATS` | — |
 | `DXMT_PSO_ARCHIVE` | off | `=1`: Metal binary archives for pipelines. Pipelines are looked up in the archives of the last 4 sessions, and every render and compute pipeline built is added to this session's archive (see [COMPILE](#compile)) | no archives: no lookup, no capture, no files |
 | `DXMT_PSO_ARCHIVE_DIR` | user cache dir | With `DXMT_PSO_ARCHIVE=1`: an absolute unix directory that replaces `$(getconf DARWIN_USER_CACHE_DIR)dxmt/pso` | — |
-| `DXMT_PSO_FLUSH_EVERY` | 256 | With `DXMT_PSO_ARCHIVE=1`: serialize this session's archive every this many new pipelines (also every 120 s if any are new; never at exit) | — |
+| `DXMT_PSO_FLUSH_EVERY` | 256 | With `DXMT_PSO_ARCHIVE=1`: serialize this session's archive every this many new pipelines (also every 30 s if any are new; never at exit) | — |
 | `DXMT_PROMOTE_FLUSH_MIN` | 0 | `=<n>`: a speculative commit of an occlusion or timestamp query `End` waits until `n` such requests have accumulated, with a progress guarantee (see [CMDS](#cmds)). `1` commits as upstream does | `=0`: upstream (commit at the next pass change) |
 | `DXMT_PROMOTE_FLUSH_MS` | 2 | With `DXMT_PROMOTE_FLUSH_MIN`: the longest a held commit waits (the timer at the next pass change, and the watchdog's period) | — |
 | `DXMT_TIMESTAMP_MODE` | `estimate` | How a timestamp query `End` (and a timestamp-disjoint one) is taken. `estimate`: the open pass stays open and nothing is committed; the value is interpolated between the GPU start and end of the command buffer the query lands in, by its position among the chunk's encoders. `boundary`: the pass stays open, but the commit still happens at the next pass change (as `exact`, so `DXMT_PROMOTE_FLUSH_MIN` applies); the value is interpolated the same way. Both keep the values monotonic and make a disjoint query ready only after its chunk's timestamps are resolved; see [TIMESTAMP](#timestamp) | `exact` (or `0`): upstream, a pass split and a commit per timestamp, the value the buffer's GPU end |
@@ -307,7 +307,7 @@ pipeline is built. A frame with such waits is a hitch DXMT causes.
 
 `COMPILE variants= air=hit/miss pso=hit/miss built= failed= build=shader:ms/max pipeline:ms/max
 queue=now/max threads= wait=Nx ms/max slow= [waitcause=queued:N/ms,variantq:N/ms,variant:N/ms,building:N/ms[,other:N/ms]
-[archbusy=N]] [archive=hit/miss added= queued= unflushed= addfailed= capped=]`
+[archbusy=N]] [archive=hit/miss miss=new:N,known:N added= queued= unflushed= addfailed= capped= skipped= rebuilt=]`
 
 Counts are **totals in the 2 s window**; the `COMPILE frame=` line below has them per frame. Times are ms. Without `DXMT_STATS` nothing is counted or timed (no clock reads), except the count of built pipelines that `DXMT_PSO_FLUSH_EVERY` needs.
 
@@ -325,6 +325,8 @@ Counts are **totals in the 2 s window**; the `COMPILE frame=` line below has the
 | `waitcause` | (#46) Only in a window with waits: the same waits by what the waited-for pipeline task was doing when the wait started, count / total ms. `queued`: submitted, no worker had started it (behind other compile tasks). `variantq`: started, parked on its vertex or pixel shader variant, and that variant was still queued. `variant`: parked on a variant that was compiling (or between the two). `building`: inside Metal's pipeline build (`newRenderPipelineState`/`newComputePipelineState`). `other`: not classified (submitted while `DXMT_STATS` was off, or done but not yet flagged); shown only when non-zero. The counts add up to `wait`: both come from one drain of the per-cause counters, so a wait finishing during the drain lands in one window for both |
 | `archbusy` | (#46) Only with `DXMT_PSO_ARCHIVE=1`: waits that began while PSO archive adds were still queued on the unix side (each add compiles the pipeline again for the archive) |
 | `archive` | Only with `DXMT_PSO_ARCHIVE=1`: pipelines found in earlier sessions' archives / built without a hit in the window, pipelines added to this session's archive in the window, adds still queued, adds not yet serialized, adds that failed and pipelines not added because the session reached 8192 (both since start) |
+| `miss` | (#52) With `DXMT_PSO_ARCHIVE=1`: the window's lookup misses, `new` (never in an earlier session's archive) and `known` (an earlier session's `.keys` has the pipeline's key, yet Metal missed it: keying, or a pipeline lost before a flush) |
+| `skipped`, `rebuilt` | (#52) Since start: pipelines left out of the archive after Metal's packer named them in a failed flush, and flushes that succeeded only after rebuilding the archive without them |
 
 **`COMPILE frame=N wait=Nx ms/max queue=Q variants= air=hit/miss pso=hit/miss built= failed=
 build=shader:ms pipeline:ms cause=queued:N,variantq:N,variant:N,building:N,other:N longest=<cause>
@@ -361,7 +363,7 @@ archives are on.
 (`MTLBinaryArchive`), managed on the unix side of the bridge (`src/winemetal/unix/pso_archive.c`,
 bridge calls 149–151):
 
-- Files: `$(getconf DARWIN_USER_CACHE_DIR)dxmt/pso/<exe>/os-<OS build>-<GPU>/`
+- Files (with #52 also a `<file>.keys` sidecar per archive: the keys of the pipelines in it, written after each successful flush and removed with the archive): `$(getconf DARWIN_USER_CACHE_DIR)dxmt/pso/<exe>/os-<OS build>-<GPU>/`
   (`DXMT_PSO_ARCHIVE_DIR` replaces `…/dxmt/pso`), one `<unix time>-<pid>.mtlarchive` per session
   with a `.sum` next to it (size and SHA-256). Another OS build or GPU gets a new directory, and
   the old one is removed.
@@ -375,7 +377,7 @@ bridge calls 149–151):
   holds every pipeline it used. Geometry and tessellation emulation (mesh pipelines) and DXMT's
   tile pipelines are not archived.
 - The archive is serialized by a low-priority thread (`dxmt-pso-archive`) every
-  `DXMT_PSO_FLUSH_EVERY` (256) new pipelines, every 120 s if any are new, and soon after a
+  `DXMT_PSO_FLUSH_EVERY` (256) new pipelines, every 30 s if any are new, and soon after a
   device is released. Exit never flushes (serializing can take long, and Metal's threads may be
   gone): a session loses at most the pipelines added since the last flush. `MTLBinaryArchive` writes all its contents each
   time: the session's file grows and is rewritten (`.tmp`, then renamed; the `.sum` last).
@@ -390,9 +392,15 @@ bridge calls 149–151):
 | `PSO archive: deleted <file>: <reason>` | An archive skipped and removed: `no .sum`, `.sum does not match …`, `unreadable`, `Metal refused it: …`, `older than the newest 4 sessions` |
 | `PSO archive: removed <os-dir> (another OS build or GPU)`, `… leftover .tmp/.sum files` | Cleanup at start |
 | `PSO archive: off: <reason>` | The archives couldn't start (no cache dir, a relative `DXMT_PSO_ARCHIVE_DIR`, …) |
-| `PSO archive: flushing every N new pipelines, every 120 s if any are new (not at exit)` | Once, when on |
+| `PSO archive: flushing every N new pipelines, every 30 s if any are new (not at exit)` | Once, when on |
 | `PSO archive: flushed <file>: N pipelines (+M), X MB in T ms` | Each flush; `(session cap reached …)` once 8192 pipelines are in it |
-| `PSO archive: flush of <file> failed after T ms: <reason>` | A failed flush; the next one tries again |
+| `PSO archive: flush of <file> failed after T ms: <reason>` | A failed flush, also after the rebuild below; the next one tries again |
+| `PSO archive: flush of <file> failed: <Metal's error>` | (#52) The first try of a flush failed; the archive is rebuilt and written once more in the same flush |
+| `PSO archive: Metal names pipeline no. N: <shape> (left out of the archive from now on)` | (#52) The failed flush's error named a pipeline (`pipeline no. 'N'`, counted in that archive's own order): its shape (`render vs=… fs=…\|none colors=[…] depth= stencil= samples= raster= topology=` or `compute cs=…`; a function made with constant values shows as `<name>#c<hash>`). That pipeline is left out of every later flush (`skipped`); it is still built and used |
+| `PSO archive: rebuilding <file> without the pipelines left out after an earlier failure` | (#52) A flush after a failed retry: the current archive still holds skipped pipelines, so it is rebuilt before it is written |
+| `PSO archive: the rebuilt archive's pipeline no. N failed too: <shape> (left out from the next flush)` | (#52) The retry failed on another pipeline: it is skipped as well, the current archive is kept unchanged (a partial rebuild never replaces it), and the next flush rebuilds again before writing |
+| `PSO archive: flushed <file>: … (rebuilt with N pipelines after a failed flush)` | (#52) The retry into a fresh archive (every recorded pipeline but the skipped ones) succeeded |
+| `PSO archive: N pipeline keys from M of the loaded archives classify lookup misses (known/new)` | (#52) Once, at start: the keys read from the loaded archives' `.keys` sidecars |
 | `dxmt: PSO archive: about N pipelines added since the last flush are not saved (no flush at exit)` | At exit, on Wine's stderr (DXMT's log is gone by then), if the last completed flush missed some: adds not in it plus adds still queued (a flush still running counts as not done; an add in progress can count twice) |
 | `PSO archive: N pipelines could not be added so far; first error: …` | At the next flush after an add failed |
 
