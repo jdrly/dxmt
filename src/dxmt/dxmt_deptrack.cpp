@@ -1,10 +1,12 @@
 #include "dxmt_deptrack.hpp"
+#include <algorithm>
 #include <cassert>
+#include <chrono>
 
 namespace dxmt {
 
 void
-GenericAccessTracker::accessShared(EncoderId id, FenceSet &wait_fences, EncoderBarrierState &barrier_state) {
+GenericAccessTracker::accessShared(EncoderId id, FenceSet &wait_fences, EncoderBarrierState &barrier_state, EncoderId horizon) {
   if (exclusive_ == id) {
     if (isShared)
       return;
@@ -16,14 +18,14 @@ GenericAccessTracker::accessShared(EncoderId id, FenceSet &wait_fences, EncoderB
   if (shared_.isLastAccess(id))
     return;
   shared_.add(id);
-  if (id - exclusive_ < kLane) {
+  if (id - exclusive_ < horizon) {
     wait_fences.set(exclusive_);
   }
 }
 
 void
 GenericAccessTracker::accessExclusive(
-    EncoderId id, FenceSet &wait_fences, EncoderBarrierState &barrier_state, bool uav
+    EncoderId id, FenceSet &wait_fences, EncoderBarrierState &barrier_state, bool uav, EncoderId horizon
 ) {
   isShared = 0;
   if (exclusive_ == id) {
@@ -33,15 +35,15 @@ GenericAccessTracker::accessExclusive(
   if (shared_.isLastAccess(id)) {
     barrier_state.barrierSet |= kBarrierTypeRW;
   }
-  shared_.enumerate(id, [&](EncoderId id) { wait_fences.set(id); });
+  shared_.enumerate(id, horizon, [&](EncoderId id) { wait_fences.set(id); });
   shared_.clear();
-  if (id - exclusive_ < kLane)
+  if (id - exclusive_ < horizon)
     wait_fences.set(exclusive_);
   exclusive_ = id;
 }
 
 void
-GenericAccessTracker::accessSharedPreRaster(EncoderId id, FenceSet &wait_fences, EncoderBarrierState &barrier_state) {
+GenericAccessTracker::accessSharedPreRaster(EncoderId id, FenceSet &wait_fences, EncoderBarrierState &barrier_state, EncoderId horizon) {
   if (exclusive_ == id + 1) {
     if (isSharedPreRaster)
       return;
@@ -64,7 +66,7 @@ GenericAccessTracker::accessSharedPreRaster(EncoderId id, FenceSet &wait_fences,
     if (isSharedPreRaster)
       return;
     isSharedPreRaster = 1;
-    if (id - exclusive_ < kLane)
+    if (id - exclusive_ < horizon)
       wait_fences.set(exclusive_);
     return;
   } else if (shared_.isLastAccess(id)) {
@@ -72,7 +74,7 @@ GenericAccessTracker::accessSharedPreRaster(EncoderId id, FenceSet &wait_fences,
     return;
   }
   shared_.add(id);
-  if (id - exclusive_ < kLane)
+  if (id - exclusive_ < horizon)
     wait_fences.set(exclusive_);
   isSharedPreRaster = 1;
   isShared = 0;
@@ -80,7 +82,7 @@ GenericAccessTracker::accessSharedPreRaster(EncoderId id, FenceSet &wait_fences,
 
 void
 GenericAccessTracker::accessExclusivePreRaster(
-    EncoderId id, FenceSet &wait_fences, EncoderBarrierState &barrier_state, bool uav
+    EncoderId id, FenceSet &wait_fences, EncoderBarrierState &barrier_state, bool uav, EncoderId horizon
 ) {
   auto last_exclusive = exclusive_;
   exclusive_ = id;
@@ -119,8 +121,10 @@ GenericAccessTracker::accessExclusivePreRaster(
     }
     return;
   }
-  shared_.enumerate(id, [&](EncoderId id) { wait_fences.set(id); });
-  if (last_exclusive)
+  shared_.enumerate(id, horizon, [&](EncoderId id) { wait_fences.set(id); });
+  // gw2 (#132): the compressed policy drops a writer past the horizon, as the other accesses do (its
+  // checkpoint chain has finished it); the legacy policy keeps this unconditional wait
+  if (last_exclusive && (horizon == kLane || id - last_exclusive < horizon))
     wait_fences.set(last_exclusive);
 
   if (shared_.isLastAccess(id + 1) || shared_.isLastAccess(id)) {
@@ -141,7 +145,7 @@ GenericAccessTracker::accessExclusivePreRaster(
 }
 
 void
-GenericAccessTracker::accessSharedFragment(EncoderId id, FenceSet &wait_fences, EncoderBarrierState &barrier_state) {
+GenericAccessTracker::accessSharedFragment(EncoderId id, FenceSet &wait_fences, EncoderBarrierState &barrier_state, EncoderId horizon) {
   if (exclusive_ == id) {
     if (isShared)
       return;
@@ -158,6 +162,12 @@ GenericAccessTracker::accessSharedFragment(EncoderId id, FenceSet &wait_fences, 
     if (isShared)
       return;
     isShared = 1;
+    // gw2 (#132): the pass wrote this at pre-raster and now reads it at fragment. The legacy policy
+    // remembers only the write (exclusive_ = id - 1), so a later writer waits for this pass's
+    // pre-raster stage, not for this read; its weak window hides that from 64 encoders back. The
+    // compressed policy records the read, so the later writer waits for the fragment stage.
+    if (horizon != kLane)
+      shared_.add(id);
     if (isSharedPreRaster)
       return; // IMPLICIT BARRIER
     barrier_state.barrierFragmentAfterPreRasterSet |= kBarrierTypeRW;
@@ -167,7 +177,7 @@ GenericAccessTracker::accessSharedFragment(EncoderId id, FenceSet &wait_fences, 
   if (shared_.isLastAccess(id))
     return;
   bool isVertexLastAccess = shared_.isLastAccess(id - 1);
-  if (id - exclusive_ < kLane)
+  if (id - exclusive_ < horizon)
     wait_fences.set(exclusive_);
   shared_.add(id);
   isShared = 1;
@@ -177,7 +187,7 @@ GenericAccessTracker::accessSharedFragment(EncoderId id, FenceSet &wait_fences, 
 
 void
 GenericAccessTracker::accessExclusiveFragment(
-    EncoderId id, FenceSet &wait_fences, EncoderBarrierState &barrier_state, bool uav
+    EncoderId id, FenceSet &wait_fences, EncoderBarrierState &barrier_state, bool uav, EncoderId horizon
 ) {
   auto last_exclusive = exclusive_;
   exclusive_ = id;
@@ -217,8 +227,10 @@ GenericAccessTracker::accessExclusiveFragment(
     }
     return;
   }
-  shared_.enumerate(id, [&](EncoderId id) { wait_fences.set(id); });
-  if (last_exclusive)
+  shared_.enumerate(id, horizon, [&](EncoderId id) { wait_fences.set(id); });
+  // gw2 (#132): the compressed policy drops a writer past the horizon, as the other accesses do (its
+  // checkpoint chain has finished it); the legacy policy keeps this unconditional wait
+  if (last_exclusive && (horizon == kLane || id - last_exclusive < horizon))
     wait_fences.set(last_exclusive);
   if (shared_.isLastAccess(id) || shared_.isLastAccess(id - 1)) {
     if (isSharedPreRaster) {
@@ -260,7 +272,7 @@ private:
 constexpr auto WEAK_FENCE_MASK = WeakFenceMaskLTO();
 
 FenceSet
-FenceLocalityCheck::collectAndSimplifyWaits(FenceSet strong_fences, EncoderId id, bool implicit_pre_raster_wait) {
+FenceLocalityCheck::collectLegacy(FenceSet strong_fences, EncoderId id, bool implicit_pre_raster_wait) {
   if (implicit_pre_raster_wait)
     strong_fences.set(id - 1);
 
@@ -284,6 +296,111 @@ FenceLocalityCheck::collectAndSimplifyWaits(FenceSet strong_fences, EncoderId id
   }
 
   summary_[id % kParityLane] = full_fences;
+
+  if (implicit_pre_raster_wait)
+    minimal_fences.unset(id - 1);
+
+  return minimal_fences;
+}
+
+DependencyCounters &
+dependencyCounters() {
+  static DependencyCounters counters;
+  return counters;
+}
+
+FenceSet
+FenceLocalityCheck::collectAndSimplifyWaits(FenceSet strong_fences, EncoderId id, bool implicit_pre_raster_wait) {
+  if (!counting_)
+    return compressed_ ? collectCompressed(strong_fences, id, implicit_pre_raster_wait)
+                       : collectLegacy(strong_fences, id, implicit_pre_raster_wait);
+  // gw2 (#132): DEPS counters, one clock pair per encoder stage (about 60 a frame)
+  auto &counters = dependencyCounters();
+  auto t0 = std::chrono::steady_clock::now();
+  auto strong = strong_fences.count();
+  auto waits = compressed_ ? collectCompressed(strong_fences, id, implicit_pre_raster_wait)
+                           : collectLegacy(strong_fences, id, implicit_pre_raster_wait);
+  auto t1 = std::chrono::steady_clock::now();
+  counters.encoders.fetch_add(1, std::memory_order_relaxed);
+  counters.strong.fetch_add(strong, std::memory_order_relaxed);
+  counters.full.fetch_add(summary_[id % kParityLane].count(), std::memory_order_relaxed);
+  counters.waits.fetch_add(waits.count(), std::memory_order_relaxed);
+  counters.ns.fetch_add(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count(), std::memory_order_relaxed
+  );
+  return waits;
+}
+
+// gw2 (#132, after GameSir 3170d0349a, which removes the weak window; this keeps a guarantee in its
+// place): the checkpoint chain.
+//
+// The legacy policy adds a weak window (the encoders 64-127 IDs back) to every encoder, so by
+// induction everything up to C-64 has finished when C runs, and a tracker may drop older
+// dependencies. After simplification that is about one extra wait per encoder. Here only a
+// checkpoint, about every 64 IDs, carries a window: it waits on every encoder from the previous
+// checkpoint's coverage up to C-64 (all of them; simplification removes the reachable ones) and on
+// the previous checkpoint. Every other encoder adds the latest checkpoint S to its dependencies,
+// which simplification usually removes (the previous encoder already depended on S).
+//
+// Invariant: when C runs, every encoder up to C-127 has finished.
+// - Checkpoint S, previous S' (S - S' is 63 or 64 with contiguous IDs): S waits on (covered(S'), S-64]
+//   and on S'; S' finished means everything up to covered(S') finished. So covered(S) = S-64.
+// - Any other C: S >= C-63 is in C's dependencies, so everything up to S-64 >= C-127 has finished.
+// - The trackers keep direct dependencies up to kCompressedHorizon-1 = 127 back, so what they drop
+//   (C-128 and older) has finished.
+// - Waits never name an encoder more than kParityLane-1 back, so a fence slot names its own
+//   encoder's update (the slot is reused only kParityLane IDs later).
+// - IDs out of order (counted as gaps; the context hands them out contiguously) only make the
+//   window wider, clamped to kParityLane-1 back: a wait on every slot of that range waits on the
+//   newest encoders, which carry the invariant for everything older.
+FenceSet
+FenceLocalityCheck::collectCompressed(FenceSet strong_fences, EncoderId id, bool implicit_pre_raster_wait) {
+  assert(id >= kParityLane);
+  if (last_ && id != last_ + 1)
+    dependencyCounters().gaps.fetch_add(1, std::memory_order_relaxed);
+  last_ = id;
+  if (!first_)
+    first_ = id;
+
+  if (implicit_pre_raster_wait)
+    strong_fences.set(id - 1);
+
+  FenceSet full_fences(strong_fences);
+  if (!checkpoint_ || id - checkpoint_ >= kCheckpointStride) {
+    EncoderId lo = std::max({covered_ + 1, id - (kParityLane - 1), first_});
+    EncoderId hi = id - kLane;
+    for (EncoderId x = lo; x <= hi; x++)
+      full_fences.set(x);
+    if (checkpoint_ && id - checkpoint_ < kParityLane)
+      full_fences.set(checkpoint_);
+    covered_ = hi;
+    checkpoint_ = id;
+    if (counting_)
+      dependencyCounters().checkpoints.fetch_add(1, std::memory_order_relaxed);
+  } else {
+    full_fences.set(checkpoint_);
+  }
+
+  FenceSet minimal_fences;
+  FenceSet accessible_fences;
+
+  for (EncoderId offset = 1; offset < kParityLane; offset++) {
+    EncoderId prev_encoder_id = id - offset;
+    if (prev_encoder_id < first_)
+      break;
+
+    if (full_fences.test(prev_encoder_id) && !accessible_fences.testAndSet(prev_encoder_id))
+      minimal_fences.set(prev_encoder_id);
+    // a summary counts only for the encoder that wrote it (GameSir's generation check)
+    if (accessible_fences.test(prev_encoder_id) &&
+        summary_generation_[prev_encoder_id % kParityLane] == prev_encoder_id)
+      accessible_fences.merge(summary_[prev_encoder_id % kParityLane]);
+    if (accessible_fences.contains(full_fences))
+      break;
+  }
+
+  summary_[id % kParityLane] = full_fences;
+  summary_generation_[id % kParityLane] = id;
 
   if (implicit_pre_raster_wait)
     minimal_fences.unset(id - 1);
