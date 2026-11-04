@@ -1,4 +1,5 @@
 #include "dxgi_interfaces.h"
+#include "dxmt_gw2_cache_dir.hpp"
 #include "log/log.hpp"
 #include "util_env.hpp"
 #include "winemetal.h"
@@ -51,6 +52,8 @@ static void InitializeVendorExtensionNV() {
 };
 
 static void InitializeMetalCachePath() {
+  // gw2 (#134): once per process, before the first cache path resolves (this one)
+  gw2::logCacheDir();
   if (env::getEnvVar("DXMT_USE_DEFAULT_METAL_CACHE") == "1")
     return;
   // This is the framework cache (mainly for PSOs), not managed by DXMT

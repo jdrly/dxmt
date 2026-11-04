@@ -4,6 +4,7 @@
 #include "sqlite3.h"
 #define WINEMETAL_API
 #include "../winemetal_thunks.h"
+#include "cache_dir.h"
 
 @interface CacheReader : NSObject
 - (instancetype)initWithPath:(NSString *)path version:(uint64_t)version;
@@ -26,7 +27,7 @@ static inline NSString *
 resolve_cache_dir(NSString *path, bool path_is_file) {
   if (![path hasPrefix:@"/"]) {
     char buf[PATH_MAX];
-    size_t len = confstr(_CS_DARWIN_USER_CACHE_DIR, buf, sizeof(buf));
+    size_t len = dxmt_cache_base(buf, sizeof(buf)); // gw2 (#134): DXMT_CACHE_DIR, if set
 
     if (!len) {
       return nil;

@@ -66,6 +66,7 @@
 #include <unistd.h>
 #define WINEMETAL_API
 #include "../winemetal_thunks.h"
+#include "cache_dir.h"
 #include "pso_archive.h"
 #include "pso_archive_policy.h"
 #include "pso_archive_publish.h"
@@ -1053,7 +1054,8 @@ pso_archive_open(struct pso_archive *a, id<MTLDevice> device, const struct WMTPS
     base = [NSString stringWithUTF8String:base_dir];
   } else {
     char buf[PATH_MAX];
-    if (!confstr(_CS_DARWIN_USER_CACHE_DIR, buf, sizeof(buf))) {
+    /* gw2 (#134): DXMT_CACHE_DIR, if set, instead of the user cache dir */
+    if (!dxmt_cache_base(buf, sizeof(buf))) {
       report_line(r, "PSO archive: off: no user cache directory");
       return false;
     }
