@@ -4511,8 +4511,10 @@ public:
     };
     std::vector<Src> srvs;
     int small = -1, smaller = 0, fullsize = 0;
-    for (unsigned slot = 0; slot < 64; slot++) {
-      if (!(refl.SRVSlotMaskLo & (uint64_t(1) << slot)) || !PS.SRVs.test_bound(slot))
+    // every SRV slot the shader declares, t0-t127 (SRVSlotMaskLo: t0-t63, SRVSlotMaskHi: t64-t127)
+    for (unsigned slot = 0; slot < 128; slot++) {
+      uint64_t mask = slot < 64 ? refl.SRVSlotMaskLo : refl.SRVSlotMaskHi;
+      if (!(mask & (uint64_t(1) << (slot & 63))) || !PS.SRVs.test_bound(slot))
         continue;
       auto *srv = PS.SRVs[slot].SRV.ptr();
       auto texture = srv->texture();
@@ -4649,9 +4651,10 @@ public:
             scaler = target->scaler](ArgumentEncodingContext &enc) mutable {
       enc.upscale(input, input_view, output, scaler);
     });
+    // forward_rc: a deferred context's command list may be executed more than once (copy, not move)
     EmitST([slot = src.slot, output = target->output](ArgumentEncodingContext &enc) mutable {
       auto view = output->fullView;
-      enc.bindTexture<PipelineStage::Pixel>(slot, std::move(output), view);
+      enc.bindTexture<PipelineStage::Pixel>(slot, forward_rc(output), view);
     });
     PS.SRVs.set_dirty(src.slot);
     guard.slot = int(src.slot);
