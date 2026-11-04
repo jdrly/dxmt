@@ -279,15 +279,23 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
 #endif
 
     virtual WMT::Reference<WMT::DispatchData> find_cached_variant(Sha1Digest &variant_digest) final {
+      auto t0 = gw2::compileClock(); // gw2 (W0): the reader's lock, then the AIR read
       auto reader = cache->scache_.getReader();
-      if (reader)
-        return reader->get(std::make_pair(sha1_, variant_digest));
+      gw2::compileVariantStage(gw2::VariantStage::Lock, t0);
+      if (reader) {
+        auto t1 = gw2::compileClock();
+        auto data = reader->get(std::make_pair(sha1_, variant_digest));
+        gw2::compileVariantStage(gw2::VariantStage::Air, t1);
+        return data;
+      }
       return {};
     };
     virtual void update_cached_variant(Sha1Digest &variant_digest, WMT::DispatchData data) final {
+      auto t0 = gw2::compileClock(); // gw2 (W0): lock and write
       auto writer = cache->scache_.getWriter();
       if (writer)
         writer->set(std::make_pair(sha1_, variant_digest), data);
+      gw2::compileVariantStage(gw2::VariantStage::Store, t0);
     }
   };
 
