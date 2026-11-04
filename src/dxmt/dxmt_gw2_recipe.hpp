@@ -10,10 +10,10 @@
 //   WMTRenderPipelineInfo handed to Metal, serialized explicitly (never pointers or padding), keyed
 //   by the SHA-1 of that serialization.
 //
-// Into $(getconf DARWIN_USER_CACHE_DIR)dxmt/<exe>/recipes_<schema>.db through the bridge's cache
-// writer, from one lowest-priority writer thread. The callers never wait on the recorder: they
-// copy, check a fixed-size lock-free table of what this process has seen, and push onto a bounded
-// lock-free list. The file has a byte budget; rows already in it aren't written again. The writer
+// Into <base>dxmt/<exe>/recipes_<schema>.db (#134: <base> is DXMT_CACHE_DIR or the user cache dir)
+// through the bridge's cache writer, from one lowest-priority writer thread. The callers never wait
+// on the recorder: they copy, check a fixed-size lock-free table of what this process has seen, and
+// push onto a bounded lock-free list. The file has a byte budget; rows already in it aren't written again. The writer
 // never calls the logger (its lines are logged at the next Present). DXMT_PSO_RECORD=0 records
 // nothing and opens nothing. See docs/gw2/README.md.
 

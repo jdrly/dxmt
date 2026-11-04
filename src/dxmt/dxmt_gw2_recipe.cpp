@@ -1,4 +1,5 @@
 #include "dxmt_gw2_recipe.hpp"
+#include "dxmt_gw2_cache_dir.hpp"
 #include "dxmt_compile_recipe.hpp"
 #include "Metal.hpp"
 #include "airconv_public.h"
@@ -246,7 +247,7 @@ writerThread() {
   SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
   auto &r = recorder();
   auto path = str::format("dxmt/", env::getExeName(), "/recipes_", kRecipeSchema, ".db");
-  auto shown = str::format("$(getconf DARWIN_USER_CACHE_DIR)", path);
+  auto shown = gw2::cacheBaseShown(gw2::cacheDir()) + path; // gw2 (#134): the real base
 
   // The writer creates the file and its table; the reader then finds the rows already stored.
   auto writer = WMT::CacheWriter::alloc_init(path.c_str(), kRecipeSchema);
