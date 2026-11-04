@@ -8,8 +8,9 @@
 //   resources the way ArgumentEncodingContext::track and endPass do: the production GenericAccessTracker
 //   calls with the context's horizon, then FenceLocalityCheck::collectAndSimplifyWaits per stage.
 // - The oracle models Metal's fences: every stage updates the fence slot `id % kParityLane` when it ends; a
-//   wait on a slot waits for the newest update of that slot encoded before the waiting encoder; a render
-//   encoder's fragment stage follows its own pre-raster stage. Happens-before is the transitive closure.
+//   wait on a slot waits for every update of that slot encoded before the waiting encoder (MTL4CommandEncoder.h,
+//   "Synchronizing passes with a fence"); a render encoder's fragment stage follows its own pre-raster stage.
+//   Happens-before is the transitive closure.
 // - Every RAW/WAR/WAW pair between different encoders must be ordered by happens-before. Checking each
 //   access against the resource's last writer and the readers since then covers every pair by transitivity.
 // - Both policies must have zero violations. A control run (the strong waits only, no window and no
@@ -88,7 +89,8 @@ run(const std::vector<Encoder> &stream, unsigned resources, Policy policy) {
   EncoderId next_id = kParityLane; // as the context: never from 0
   EncoderId max_id = next_id + stream.size() * 2 + 2;
   std::vector<Bits> before(max_id + 1);          // happens-before ancestors of each stage node
-  std::vector<EncoderId> last_update(kParityLane, 0); // newest update encoded per fence slot
+  // per fence slot: every stage that updated it so far, with their ancestors (a wait covers them all)
+  std::vector<Bits> slot_history(kParityLane, Bits(max_id + 1));
 
   std::vector<Touch> last_write(resources, {0, 0});
   std::vector<std::vector<Touch>> readers(resources);
@@ -147,16 +149,10 @@ run(const std::vector<Encoder> &stream, unsigned resources, Policy policy) {
     r.waits += emit.count() + emit_vertex.count();
     r.stages += vid ? 2 : 1;
 
-    // Metal's fences: resolve each wait against the newest update of its slot before this encoder
+    // Metal's fences: a wait covers every update of its slot encoded before this encoder
     auto edges = [&](FenceSet &set, EncoderId node) {
       before[node] = Bits(max_id + 1);
-      set.forEach([&](EncoderId slot) {
-        EncoderId producer = last_update[slot % kParityLane];
-        if (producer) {
-          before[node].set(producer);
-          before[node].merge(before[producer]);
-        }
-      });
+      set.forEach([&](EncoderId slot) { before[node].merge(slot_history[slot % kParityLane]); });
     };
     if (vid) {
       // a stage named in the vertex set waits at pre-raster, which also orders the fragment stage
@@ -167,9 +163,14 @@ run(const std::vector<Encoder> &stream, unsigned resources, Policy policy) {
     } else {
       edges(emit, id);
     }
+    auto update = [&](EncoderId node) {
+      auto &h = slot_history[node % kParityLane];
+      h.set(node);
+      h.merge(before[node]);
+    };
     if (vid)
-      last_update[vid % kParityLane] = vid;
-    last_update[id % kParityLane] = id;
+      update(vid);
+    update(id);
 
     // the oracle: every hazard with another encoder must be ordered
     for (auto &a : enc.accesses) {
@@ -324,6 +325,39 @@ main(int argc, char **) {
       s.push_back({Kind::Render, {{2 + (i + 3) % 5, false, false, Stage::PreRaster}, {0, false, false, Stage::Fragment}}});
     }
     both("RT chain + uploads", s, 7, false);
+  }
+
+  // Fusion (checkEncoderRelation's render-into-render, through the production helper): what DEPS counts as
+  // emitted after fusion drops waits on the fused pass's own updates, and keeps the external ones.
+  {
+    FenceLocalityCheck locality;
+    locality.setCompressed(true);
+    GenericAccessTracker rt, tex;
+    EncoderBarrierState b;
+    // a texture written by a blit, then two passes on the same target, both sampling it
+    FenceSet w0;
+    tex.accessExclusive(256, w0, b, false, kCompressedHorizon);
+    auto blit_wait = locality.collectAndSimplifyWaits(w0, 256);
+    FenceSet r0v, r0f, r1v, r1f;
+    rt.accessExclusiveFragment(258, r0f, b, false, kCompressedHorizon);
+    tex.accessSharedFragment(258, r0f, b, kCompressedHorizon);
+    r0v = locality.collectAndSimplifyWaits(r0v, 257);
+    r0f = locality.collectAndSimplifyWaits(r0f, 258, true);
+    rt.accessExclusiveFragment(260, r1f, b, false, kCompressedHorizon);
+    tex.accessSharedFragment(260, r1f, b, kCompressedHorizon);
+    r1v = locality.collectAndSimplifyWaits(r1v, 259);
+    r1f = locality.collectAndSimplifyWaits(r1f, 260, true);
+    uint32_t before_fusion = emittedFences(r0f, &r0v) + emittedFences(r1f, &r1v);
+    expect(r1f.test(258), "the second pass waits on the first (same target)");
+    FenceSet r0u(258), r0uv(257), r1u(260), r1uv(259);
+    fuseRenderPassFences(r1f, r1v, r1u, r1uv, r0f, r0v, r0u, r0uv);
+    uint32_t after_fusion = emittedFences(r1f, &r1v);
+    std::printf("fusion: waits before=%u after=%u (blit %u), updates after=%u\n", before_fusion, after_fusion,
+                emittedFences(blit_wait), emittedFences(r1u, &r1uv));
+    expect(!r1f.test(258) && !r1f.test(257), "fused pass still waits on its own fused update");
+    expect(r1f.unionOf(r1v).test(256), "fused pass lost the external dependency on the blit");
+    expect(after_fusion < before_fusion, "fusion removed no emitted wait");
+    expect(emittedFences(r1u, &r1uv) == 4, "fused pass doesn't update all four stage fences");
   }
 
   // Random streams; in each pass the pre-raster accesses come first. The oracle has one node per stage, so

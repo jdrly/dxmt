@@ -324,7 +324,7 @@ FenceLocalityCheck::collectAndSimplifyWaits(FenceSet strong_fences, EncoderId id
   counters.encoders.fetch_add(1, std::memory_order_relaxed);
   counters.strong.fetch_add(strong, std::memory_order_relaxed);
   counters.full.fetch_add(summary_[id % kParityLane].count(), std::memory_order_relaxed);
-  counters.waits.fetch_add(waits.count(), std::memory_order_relaxed);
+  counters.simplified.fetch_add(waits.count(), std::memory_order_relaxed);
   counters.ns.fetch_add(
       std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count(), std::memory_order_relaxed
   );
@@ -332,7 +332,10 @@ FenceLocalityCheck::collectAndSimplifyWaits(FenceSet strong_fences, EncoderId id
 }
 
 // gw2 (#132, after GameSir 3170d0349a, which removes the weak window; this keeps a guarantee in its
-// place): the checkpoint chain.
+// place): the checkpoint chain. Our trackers stay bounded (they drop dependencies past a horizon, and
+// keep a bounded ring of readers), so without the window something must still cover what they drop.
+// (GameSir instead tracks every reader and writer as an explicit ID, relying on a Metal fence wait
+// covering every earlier update of its slot.)
 //
 // The legacy policy adds a weak window (the encoders 64-127 IDs back) to every encoder, so by
 // induction everything up to C-64 has finished when C runs, and a tracker may drop older
@@ -348,8 +351,9 @@ FenceLocalityCheck::collectAndSimplifyWaits(FenceSet strong_fences, EncoderId id
 // - Any other C: S >= C-63 is in C's dependencies, so everything up to S-64 >= C-127 has finished.
 // - The trackers keep direct dependencies up to kCompressedHorizon-1 = 127 back, so what they drop
 //   (C-128 and older) has finished.
-// - Waits never name an encoder more than kParityLane-1 back, so a fence slot names its own
-//   encoder's update (the slot is reused only kParityLane IDs later).
+// - Waits never name an encoder more than kParityLane-1 back, so the wanted encoder's update is the
+//   newest of its slot (the slot is reused only kParityLane IDs later); the proof doesn't need Metal's
+//   wait covering a slot's older updates too, though Metal 4 documents that it does.
 // - IDs out of order (counted as gaps; the context hands them out contiguously) only make the
 //   window wider, clamped to kParityLane-1 back: a wait on every slot of that range waits on the
 //   newest encoders, which carry the invariant for everything older.
@@ -366,7 +370,8 @@ FenceLocalityCheck::collectCompressed(FenceSet strong_fences, EncoderId id, bool
     strong_fences.set(id - 1);
 
   FenceSet full_fences(strong_fences);
-  if (!checkpoint_ || id - checkpoint_ >= kCheckpointStride) {
+  last_checkpoint_ = !checkpoint_ || id - checkpoint_ >= kCheckpointStride;
+  if (last_checkpoint_) {
     EncoderId lo = std::max({covered_ + 1, id - (kParityLane - 1), first_});
     EncoderId hi = id - kLane;
     for (EncoderId x = lo; x <= hi; x++)

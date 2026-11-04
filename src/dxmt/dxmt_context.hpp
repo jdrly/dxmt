@@ -133,6 +133,7 @@ struct EncoderData {
   FenceSet fence_wait;
   FenceSet fence_update;
   EncoderBarrierState barrier_state;
+  bool gw2_checkpoint = false; // gw2 (#132): a stage of this encoder is a checkpoint (DEPS only)
 };
 
 struct GSDispatchArgumentsMarshal {
