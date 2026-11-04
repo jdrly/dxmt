@@ -623,6 +623,34 @@ warmReadErrors() {
               (unsigned long long)q.recipes);
 }
 
+// The cap's count: with batches of a few rows (the UAT's 3,672 recipes came in two 1 MiB batches), every
+// recipe over DXMT_WARM_MAX is counted as capped, not only the rest of the batch that reached the cap.
+static void
+warmReadCapped() {
+  std::vector<FakeRow> rows;
+  uint64_t rowid = 0;
+  for (int i = 0; i < 50; i++)
+    rows.push_back({++rowid, recordedRecipe(320, i, i)});
+  uint64_t row = 8 + 21 + rows[0].value.size();
+  std::atomic<bool> stop{false};
+  uint64_t calls = 0;
+  gw2::WarmPlan p;
+  gw2::warmRead(
+      p,
+      [&](uint64_t after, uint8_t *buffer, uint64_t capacity) {
+        calls++;
+        return fakeEnumerate(rows, after, buffer, std::min<uint64_t>(capacity, 4 * row), ~0ull, 0); // 4 rows
+      },
+      320, gw2::WarmMode::All, 10, stop
+  );
+  bool counted = p.recipes == 10 && p.pipelines.size() == 10 && p.capped == 40 && p.read_error == 0 && calls >= 13;
+  CHECK(counted, "capped: %llu planned, %llu capped of 50, %llu calls", (unsigned long long)p.recipes,
+        (unsigned long long)p.capped, (unsigned long long)calls);
+  std::printf("%s warm read: cap 10 of 50 recipes in batches of 4: %llu planned, %llu capped (every one over the "
+              "cap)\n",
+              counted ? "ok  " : "FAIL", (unsigned long long)p.recipes, (unsigned long long)p.capped);
+}
+
 int
 main() {
   for (int round = 0; round < 10; round++)
@@ -633,6 +661,7 @@ main() {
   demandNotDelayed();
   plan();
   warmReadErrors();
+  warmReadCapped();
   teardown(compile::Policy::Declared);
   teardown(compile::Policy::Legacy);
   readyHitSaturated();
