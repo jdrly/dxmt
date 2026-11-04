@@ -945,4 +945,7 @@ identical.
 with counting owners: nothing is released before its chunk retires, today's cross-category release
 order, ring wrap at 32, 64 and 128 with a stale generation refused, two queues with the same
 sequence, repeated and out-of-order retirements refused, no hold after retirement began (even from a
-release), and teardown's slot-by-slot drain.
+release), and teardown's slot-by-slot drain. Since L2 (#69) also the retention policy against every
+hold call site's former gate in each reachable configuration (Metal 3 retained or unretained, the
+lifetime check, the residency set, Metal 4), with the scripted release-trace parity run per
+configuration.

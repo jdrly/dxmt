@@ -295,14 +295,25 @@ public:
     return unretained_ ? commandQueue.commandBufferWithUnretainedReferences() : commandQueue.commandBuffer();
   }
 
-  // gw2 (#31, #66): chunk `seq` (being encoded, encode thread only) holds these until it retires (the
-  // retirement ledger); called only with gw2::lifetime::keepUntilRetired() (DXMT_UNRETAINED=1 or the
-  // check), and by the Metal 4 present (which runs only with it). A null one holds nothing.
+  // gw2 (#31, #66, #69): chunk `seq` (being encoded, encode thread only) holds these until it retires
+  // (the retirement ledger), if its retention policy needs them held (gw2::RetentionPolicy: unless
+  // Metal 3's retained command buffers hold them). Otherwise, and for a null one, nothing happens and
+  // the caller keeps it.
   template <typename T>
   void
-  Hold(uint64_t seq, WMT::Reference<T> &&object) {
-    if (object && !ledger_.hold(seq, std::exchange(object.handle, NULL_OBJECT_HANDLE)))
+  Hold(uint64_t seq, WMT::Reference<T> &&object, gw2::HoldReason reason) {
+    if (!object || !ledger_.policy().holds(reason))
+      return;
+    if (!ledger_.hold(seq, std::exchange(object.handle, NULL_OBJECT_HANDLE), reason))
       LedgerRefused("hold", seq);
+  }
+  // gw2 (#69): the same for an object the caller doesn't own (the drawable): a reference is taken
+  // (retained) only if the policy holds it, as the call site's gate did
+  template <typename T>
+  void
+  HoldRetaining(uint64_t seq, T borrowed, gw2::HoldReason reason) {
+    if (ledger_.policy().holds(reason))
+      Hold(seq, WMT::Reference<T>(borrowed), reason);
   }
   template <typename T>
   void

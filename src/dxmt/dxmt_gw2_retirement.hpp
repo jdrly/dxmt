@@ -5,6 +5,9 @@
 // finish thread retires the chunk: the present split's command buffers, Metal objects (the drawable,
 // events), the presenter and the MetalFX scalers.
 //
+// - gw2 (#69, L2): which of them the chunk must hold is the ledger's retention policy, not the call
+//   site's: every hold names its reason, and a hold the policy declines leaves the object with the
+//   caller (released where it always was).
 // - Holds are typed and stored per ring slot (seq % ring slots), stamped with the chunk sequence that
 //   owns the slot, so a hold for a slot still owned by an unretired chunk (a stale generation) is
 //   refused rather than mixed into it. A ring slot's lists keep their capacity across retirements, as the
@@ -30,6 +33,35 @@
 
 namespace dxmt::gw2 {
 
+// gw2 (#69): why a chunk holds something
+enum class HoldReason : uint8_t {
+  PresentSplit,   // a command buffer the present split committed early (the finish thread reads it)
+  Drawable,       // the present's drawable (its texture is the present pass's attachment)
+  Presenter,      // the present pass's pipelines and gamma table
+  Event,          // a Signal/Wait event (an ID3D11Fence, a keyed mutex) that may go first
+  SpatialScaler,  // a MetalFX spatial scaler and its fence
+  TemporalScaler, // a MetalFX temporal scaler and its fence
+};
+
+// gw2 (#69): which holds a queue's chunks need. Only Metal 3's retained command buffers
+// ([queue commandBuffer], DXMT_UNRETAINED=0) hold what they use themselves, and then only when the
+// lifetime check (whose stamps assume DXMT holds) is off; Metal 4's retain nothing. The present
+// split's buffers are always held: the finish thread checks them for errors and reads their GPU spans.
+struct RetentionPolicy {
+  bool metal4 = false;         // the queue's chunks go to Metal 4 (which runs only with DXMT_UNRETAINED=1)
+  bool unretained = false;     // DXMT_UNRETAINED=1: Metal 3 command buffers retain nothing
+  bool lifetime_check = false; // DXMT_LIFETIME_CHECK=1 (a diagnostic build)
+
+  bool
+  commandBuffersRetain() const {
+    return !metal4 && !unretained && !lifetime_check;
+  }
+  bool
+  holds(HoldReason reason) const {
+    return reason == HoldReason::PresentSplit || !commandBuffersRetain();
+  }
+};
+
 // Traits: Object (an owned raw handle; null is false; Traits::release(Object) drops it),
 // CommandBuffer, Presenter, SpatialScaler, TemporalScaler (owning types whose destructor releases).
 template <class Traits> class BasicRetirementLedger {
@@ -40,7 +72,10 @@ public:
   using SpatialScaler = typename Traits::SpatialScaler;
   using TemporalScaler = typename Traits::TemporalScaler;
 
-  explicit BasicRetirementLedger(uint32_t ring_slots) : slots_(ring_slots), ring_slots_(ring_slots) {}
+  BasicRetirementLedger(uint32_t ring_slots, RetentionPolicy policy) :
+      slots_(ring_slots),
+      ring_slots_(ring_slots),
+      policy_(policy) {}
 
   BasicRetirementLedger(const BasicRetirementLedger &) = delete;
   BasicRetirementLedger &operator=(const BasicRetirementLedger &) = delete;
@@ -51,11 +86,22 @@ public:
     releaseRefused();
   }
 
-  // Encode thread, chunk `seq` being encoded. A null object holds nothing (true). False: refused (a
-  // retired sequence, or the ring slot belongs to an unretired one); the object is kept until drain().
+  // gw2 (#69): the queue's policy, set before its first chunk (once it has picked Metal 3 or 4)
+  void
+  setPolicy(RetentionPolicy policy) {
+    policy_ = policy;
+  }
+  const RetentionPolicy &
+  policy() const {
+    return policy_;
+  }
+
+  // Encode thread, chunk `seq` being encoded. A null object, or one the policy doesn't need held,
+  // holds nothing and stays with the caller (true). False: refused (a retired sequence, or the ring
+  // slot belongs to an unretired one); the object is kept until drain().
   [[nodiscard]] bool
-  hold(uint64_t seq, Object &&object) {
-    if (!object)
+  hold(uint64_t seq, Object &&object, HoldReason reason) {
+    if (!object || !policy_.holds(reason))
       return true;
     auto *slot = ringSlotFor(seq);
     (slot ? *slot : refused_).objects.push_back(std::exchange(object, Object{}));
@@ -63,19 +109,20 @@ public:
   }
   [[nodiscard]] bool
   hold(uint64_t seq, Presenter &&presenter) {
-    return holdIn(seq, std::move(presenter), &RingSlot::presenters);
+    return holdIn(seq, std::move(presenter), HoldReason::Presenter, &RingSlot::presenters);
   }
   [[nodiscard]] bool
   hold(uint64_t seq, SpatialScaler &&scaler) {
-    return holdIn(seq, std::move(scaler), &RingSlot::spatial_scalers);
+    return holdIn(seq, std::move(scaler), HoldReason::SpatialScaler, &RingSlot::spatial_scalers);
   }
   [[nodiscard]] bool
   hold(uint64_t seq, TemporalScaler &&scaler) {
-    return holdIn(seq, std::move(scaler), &RingSlot::temporal_scalers);
+    return holdIn(seq, std::move(scaler), HoldReason::TemporalScaler, &RingSlot::temporal_scalers);
   }
 
   // Encode thread: a command buffer split off chunk `seq` (the present split), committed before the
-  // chunk's last; held for the finish thread's error check and GPU spans, then released first.
+  // chunk's last; held for the finish thread's error check and GPU spans (HoldReason::PresentSplit:
+  // always), then released first.
   template <class B>
   [[nodiscard]] bool
   holdSplit(uint64_t seq, B &&cmdbuf) {
@@ -168,8 +215,8 @@ private:
 
   template <class T>
   bool
-  holdIn(uint64_t seq, T &&owner, std::vector<T> RingSlot::*list) {
-    if (!owner)
+  holdIn(uint64_t seq, T &&owner, HoldReason reason, std::vector<T> RingSlot::*list) {
+    if (!owner || !policy_.holds(reason))
       return true;
     auto *slot = ringSlotFor(seq);
     ((slot ? *slot : refused_).*list).push_back(std::move(owner));
@@ -200,6 +247,7 @@ private:
   std::vector<RingSlot> slots_;
   RingSlot refused_; // refused holds, kept until drain()
   const uint32_t ring_slots_;
+  RetentionPolicy policy_;
   std::atomic<uint64_t> retired_{0};
 };
 

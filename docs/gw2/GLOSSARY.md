@@ -68,8 +68,8 @@ _Avoid_: frame
 A chunk's identity within one command queue (`seq`, from 1), distinct from its **ring slot**.
 
 **Ring slot**:
-A chunk's reused place in the queue's ring (`seq % DXMT_CHUNKS`). Always "ring slot", never a bare
-"slot", which is the bridge's word for a call number.
+A chunk's reused place in the queue's ring (`seq % DXMT_CHUNKS`). Always "ring slot": a bridge call's
+position is its **call number**, so neither is called a bare "slot".
 _Avoid_: slot (alone)
 
 **Hold**:
@@ -85,6 +85,15 @@ _Avoid_: finish, complete (the GPU's event)
 **Retirement ledger**:
 The queue's typed record of what each chunk holds, per ring slot and stamped with the chunk
 sequence; it releases a chunk's holds only when that chunk retires, in a fixed order.
+
+**Hold reason**:
+Why a chunk holds something (`HoldReason`): a present split's command buffer, the drawable, the
+presenter, an event, a MetalFX scaler. Every hold names one.
+
+**Retention policy**:
+Which hold reasons a queue's chunks must hold (`RetentionPolicy`): everything, unless Metal 3's
+retained command buffers hold it themselves (`DXMT_UNRETAINED=0` without the lifetime check); the
+present split's buffers always. The ledger decides it, not the call site.
 
 ### Bridge
 

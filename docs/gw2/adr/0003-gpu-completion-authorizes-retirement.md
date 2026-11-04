@@ -22,8 +22,16 @@ withdrawn: unconditional holds would be a separate, measured decision.)
   never released early; a refusal is a bug and is logged.
 - A parity fixture (`tests/gw2/retirement_ledger_test.cpp`) holds the ledger to the keep lists' release
   traces it replaced, for rings of 32, 64 and 128, teardown included.
-- Still to come: L2 moves the mandatory-vs-conditional hold policy (today's call-site gates) into the
-  ledger; L3, with the submission seam, makes retirement take the completed-chunk token from the
+- L2 (#69) moves the mandatory-vs-conditional decision into the ledger: every hold names a
+  `HoldReason`, and the queue's `RetentionPolicy` (Metal 4, `DXMT_UNRETAINED`, the lifetime check, set
+  once the queue has picked Metal 3 or Metal 4) decides; the call sites' `keep` gates are gone. The
+  present split's buffers are always held; everything else is held unless Metal 3's retained command
+  buffers hold it. A declined hold leaves the object with the caller, released where it always was,
+  and a borrowed drawable is retained only when it is held. The test holds the policy to each former
+  gate in every reachable configuration. (Metal 4 without `DXMT_UNRETAINED=1` or the check, which
+  `metal4AttachQueue` refuses, is the one unreachable case where the two differ: the policy holds
+  everything on Metal 4.)
+- Still to come: L3, with the submission seam, makes retirement take the completed-chunk token from the
   submission's `wait` instead of a sequence number, and gives teardown one common drain. Allocation
   tracking, the ring allocators and the handshake counters stay where they are.
 - Native tests don't replace in-game evidence: the #31 lifetime check (`DXMT_LIFETIME_CHECK=1`) stays

@@ -1,7 +1,7 @@
 // gw2-test: pure
 // gw2-build: clang++ -std=c++20 -O1 -Wall -Wextra -Isrc/dxmt tests/gw2/retirement_ledger_test.cpp -o $OUT
 //
-// gw2 (#66, L1, architecture council §3): native test of the retirement ledger
+// gw2 (#66 L1, #69 L2, architecture council §3): native test of the retirement ledger
 // (src/dxmt/dxmt_gw2_retirement.hpp) with counting owners: every owner logs its release, so a test
 // checks what was released, when and in which order. No Metal, no Wine, no threads.
 //
@@ -13,6 +13,9 @@
 //   flight, retirements in order, chunk resets around them) against a copy of what it replaced
 //   (gw2-on-mac 74a7836's CommandChunk keep lists, split_cmdbufs, reset() and teardown loop, the
 //   "legacy oracle" below). The release traces must be identical, teardown included.
+// - Policy parity (#69, L2): the retention policy against each call site's former gate (5f16916) in
+//   every reachable configuration (Metal 3 retained or unretained, the lifetime check, the residency
+//   set, Metal 4), and the scripted parity runs once per configuration with those gates.
 //
 // Run: tests/gw2/run.zsh pure, or the command above with $OUT set.
 
@@ -21,6 +24,7 @@
 #include <cstdio>
 #include <functional>
 #include <random>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -98,6 +102,11 @@ struct TestTraits {
   using TemporalScaler = Temporal;
 };
 using Ledger = dxmt::gw2::BasicRetirementLedger<TestTraits>;
+using dxmt::gw2::HoldReason;
+using dxmt::gw2::RetentionPolicy;
+
+// the rule tests hold everything: the policy of DXMT_UNRETAINED=1 (the default)
+static const RetentionPolicy kAll{.unretained = true};
 
 static std::vector<std::string>
 take() {
@@ -131,7 +140,7 @@ holdAll(Ledger &l, uint64_t seq, const std::string &tag = "") {
   CHECK(l.hold(seq, Temporal(n("temporal"))));
   CHECK(l.hold(seq, Spatial(n("spatial"))));
   CHECK(l.hold(seq, Pres(n("presenter"))));
-  CHECK(l.hold(seq, object(n("object"))));
+  CHECK(l.hold(seq, object(n("object")), HoldReason::Event));
   CHECK(l.holdSplit(seq, CmdBuf(n("split"))));
 }
 
@@ -145,7 +154,7 @@ allReleased(uint64_t seq, const std::string &tag = "") {
 
 static void
 testNothingBeforeRetire() {
-  Ledger l(32);
+  Ledger l(32, kAll);
   for (uint64_t s = 1; s <= 3; s++)
     holdAll(l, s);
   CHECK_RELEASED({});
@@ -162,17 +171,17 @@ testNothingBeforeRetire() {
 
 static void
 testOrder() {
-  Ledger l(32);
+  Ledger l(32, kAll);
   // several of each, interleaved: objects in hold order; the owner lists in their vector's clear()
   // order (as the chunk's lists were), so one each of those
   CHECK(l.hold(1, Temporal("t")));
-  CHECK(l.hold(1, object("o1")));
+  CHECK(l.hold(1, object("o1"), HoldReason::Event));
   CHECK(l.holdSplit(1, CmdBuf("s1")));
   CHECK(l.hold(1, Pres("p")));
-  CHECK(l.hold(1, object("o2")));
+  CHECK(l.hold(1, object("o2"), HoldReason::Event));
   CHECK(l.hold(1, Spatial("sp")));
   CHECK(l.holdSplit(1, CmdBuf("s2")));
-  CHECK(l.hold(1, object("o3")));
+  CHECK(l.hold(1, object("o3"), HoldReason::Event));
   CHECK(l.splits(1).size() == 2 && l.splits(1)[0].name == "s1" && l.splits(1)[1].name == "s2");
   CHECK(l.retire(1));
   auto got = take();
@@ -187,8 +196,8 @@ testOrder() {
 
 static void
 testNullHolds() {
-  Ledger l(32);
-  CHECK(l.hold(1, uint64_t(0)));
+  Ledger l(32, kAll);
+  CHECK(l.hold(1, uint64_t(0), HoldReason::Drawable));
   Pres empty;
   CHECK(l.hold(1, std::move(empty)));
   CHECK(l.hold(1, Spatial()));
@@ -199,7 +208,7 @@ testNullHolds() {
   CHECK(l.retire(1));
   CHECK_RELEASED({"p1"});
   // a null hold doesn't claim a slot: a stale chunk's slot stays free for its owner
-  Ledger m(32);
+  Ledger m(32, kAll);
   CHECK(m.hold(33, Pres())); // null: no claim on slot 1
   CHECK(m.hold(1, Pres("x")));
   CHECK(m.retire(1));
@@ -208,7 +217,7 @@ testNullHolds() {
 
 static void
 testRingWrap(uint32_t n) {
-  Ledger l(n);
+  Ledger l(n, kAll);
   // the production discipline: at most n - 1 chunks in flight; retirements in sequence
   uint64_t retired = 0;
   for (uint64_t s = 1; s <= 5 * n; s++) {
@@ -230,7 +239,7 @@ testRingWrap(uint32_t n) {
     s++;
   CHECK(l.hold(s + n, Pres("stale")) == false);
   CHECK(l.holdSplit(s + n, CmdBuf("stalesplit")) == false);
-  CHECK(l.hold(s + n, object("staleobject")) == false);
+  CHECK(l.hold(s + n, object("staleobject"), HoldReason::Event) == false);
   CHECK(l.splits(s + n).empty()); // the slot is chunk s's
   CHECK(l.splits(s).size() == 1);
   CHECK_RELEASED({});
@@ -245,7 +254,7 @@ testRingWrap(uint32_t n) {
   l.drain();
   CHECK_RELEASED({"stalesplit", "staleobject", "stale"});
   // after a retirement the slot takes its next chunk
-  Ledger m(n);
+  Ledger m(n, kAll);
   CHECK(m.hold(1, Pres("a")));
   CHECK(m.retire(1));
   CHECK_RELEASED({"a"});
@@ -257,7 +266,7 @@ testRingWrap(uint32_t n) {
 
 static void
 testTwoQueues() {
-  Ledger a(32), b(64);
+  Ledger a(32, kAll), b(64, kAll);
   holdAll(a, 1, "a");
   holdAll(b, 1, "b");
   CHECK(a.retire(1));
@@ -269,7 +278,7 @@ testTwoQueues() {
 
 static void
 testRefusedRetirements() {
-  Ledger l(32);
+  Ledger l(32, kAll);
   holdAll(l, 1);
   holdAll(l, 2);
   CHECK(!l.retire(0));
@@ -289,7 +298,7 @@ testRefusedRetirements() {
 static void
 testNoHoldAfterRetirementBegan() {
   {
-    Ledger l(32);
+    Ledger l(32, kAll);
     CHECK(l.hold(1, Pres("p1")));
     CHECK(l.retire(1));
     CHECK_RELEASED({"p1"});
@@ -304,8 +313,8 @@ testNoHoldAfterRetirementBegan() {
   }
   {
     // a release that holds again for the chunk being retired: refused, kept, released at drain
-    Ledger l(32);
-    CHECK(l.hold(1, object("o1")));
+    Ledger l(32, kAll);
+    CHECK(l.hold(1, object("o1"), HoldReason::Event));
     CHECK(l.hold(1, Pres("p1")));
     bool refused = false;
     g_on_release = [&](const std::string &) { refused = !l.hold(1, Spatial("reentrant")); };
@@ -318,7 +327,7 @@ testNoHoldAfterRetirementBegan() {
   {
     // holds after drain are refused; the ledger's destructor releases them
     {
-      Ledger l(32);
+      Ledger l(32, kAll);
       l.drain();
       CHECK(!l.hold(1, Pres("afterdrain")));
       CHECK_RELEASED({});
@@ -329,7 +338,7 @@ testNoHoldAfterRetirementBegan() {
 
 static void
 testDrainOrder() {
-  Ledger l(4);
+  Ledger l(4, kAll);
   // chunks 1-3 in flight (slots 1, 2, 3); 4 (slot 0) too after 1 retired; a refused one
   holdAll(l, 1);
   holdAll(l, 2);
@@ -355,10 +364,114 @@ testDrainOrder() {
 
 // --- parity with what the ledger replaced
 
+// The configurations a queue runs in: Metal 3 with retained or unretained command buffers, with or
+// without the lifetime check and the residency set, and Metal 4 (which runs only with DXMT_UNRETAINED=1
+// or the check, and the residency set: dxmt_gw2_metal4.cpp's metal4AttachQueue refuses otherwise).
+struct Config {
+  bool metal4, unretained, check, residency;
+  bool
+  reachable() const {
+    return !metal4 || ((unretained || check) && residency);
+  }
+  RetentionPolicy
+  policy() const { // as CommandQueue's constructor sets it
+    return {.metal4 = metal4, .unretained = unretained, .lifetime_check = check};
+  }
+  std::string
+  name() const {
+    return std::string(metal4 ? "metal4" : "metal3") + (unretained ? " unretained" : " retained") +
+           (check ? " check" : "") + (residency ? " residency" : "");
+  }
+};
+
+// The hold call sites (ArgumentEncodingContext::flushCommandsImpl, the present split)
+enum class Site {
+  PresentSplit, // Metal 3 present split: KeepSplitCommandBuffer
+  DrawableM3,   // Metal 3 present
+  PresenterM3,
+  DrawableM4, // Metal 4 present
+  PresenterM4,
+  SpatialM3, // MetalFX spatial upscale
+  SpatialM4,
+  TemporalM3, // MetalFX temporal upscale (Metal 3 only)
+  SignalEvent,
+  WaitEvent,
+};
+static const Site kMetal3Sites[] = {Site::PresentSplit, Site::DrawableM3, Site::PresenterM3, Site::SpatialM3,
+                                    Site::TemporalM3,   Site::SignalEvent, Site::WaitEvent};
+static const Site kMetal4Sites[] = {Site::DrawableM4, Site::PresenterM4, Site::SpatialM4, Site::SignalEvent,
+                                    Site::WaitEvent};
+
+// gw2-on-mac 5f16916's gate at each call site: `keep` is gw2::lifetime::keepUntilRetired()
+// (DXMT_UNRETAINED=1 or the check); the split and the Metal 4 present held unconditionally.
+static bool
+legacyGate(Site site, const Config &c) {
+  const bool keep = c.unretained || c.check;
+  switch (site) {
+  case Site::PresentSplit:
+  case Site::DrawableM4:
+  case Site::PresenterM4:
+    return true;
+  default:
+    return keep;
+  }
+}
+
+static HoldReason
+reasonOf(Site site) {
+  switch (site) {
+  case Site::PresentSplit: return HoldReason::PresentSplit;
+  case Site::DrawableM3:
+  case Site::DrawableM4: return HoldReason::Drawable;
+  case Site::PresenterM3:
+  case Site::PresenterM4: return HoldReason::Presenter;
+  case Site::SpatialM3:
+  case Site::SpatialM4: return HoldReason::SpatialScaler;
+  case Site::TemporalM3: return HoldReason::TemporalScaler;
+  case Site::SignalEvent:
+  case Site::WaitEvent: return HoldReason::Event;
+  }
+  return HoldReason::PresentSplit;
+}
+
+static std::vector<Config>
+allConfigs() {
+  std::vector<Config> v;
+  for (int bits = 0; bits < 16; bits++)
+    v.push_back({bool(bits & 8), bool(bits & 4), bool(bits & 2), bool(bits & 1)});
+  return v;
+}
+
+// L2: the policy decides as every call site's gate did, in every reachable configuration
+static void
+testPolicyParity() {
+  int reachable = 0;
+  for (auto &c : allConfigs()) {
+    if (!c.reachable())
+      continue;
+    reachable++;
+    auto policy = c.policy();
+    for (Site site : c.metal4 ? std::span<const Site>(kMetal4Sites) : std::span<const Site>(kMetal3Sites)) {
+      checks++;
+      if (legacyGate(site, c) != policy.holds(reasonOf(site))) {
+        failures++;
+        std::printf("FAIL policy %s: site %d held %d by the call site, %d by the policy\n", c.name().c_str(),
+                    int(site), legacyGate(site, c), policy.holds(reasonOf(site)));
+      }
+    }
+  }
+  CHECK(reachable == 11); // 8 Metal 3; 3 Metal 4 (unretained, check or both, with residency)
+  // the split is always held; nothing else with Metal 3's retained command buffers and no check
+  CHECK(RetentionPolicy{}.holds(HoldReason::PresentSplit));
+  CHECK(!RetentionPolicy{}.holds(HoldReason::Drawable));
+  CHECK(RetentionPolicy{.metal4 = true}.holds(HoldReason::Event));
+}
+
 // gw2-on-mac 74a7836's per-chunk holds, copied: CommandChunk's split_cmdbufs and keep lists, the part
 // of reset() that released them, CommandQueue::KeepUntilRetired / KeepSplitCommandBuffer (indexed by
-// seq % chunk_count_), and the destructor's reset of all 128 chunks. `before` stands for the rest of
-// reset() (readbacks, command list, allocation tracking, attached_cmdbuf), which ran first.
+// seq % chunk_count_), and the destructor's reset of all 128 chunks. "reset<i>" stands for the rest of
+// reset() (readbacks, command list, allocation tracking, attached_cmdbuf), which ran first. The call
+// sites (encode()) with 5f16916's gates.
 struct LegacyChunk {
   std::vector<CmdBuf> split_cmdbufs;
   std::vector<uint64_t> keep_objects;
@@ -379,8 +492,9 @@ struct LegacyChunk {
 };
 struct LegacyQueue {
   uint32_t chunk_count_;
+  Config config;
   std::array<LegacyChunk, 128> chunks;
-  explicit LegacyQueue(uint32_t n) : chunk_count_(n) {}
+  LegacyQueue(uint32_t n, Config c) : chunk_count_(n), config(c) {}
   void
   KeepUntilRetired(uint64_t seq, uint64_t object) {
     if (object)
@@ -405,15 +519,52 @@ struct LegacyQueue {
   KeepSplitCommandBuffer(uint64_t seq, CmdBuf &&c) {
     chunks[seq % chunk_count_].split_cmdbufs.push_back(std::move(c));
   }
-  // the script's names for the calls above
-  template <class T>
+  // a call site of chunk `seq`; what it doesn't keep goes with its encoder data, right here (a
+  // borrowed drawable is never referenced at all)
   void
-  Hold(uint64_t seq, T &&x) {
-    KeepUntilRetired(seq, std::forward<T>(x));
-  }
-  void
-  HoldSplit(uint64_t seq, CmdBuf &&c) {
-    KeepSplitCommandBuffer(seq, std::move(c));
+  encode(uint64_t seq, Site site, const std::string &name) {
+    const bool keep = config.unretained || config.check;
+    switch (site) {
+    case Site::PresentSplit: KeepSplitCommandBuffer(seq, CmdBuf(name)); break;
+    case Site::DrawableM4: KeepUntilRetired(seq, object(name)); break;
+    case Site::PresenterM4: {
+      Pres p(name);
+      KeepUntilRetired(seq, std::move(p));
+      break;
+    }
+    case Site::DrawableM3:
+      if (keep)
+        KeepUntilRetired(seq, object(name));
+      break;
+    case Site::PresenterM3: {
+      Pres p(name);
+      if (keep)
+        KeepUntilRetired(seq, std::move(p));
+      break;
+    }
+    case Site::SpatialM3:
+    case Site::SpatialM4: {
+      Spatial sc(name);
+      if (keep)
+        KeepUntilRetired(seq, std::move(sc));
+      break;
+    }
+    case Site::TemporalM3: {
+      Temporal sc(name);
+      if (keep)
+        KeepUntilRetired(seq, std::move(sc));
+      break;
+    }
+    case Site::SignalEvent:
+    case Site::WaitEvent: {
+      auto event = object(name); // the encoder data's reference
+      if (keep)
+        KeepUntilRetired(seq, event);
+      else
+        TestTraits::release(event); // data->~SignalEventData()
+      break;
+    }
+    }
   }
   std::vector<std::string>
   splitNames(uint64_t seq) {
@@ -433,15 +584,19 @@ struct LegacyQueue {
   }
 };
 
-// the queue as it is now: the chunk's own reset, then the ledger (RetireChunk; the destructor's drain)
+// the queue as it is now: CommandQueue::Hold / HoldRetaining / HoldSplit with the policy the
+// constructor sets, the chunk's own reset, then the ledger (RetireChunk; the destructor's drain)
 struct LedgerQueue {
   uint32_t chunk_count_;
   Ledger ledger_;
-  explicit LedgerQueue(uint32_t n) : chunk_count_(n), ledger_(n) {}
-  void
-  Hold(uint64_t seq, uint64_t object) {
-    if (object)
-      CHECK(ledger_.hold(seq, std::move(object)));
+  LedgerQueue(uint32_t n, Config c) : chunk_count_(n), ledger_(n, c.policy()) {}
+  // CommandQueue::Hold(seq, Reference&&, reason): declined, the caller keeps (and later releases) it
+  bool
+  Hold(uint64_t seq, uint64_t &object, HoldReason reason) {
+    if (!object || !ledger_.policy().holds(reason))
+      return false;
+    CHECK(ledger_.hold(seq, std::exchange(object, 0), reason));
+    return true;
   }
   template <class T>
   void
@@ -449,8 +604,42 @@ struct LedgerQueue {
     CHECK(ledger_.hold(seq, std::move(owner)));
   }
   void
-  HoldSplit(uint64_t seq, CmdBuf &&c) {
-    CHECK(ledger_.holdSplit(seq, std::move(c)));
+  encode(uint64_t seq, Site site, const std::string &name) {
+    switch (site) {
+    case Site::PresentSplit: CHECK(ledger_.holdSplit(seq, CmdBuf(name))); break;
+    case Site::DrawableM3:
+    case Site::DrawableM4:
+      // HoldRetaining: a reference is taken only if the policy holds it
+      if (ledger_.policy().holds(HoldReason::Drawable)) {
+        auto drawable = object(name);
+        Hold(seq, drawable, HoldReason::Drawable);
+      }
+      break;
+    case Site::PresenterM3:
+    case Site::PresenterM4: {
+      Pres p(name);
+      Hold(seq, std::move(p));
+      break;
+    }
+    case Site::SpatialM3:
+    case Site::SpatialM4: {
+      Spatial sc(name);
+      Hold(seq, std::move(sc));
+      break;
+    }
+    case Site::TemporalM3: {
+      Temporal sc(name);
+      Hold(seq, std::move(sc));
+      break;
+    }
+    case Site::SignalEvent:
+    case Site::WaitEvent: {
+      auto event = object(name);
+      if (!Hold(seq, event, HoldReason::Event))
+        TestTraits::release(event); // data->~SignalEventData()
+      break;
+    }
+    }
   }
   std::vector<std::string>
   splitNames(uint64_t seq) {
@@ -472,16 +661,16 @@ struct LedgerQueue {
   }
 };
 
-// One scripted run: chunks encoded with random holds (each call site's kind, gated or not as the
-// script says), the finish thread retiring behind the ring limit at random lag, and a teardown with
-// chunks still in flight. Returns the release trace (with the split buffers the finish thread read
-// before each retirement).
+// One scripted run: chunks encoded with random call sites of the configuration's backend, the finish
+// thread retiring behind the ring limit at random lag, and a teardown with chunks still in flight.
+// Returns the release trace (with the split buffers the finish thread read before each retirement).
 template <class Q>
 static std::vector<std::string>
-run(uint32_t n, uint32_t seed, uint64_t chunks) {
+run(uint32_t n, const Config &config, uint32_t seed, uint64_t chunks) {
   std::mt19937 rng(seed);
   // the same names for both queues: the script draws from its own generator
-  Q q(n);
+  Q q(n, config);
+  auto sites = config.metal4 ? std::span<const Site>(kMetal4Sites) : std::span<const Site>(kMetal3Sites);
   uint64_t retired = 0;
   std::vector<std::string> trace;
   auto flush = [&] {
@@ -498,17 +687,10 @@ run(uint32_t n, uint32_t seed, uint64_t chunks) {
   for (uint64_t s = 1; s <= chunks; s++) {
     while (s - retired > n - 1 || (retired < s - 1 && rng() % 4 == 0))
       retireOne();
-    auto k = rng() % 6; // how many holds this chunk takes
+    auto k = rng() % 6; // how many call sites this chunk passes
     for (uint32_t i = 0; i < k; i++) {
-      auto tag = std::to_string(s) + "." + std::to_string(i);
-      switch (rng() % 6) {
-      case 0: q.HoldSplit(s, CmdBuf("split" + tag)); break;
-      case 1: q.Hold(s, object("drawable" + tag)); break; // the present's drawable, or an event
-      case 2: q.Hold(s, Pres("presenter" + tag)); break;
-      case 3: q.Hold(s, Spatial("spatial" + tag)); break;
-      case 4: q.Hold(s, Temporal("temporal" + tag)); break;
-      case 5: q.Hold(s, uint64_t(0)); break; // a null one
-      }
+      auto site = sites[rng() % sites.size()];
+      q.encode(s, site, "site" + std::to_string(int(site)) + "." + std::to_string(s) + "." + std::to_string(i));
     }
     flush();
   }
@@ -520,21 +702,26 @@ run(uint32_t n, uint32_t seed, uint64_t chunks) {
 
 static void
 testParity() {
-  for (uint32_t n : {32u, 64u, 128u}) {
-    for (uint32_t seed = 1; seed <= 20; seed++) {
-      g_objects.resize(1);
-      auto legacy = run<LegacyQueue>(n, seed, 6 * n);
-      g_objects.resize(1);
-      auto now = run<LedgerQueue>(n, seed, 6 * n);
-      checks++;
-      if (legacy != now) {
-        failures++;
-        size_t i = 0;
-        while (i < legacy.size() && i < now.size() && legacy[i] == now[i])
-          i++;
-        std::printf("FAIL parity ring %u seed %u: traces differ at %zu (legacy %s, ledger %s; lengths %zu, %zu)\n",
-                    n, seed, i, i < legacy.size() ? legacy[i].c_str() : "<end>",
-                    i < now.size() ? now[i].c_str() : "<end>", legacy.size(), now.size());
+  for (auto &config : allConfigs()) {
+    if (!config.reachable())
+      continue;
+    for (uint32_t n : {32u, 64u, 128u}) {
+      for (uint32_t seed = 1; seed <= 10; seed++) {
+        g_objects.resize(1);
+        auto legacy = run<LegacyQueue>(n, config, seed, 6 * n);
+        g_objects.resize(1);
+        auto now = run<LedgerQueue>(n, config, seed, 6 * n);
+        checks++;
+        if (legacy != now) {
+          failures++;
+          size_t i = 0;
+          while (i < legacy.size() && i < now.size() && legacy[i] == now[i])
+            i++;
+          std::printf("FAIL parity %s ring %u seed %u: traces differ at %zu (legacy %s, ledger %s; lengths %zu, "
+                      "%zu)\n",
+                      config.name().c_str(), n, seed, i, i < legacy.size() ? legacy[i].c_str() : "<end>",
+                      i < now.size() ? now[i].c_str() : "<end>", legacy.size(), now.size());
+        }
       }
     }
   }
@@ -551,6 +738,7 @@ main() {
   testRefusedRetirements();
   testNoHoldAfterRetirementBegan();
   testDrainOrder();
+  testPolicyParity();
   testParity();
   if (failures) {
     std::printf("retirement_ledger_test: %d of %d checks failed\n", failures, checks);
