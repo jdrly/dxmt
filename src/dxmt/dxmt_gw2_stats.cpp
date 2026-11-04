@@ -121,7 +121,9 @@ std::vector<ApiThread *> g_all_threads; // every block ever made
 std::atomic<DWORD> g_fls = FLS_OUT_OF_INDEXES;
 std::atomic<bool> g_fls_failed = false;
 // a thread whose block isn't in the fiber-local slot (FlsAlloc or FlsSetValue failed): that block is
-// never released and never cached, so no other thread can take or match it
+// never released and never cached, so no other thread can take or match it. gw2 (#121): it is always
+// a new block, never a reclaimed one, which a cache may still point at: the fallback keeps its tid
+// after its thread dies, and a thread reusing that id would hit it through such a cache.
 thread_local ApiThread *t_thread = nullptr;
 
 void WINAPI
@@ -152,12 +154,14 @@ flsIndex() {
   return fls;
 }
 
+// fresh: a new block, never one a cache may point at (gw2 #121: for a fallback block)
 ApiThread *
-takeBlock(uint32_t tid) {
+takeBlock(uint32_t tid, bool fresh) {
   ApiThread *t = nullptr;
   {
     std::lock_guard lock(g_threads_mutex);
-    for (auto b : g_all_threads) {
+    for (size_t i = 0; !fresh && i < g_all_threads.size(); i++) {
+      auto b = g_all_threads[i];
       if (b->released.load(std::memory_order_acquire) && b->released.exchange(false, std::memory_order_acq_rel)) {
         t = b;
         break;
@@ -220,15 +224,23 @@ apiThread() {
   }
   if (auto t = t_thread)
     return *t;
-  auto t = takeBlock(uint32_t(GetCurrentThreadId()));
-  if (fls != FLS_OUT_OF_INDEXES && FlsSetValue(fls, t)) {
-    t->cacheable = true; // released at exit, so a cache may hold it
-  } else {
-    t_thread = t; // not released at exit: kept per thread, never cached
+  uint32_t tid = uint32_t(GetCurrentThreadId());
+  if (fls != FLS_OUT_OF_INDEXES) {
+    auto t = takeBlock(tid, false);
+    if (FlsSetValue(fls, t)) {
+      t->cacheable = true; // released at exit, so a cache may hold it
+      return *t;
+    }
+    // gw2 (#121): t may be a reclaimed block a cache still points at, so it can't be the fallback.
+    // Back to the pool (tid 0 again, so no cache returns it); no cache took it from this thread.
+    releaseThread(t);
     static std::atomic<bool> warned = false;
-    if (fls != FLS_OUT_OF_INDEXES && !warned.exchange(true))
+    if (!warned.exchange(true))
       Logger::warn("GW2 PACE: FlsSetValue failed; this thread's API time uses a TLS lookup per call");
   }
+  // not released at exit: kept per thread, never cached, and new (#121), so no cache points at it
+  auto t = takeBlock(tid, true);
+  t_thread = t;
   return *t;
 }
 

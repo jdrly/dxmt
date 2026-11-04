@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <sys/wait.h>
+#include <thread>
 #include <unistd.h>
 
 using namespace dxmt::gw2;
@@ -67,16 +68,60 @@ fallbackCase(bool fail_alloc) {
   return failures;
 }
 
+// gw2 (#121): the fallback block must never be one a cache can point at. Thread A (id 31) uses
+// context X and exits, so X still points at A's released block. Thread B (id 32) then takes a block
+// through another context while FlsSetValue (or FlsAlloc, after a FreeLibrary) fails, presents, and
+// exits without an exit callback. Thread C reuses id 32 and enters X: the cache must not hand it B's
+// block (B's presenter state). B runs on a real thread, so its fallback thread_local is its own and
+// C's lookup on this thread can't find it that way; the threads run one after another.
+static int
+reclaimCase(bool fail_alloc) {
+  ApiThreadCache x, y;
+  fake::tid = 31;
+  { ApiScope s(Api::Map, false, &x); }
+  ApiThread *a_block = &apiThread();
+  fake::exitThread();
+  CHECK(a_block->tid.load() == 0);
+
+  fake::fail_alloc = fail_alloc;
+  fake::fail_set = !fail_alloc;
+  if (fail_alloc)
+    apiThreadsDetach(); // so the next lookup allocates the slot again, and fails
+  ApiThread *b_block = nullptr;
+  std::thread([&] {
+    fake::tid = 32;
+    { ApiScope s(Api::Map, false, &y); } // takes a block: A's is free to reclaim
+    takeThreadInterval();                // B presents
+    b_block = &apiThread();
+    CHECK(b_block->presenter);
+    CHECK(b_block != a_block); // a fallback block is fresh, never one a cache held
+    fake::exitThread();        // no fiber-local value, so no exit callback: B's block keeps id 32
+  }).join();
+  CHECK(b_block->tid.load() == 32);
+
+  fake::fail_alloc = false;
+  fake::fail_set = false;
+  fake::tid = 32;
+  ApiThread &c = x.get();
+  CHECK(&c != b_block);
+  CHECK(!c.presenter);
+  CHECK(c.depth == 0);
+  return failures;
+}
+
 static void
-runChild(const char *name, bool fail_alloc) {
+runChild(const char *name, int (*test)(bool), bool fail_alloc) {
   std::fflush(stdout);
   pid_t pid = fork();
-  if (pid == 0)
-    std::_Exit(fallbackCase(fail_alloc) ? 1 : 0);
+  if (pid == 0) {
+    int failed = test(fail_alloc);
+    std::fflush(stdout); // _Exit doesn't flush: keep the child's FAIL lines
+    std::_Exit(failed ? 1 : 0);
+  }
   int status = 0;
   waitpid(pid, &status, 0);
   if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-    std::printf("FAIL %s fallback case\n", name);
+    std::printf("FAIL %s case\n", name);
     failures++;
   }
 }
@@ -126,8 +171,10 @@ main() {
   apiThreadsDetach();
   CHECK(b5->tid.load() == 0);
 
-  runChild("FlsSetValue", false);
-  runChild("FlsAlloc", true);
+  runChild("FlsSetValue", fallbackCase, false);
+  runChild("FlsAlloc", fallbackCase, true);
+  runChild("FlsSetValue after a reclaim", reclaimCase, false);
+  runChild("FlsAlloc after a reclaim", reclaimCase, true);
 
   std::printf(failures ? "%d failure(s)\n" : "ok\n", failures);
   return failures ? 1 : 0;
