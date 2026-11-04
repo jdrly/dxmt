@@ -2,6 +2,7 @@ subdir('util')
 subdir('airconv')
 
 if not dxmt_crossbuild
+subdir('winemetal/unix') # gw2 (B1, #61): the unix sources' shared list; the Wine build enters it from winemetal
 subdir('nativemetal')
 else
 subdir('winemetal')
