@@ -212,7 +212,8 @@ private:
   // its ring slot, in this order: the lifetime check's completion, the chunk's own state (reset()), its
   // holds (the ledger), the submission's part (Metal 4's allocator), the CPU fence, the ring count, the
   // ring allocators
-  void RetireChunk(CommandChunk &chunk, CompletedChunk &&completed);
+  // gw2 (#113): `seq` the finish loop's own sequence, never the (possibly empty) token's
+  void RetireChunk(CommandChunk &chunk, uint64_t seq, CompletedChunk &&completed);
   // gw2 (#91, L3): teardown, both threads stopped: the submission's drain, then (with its token) the
   // lifetime check's detach and the chunks' state and holds, chunk by chunk
   void DrainChunks();

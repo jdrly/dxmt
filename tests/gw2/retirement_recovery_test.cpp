@@ -1,5 +1,7 @@
 // gw2-test: pure
 // gw2-build: clang++ -std=c++20 -O1 -Wall -Wextra -Isrc/dxmt tests/gw2/retirement_recovery_test.cpp -o $OUT
+// gw2-build: clang++ -std=c++20 -O1 -g -fsanitize=thread -Wall -Wextra -Isrc/dxmt tests/gw2/retirement_recovery_test.cpp -o ${OUT}_tsan
+// gw2-run: "$OUT" && TSAN_OPTIONS=halt_on_error=1:exitcode=66 "${OUT}_tsan"
 //
 // gw2 (#113): native test of the retirement ledger's recovery from a refused retirement
 // (BasicRetirementLedger::retireOrRecover in src/dxmt/dxmt_gw2_retirement.hpp, what CommandQueue's
@@ -17,12 +19,18 @@
 // - a refusal that lasts past a ring wrap (stale generations refused into the refused holds) is released
 //   once their chunks complete, not at drain; a hold refused for a retired sequence waits until every
 //   chunk the ring may have in flight completed;
-// - a ledger without refusals releases exactly what retire() releases (retireOrRecover's normal path).
+// - a ledger without refusals releases exactly what retire() releases (retireOrRecover's normal path);
+// - (the review of #116) threads: an encode thread holding into the ring while the finish thread stalls
+//   for more than a ring and recovers, so recovery's scan meets slots the encode thread claims. Run a
+//   second time under ThreadSanitizer (${OUT}_tsan): no data race, no early release, nothing left.
 //
 // Run: tests/gw2/run.zsh pure, or the command above with $OUT set.
 
 #include "dxmt_gw2_retirement.hpp"
+#include <atomic>
 #include <cstdio>
+#include <memory>
+#include <thread>
 #include <set>
 #include <span>
 #include <string>
@@ -307,6 +315,109 @@ testUnauthorized() {
   CHECK(g_early == 0);
 }
 
+// --- threads (the review of #116): owners counted atomically; a release before its chunk's completion
+// was proved is early
+
+static std::atomic<uint64_t> t_completed{0};
+static std::atomic<int64_t> t_live{0};
+static std::atomic<int> t_early{0};
+
+static void
+threadRelease(uint64_t seq) {
+  if (seq > t_completed.load(std::memory_order_acquire))
+    t_early.fetch_add(1);
+  t_live.fetch_sub(1);
+}
+
+struct ThreadPresenter {
+  uint64_t seq = 0;
+  ThreadPresenter() = default;
+  explicit ThreadPresenter(uint64_t s) : seq(s) { t_live.fetch_add(1); }
+  ThreadPresenter(ThreadPresenter &&o) noexcept : seq(std::exchange(o.seq, 0)) {}
+  ThreadPresenter &
+  operator=(ThreadPresenter &&o) noexcept {
+    reset();
+    seq = std::exchange(o.seq, 0);
+    return *this;
+  }
+  ~ThreadPresenter() { reset(); }
+  void
+  reset() {
+    if (seq)
+      threadRelease(std::exchange(seq, 0));
+  }
+  explicit operator bool() const { return seq != 0; }
+};
+
+struct ThreadTraits {
+  using Object = uint64_t; // the chunk's sequence
+  static void
+  release(uint64_t seq) {
+    threadRelease(seq);
+  }
+  using CommandBuffer = std::unique_ptr<char>;
+  using Presenter = ThreadPresenter;
+  using SpatialScaler = std::unique_ptr<short>;
+  using TemporalScaler = std::unique_ptr<long>;
+};
+
+static void
+testThreads() {
+  const uint32_t n = 8;
+  // a stall of 3 rings; it ends mid-ring, so the first chunk to claim index n - 1 after it (stall_to +
+  // n/2 - 1) is within the n - 2 chunks the encode thread may run ahead of the recovery at stall_to
+  const uint64_t total = 40 * n, stall_from = 5 * n, stall_to = 8 * n + n / 2;
+  for (int round = 0; round < 20; round++) {
+    t_completed = 0;
+    t_live = 0;
+    t_early = 0;
+    std::atomic<uint64_t> committed{0}, finished{0};
+    size_t refused_left = 0;
+    int error_lines = 0;
+    {
+      dxmt::gw2::BasicRetirementLedger<ThreadTraits> l(n, {.metal4 = true});
+      TestIssuer issuer;
+      l.acceptTokensFrom(&issuer);
+      std::thread encode([&] {
+        for (uint64_t s = 1; s <= total; s++) {
+          // the ring discipline: at most n - 1 chunks in flight (CommitCurrentChunk)
+          while (s - finished.load(std::memory_order_acquire) > n - 1)
+            std::this_thread::yield();
+          // the review's case: the ring slot of index n - 1 holds nothing until the stall ends, so it is
+          // still free when recovery scans it, and the encode thread claims it for a chunk up to ring - 2
+          // ahead of the recovery (no handshake orders the two); every fifth chunk holds nothing either
+          bool free_slot = s % n == n - 1 && s < stall_to;
+          if (!free_slot && s % 5) {
+            t_live.fetch_add(1);
+            (void)l.hold(s, uint64_t(s), HoldReason::Drawable);
+            (void)l.hold(s, ThreadPresenter(s));
+          }
+          committed.store(s, std::memory_order_release); // ready_for_commit
+        }
+      });
+      for (uint64_t seq = 1; seq <= total; seq++) {
+        while (committed.load(std::memory_order_acquire) < seq)
+          std::this_thread::yield();
+        t_completed.store(seq, std::memory_order_release); // the submission's wait(seq) returned
+        auto token = issuer.token(seq);
+        if (seq >= stall_from && seq < stall_to)
+          auto taken = std::move(token); // the injected bug: 3 rings of empty tokens
+        auto outcome = l.retireOrRecover(token);
+        error_lines += !outcome.retired && !outcome.follows;
+        finished.store(seq, std::memory_order_release); // chunk_ongoing
+      }
+      encode.join();
+      refused_left = l.refusedHolds();
+      CHECK(l.retired() == total);
+      CHECK(l.drain(issuer.drainedToken()));
+    }
+    CHECK(error_lines == 1);
+    CHECK(refused_left == 0);
+    CHECK(t_live.load() == 0);
+    CHECK(t_early.load() == 0);
+  }
+}
+
 int
 main() {
   testOneRefusal();
@@ -314,6 +425,7 @@ main() {
   testLateHold();
   testNormalPath();
   testUnauthorized();
+  testThreads();
   if (failures) {
     std::printf("retirement_recovery_test: %d of %d checks failed\n", failures, checks);
     return 1;

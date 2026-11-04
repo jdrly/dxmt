@@ -72,6 +72,17 @@ struct RetentionPolicy {
   }
 };
 
+// gw2 (#113): what BasicRetirementLedger::retireOrRecover() did
+struct RetireOutcome {
+  bool retired = false;     // retire() took the token: the normal path
+  bool recovered = false;   // retire() refused it, and the ledger recovered with the completion it proves
+  bool follows = false;     // the previous call was refused too: the same failure (logged with that one)
+  uint64_t before = 0;      // the last sequence retired before the call
+  uint64_t after = 0;       // ... and after it
+  uint32_t chunks = 0;      // recovery: the chunks (with holds) retired by sequence, before + 1 .. after
+  size_t refused_holds = 0; // refused holds released because the last chunk that may use them completed
+};
+
 // Traits: Object (an owned raw handle; null is false; Traits::release(Object) drops it),
 // CommandBuffer, Presenter, SpatialScaler, TemporalScaler (owning types whose destructor releases).
 template <class Traits> class BasicRetirementLedger {
@@ -84,6 +95,7 @@ public:
 
   BasicRetirementLedger(uint32_t ring_slots, RetentionPolicy policy) :
       slots_(ring_slots),
+      gens_(ring_slots),
       ring_slots_(ring_slots),
       policy_(policy) {}
 
@@ -158,7 +170,7 @@ public:
   std::span<CommandBuffer>
   splits(uint64_t seq) {
     auto &slot = slots_[seq % ring_slots_];
-    if (slot.seq != seq)
+    if (gen(seq) != seq)
       return {};
     return slot.splits;
   }
@@ -179,21 +191,12 @@ public:
     // from here a hold for `seq` is refused (even one made by a release below)
     retired_.store(seq, std::memory_order_release);
     auto &slot = slots_[seq % ring_slots_];
-    if (slot.seq == seq)
+    if (gen(seq) == seq)
       release(slot);
     return true;
   }
 
-  // gw2 (#113): what retireOrRecover() did
-  struct Outcome {
-    bool retired = false;     // retire() took the token: the normal path
-    bool recovered = false;   // retire() refused it, and the ledger recovered with the completion it proves
-    bool follows = false;     // the previous call was refused too: the same failure (logged with that one)
-    uint64_t before = 0;      // the last sequence retired before the call
-    uint64_t after = 0;       // ... and after it
-    uint32_t chunks = 0;      // recovery: the chunks (with holds) retired by sequence, before + 1 .. after
-    size_t refused_holds = 0; // refused holds released because the last chunk that may use them completed
-  };
+  using Outcome = RetireOutcome; // gw2 (#113)
 
   // gw2 (#113): finish thread, the queue's retirement with DXMT_RETIRE_RECOVERY (on). retire(chunk) first;
   // nothing else happens on the normal path unless refused holds wait (below).
@@ -277,7 +280,7 @@ private:
   static constexpr uint64_t kDrained = ~0ull;
 
   struct RingSlot {
-    uint64_t seq = 0; // the chunk whose holds these are; free once it is <= retired_
+    uint64_t seq = 0; // refused holds: the last chunk that may use them (gw2 #113; a ring slot's is gens_)
     std::vector<CommandBuffer> splits;
     std::vector<Object> objects;
     std::vector<Presenter> presenters;
@@ -292,10 +295,11 @@ private:
     if (seq <= retired)
       return nullptr; // retired (or retiring), or drained
     auto &slot = slots_[seq % ring_slots_];
-    if (slot.seq != seq) {
-      if (slot.seq > retired)
+    uint64_t owner = gen(seq);
+    if (owner != seq) {
+      if (owner > retired)
         return nullptr; // a stale generation: another unretired chunk owns the ring slot
-      slot.seq = seq;   // free: its previous chunk retired and released everything
+      gens_[seq % ring_slots_].store(seq, std::memory_order_relaxed); // free: its previous chunk retired and released everything
     }
     return &slot;
   }
@@ -351,18 +355,22 @@ private:
   }
 
   // gw2 (#113): recovery (finish thread): chunks retired + 1 .. seq completed; releases their ring slots'
-  // holds in sequence order and resumes the ring at seq + 1. The holds are moved out before retired_
-  // moves (until then the encode thread can't claim those slots: they belong to unretired chunks), and
-  // released after (a hold made by a release is refused, as in retire()). Returns the chunks released.
+  // holds in sequence order and resumes the ring at seq + 1. A ring slot is touched only if its owner
+  // (gens_, atomic: the encode thread may claim a free slot meanwhile, after a lag of more than a ring)
+  // is one of those chunks: such a slot can't be claimed until retired_ moves (its owner is unretired),
+  // and its holds were made before the chunk committed. A free slot, or one the encode thread claims for
+  // a later chunk, reads as an owner outside the range and is left alone. The holds are moved out before
+  // retired_ moves, and released after (a hold made by a release is refused, as in retire()). Returns
+  // the chunks released.
   uint32_t
   retireThrough(uint64_t retired, uint64_t seq) {
     std::vector<RingSlot> done;
     uint64_t first = seq - retired > ring_slots_ ? seq - ring_slots_ + 1 : retired + 1;
     for (uint64_t s = first; s <= seq; s++) {
       auto &slot = slots_[s % ring_slots_];
-      if (slot.seq > retired && slot.seq <= seq) {
+      uint64_t owner = gen(s);
+      if (owner > retired && owner <= seq) {
         RingSlot &taken = done.emplace_back();
-        taken.seq = slot.seq;
         taken.splits.swap(slot.splits);
         taken.objects.swap(slot.objects);
         taken.presenters.swap(slot.presenters);
@@ -402,7 +410,17 @@ private:
     releaseRefusedThrough(kDrained);
   }
 
+  // the chunk whose holds ring slot i has (gens_[i]); free once it is <= retired_
+  uint64_t
+  gen(uint64_t seq) const {
+    return gens_[seq % ring_slots_].load(std::memory_order_relaxed);
+  }
+
   std::vector<RingSlot> slots_;
+  // gw2 (#113): each ring slot's owner, atomic (relaxed: the plain loads and stores the stamp was), so
+  // recovery's scan may read a slot the encode thread is claiming; the holds stay ordered by retired_
+  // and the queue's handshake, as before
+  std::vector<std::atomic<uint64_t>> gens_;
   // refused holds, kept until drain(); gw2 (#113): per last chunk that may use them (RingSlot::seq), so a
   // recovering queue can release them once that chunk completed
   std::vector<RingSlot> refused_;
@@ -414,5 +432,36 @@ private:
   const CompletionIssuer *issuer_ = nullptr; // gw2 (#91)
   std::atomic<uint64_t> retired_{0};
 };
+
+// gw2 (#113): the retirement of chunk `seq` as CommandQueue::RetireChunk does it, after the chunk's own
+// reset: the ledger's holds with the completion token, then the submission takes the token back.
+// `seq` is the finish loop's own sequence (it waited for it), never the token's: a refused token may be
+// empty (sequence 0), and the queue's bookkeeping after this (the CPU fence, the ring count, the ring
+// allocators) and the submission's recovery go by `seq`. The ledger releases only with the token's
+// completion (retire, retireOrRecover). Submission: ChunkSubmission (retire, retireWaited).
+struct RetireStep {
+  uint64_t seq = 0;                  // what the queue's bookkeeping retires: the finish loop's sequence
+  bool ledger_refused = false;       // the ledger refused the token
+  RetireOutcome ledger;              // with recovery: what retireOrRecover did
+  bool submission_refused = false;   // the submission refused the token
+  bool submission_recovered = false; // ... and retireWaited(seq) retired the chunk
+};
+
+template <class Ledger, class Submission, class Token>
+RetireStep
+retireStep(Ledger &ledger, Submission &submission, uint64_t seq, Token &&completed, bool recover) {
+  RetireStep step{.seq = seq};
+  if (recover) {
+    step.ledger = ledger.retireOrRecover(completed);
+    step.ledger_refused = !step.ledger.retired;
+  } else {
+    step.ledger_refused = !ledger.retire(completed);
+  }
+  if (!submission.retire(std::move(completed))) {
+    step.submission_refused = true;
+    step.submission_recovered = recover && submission.retireWaited(seq);
+  }
+  return step;
+}
 
 } // namespace dxmt::gw2

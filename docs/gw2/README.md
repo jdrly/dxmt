@@ -1049,7 +1049,10 @@ afterwards and nothing left refused, where plain `retire()` piles every later ho
 refusal lasting two rings (stale generations refused) releases them as their chunks complete; a hold
 refused for a retired sequence goes once every chunk the ring may have in flight completed; every
 owner checks that its chunk's completion was proved before its release; without refusals, the release
-trace equals `retire()`'s.
+trace equals `retire()`'s. A threaded case (an encode thread holding under the ring discipline while
+the finish thread stalls for three rings and recovers, with a ring slot left free until recovery scans
+it) runs a second time under ThreadSanitizer (`${OUT}_tsan`): no data race, no early release, nothing
+left (the ring slots' owners are atomic since the review of #116).
 
 `chunk_submission_test.mm` (Q2, #78) runs both production adapters on real Metal through the real
 bridge table, and a scripted adapter; since L3 (#91) a retirement ledger bound to each adapter is
@@ -1057,7 +1060,10 @@ retired with its `wait` tokens and drained with its `drain` token, and another i
 refused by the ledger and by the adapter. Since #86 it checks, for every Metal 4 commit, that the
 residency hook runs before the commit is submitted (the open commit's queue value still 0). Since #113
 the scripted adapter's `retireWaited` (the recovery after a refused retirement) retires the last wait's
-chunk once, with that wait's records, and nothing else.
+chunk once, with that wait's records, and nothing else; and `gw2::retireStep` as `RetireChunk` runs it,
+with empty tokens at a middle chunk and at the last committed one: the CPU fence follows the finish
+loop's sequence (so `WaitCommittedRetired` returns), the submission retires every chunk once, and the
+ledger releases only with a token's completion.
 
 `paired_replay_test.mm` (B4, #105) replays one frame's packet stream through both interpreters of the
 bridge's unix side, through the real table: Metal 3 (`winemetal_unix.c`, on `MTLCommandQueue` command
