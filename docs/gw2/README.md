@@ -593,8 +593,8 @@ and `exact` (as upstream); in `estimate` it no longer asks for a commit for them
 The game's `Map` and `Unmap` calls on the immediate context, per frame, by what they map and how.
 Every call is counted. A call on a buffer (dynamic or default usage) is timed one in 16 and scaled
 by 16, every other call (textures, staging, unmappable) always, because a timed call costs two clock
-reads and in Wine each is a syscall (`steady_clock`, which mingw's libstdc++ builds on
-`gettimeofday` → `GetSystemTimePreciseAsFileTime`). The 1 in 16 is pseudo-random, so
+reads and in Wine each is a crossing into its unix side (`QueryPerformanceCounter`, about 52 ns
+headless under the engine; #28). The 1 in 16 is pseudo-random, so
 repeating sequences (Map/Unmap pairs, kinds in turn, a rename every n maps) are sampled evenly; it
 reuses the draw `PACE`'s `map` made for the same call with another value, so the two never time the
 same call and neither's clock reads land in the other's window. Counted with
@@ -1036,3 +1036,11 @@ compares reports, counters, files and `.keys` byte for byte; `pso_archive_genera
 publisher across processes (hits, exclusion, last good generation, lock, a `kill -9`, merging, and
 exclusion-only generations: a fresh store's sole failing pipeline, a failing sole delta after a publish,
 a failed exclusion-only publish retried).
+
+`clock_bench.cpp` (#28) is not a native test: it is a Windows .exe that measures the clocks PE code
+can read (ns per call, step size, backward steps), and `tests/gw2/clock_bench.zsh <engine> <scratch dir>`
+runs it headless under an APFS clone of the engine in a throwaway prefix (winemac disabled). It chose
+`gw2::nowNs`'s clock, `QueryPerformanceCounter`: 52 ns a read with 100 ns steps, against `steady_clock`'s
+55 ns with 1 µs steps on the wall clock. Every clock finer than Wine's server tick is a crossing into
+the unix side; `KUSER_SHARED_DATA`'s interrupt time is a 1.4 ns read but changes only when the
+wineserver wakes (about every 18 ms in an idle process).

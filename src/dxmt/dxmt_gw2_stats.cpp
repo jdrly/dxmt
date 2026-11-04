@@ -39,12 +39,30 @@ hitchMs() {
   return ms;
 }
 
+// gw2 (#28): QueryPerformanceCounter, not std::chrono::steady_clock. mingw's libstdc++ builds
+// steady_clock on gettimeofday (the wall clock: 1 us steps in Wine on macOS, and it can step back,
+// which made a scope's unsigned delta wrap). Every clock with sub-ms steps is a crossing into Wine's
+// unix side; measured headless under the engine (tests/gw2/clock_bench.zsh, ns per call):
+// QueryPerformanceCounter 52.5 (100 ns steps, mach_continuous_time), steady_clock 55.1 (1 us),
+// GetSystemTimePreciseAsFileTime 51.2 (1 us, wall clock), clock_gettime(MONOTONIC) 56.5 (QPC).
+// KUSER_SHARED_DATA's interrupt time is a 1.4 ns memory read but the wineserver refreshes it only
+// when it wakes (every ~18 ms in an idle process), too coarse for a scope.
 int64_t
 nowNs() {
-  return std::chrono::duration_cast<std::chrono::nanoseconds>(
-             std::chrono::steady_clock::now().time_since_epoch()
-  )
-      .count();
+  static const struct Qpc {
+    int64_t freq, ns_per_tick; // ns_per_tick 0: the frequency doesn't divide 1e9 (not Wine's 10 MHz)
+    Qpc() {
+      LARGE_INTEGER f;
+      QueryPerformanceFrequency(&f);
+      freq = f.QuadPart > 0 ? f.QuadPart : 1;
+      ns_per_tick = 1'000'000'000 % freq == 0 ? 1'000'000'000 / freq : 0;
+    }
+  } qpc;
+  LARGE_INTEGER c;
+  QueryPerformanceCounter(&c);
+  if (qpc.ns_per_tick)
+    return c.QuadPart * qpc.ns_per_tick;
+  return c.QuadPart / qpc.freq * 1'000'000'000 + c.QuadPart % qpc.freq * 1'000'000'000 / qpc.freq;
 }
 
 // --- sections
