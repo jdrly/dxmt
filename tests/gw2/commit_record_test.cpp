@@ -7,12 +7,13 @@
 //
 // - Parity: the finish thread's two bodies as gw2-on-mac 13007ad wrote them (the "legacy oracle"
 //   below: WaitForFinishThread's Metal 3 branch, FinishChunkMetal4's report, ReportSplitError and
-//   SplitErrorLine) and the records (recordMetal3Commit / recordMetal4Commit, then
-//   reportCompletedChunk) run the same scripted chunks: 0-3 split buffers or 0-4 commits, pending or
+//   SplitErrorLine) and the records (recordMetal3Chunk, as Metal3Submission::wait builds them, and
+//   recordMetal4Commit, then reportCompletedChunk) run the same scripted chunks: 0-3 split buffers or 0-4 commits, pending or
 //   completed buffers, GPU errors anywhere, logs, missing GPU times, DXMT_STATS on and off, the split
 //   error throttle on a scripted clock. The device-error lines, the GPU line's spans and PRESENT's
 //   aftergpu must be identical, in order, over the whole run. Every buffer is waited for exactly when
-//   the oracle waits for it, nothing is read from a buffer before it completed, and the records make
+//   the oracle waits for it and in the same order (the last buffer first, then the split buffers in
+//   commit order; gw2 #78), nothing is read from a buffer before it completed, and the records make
 //   no command-buffer call the oracle doesn't, except an error or logs read of a failed split buffer
 //   whose line the throttle drops (the error path only; nothing more is logged).
 // - Records: ordinals, known and unknown GPU times (0 is unknown), errors and logs.
@@ -319,10 +320,8 @@ struct RecordQueue {
   void
   finishMetal3(uint64_t frame, uint64_t seq, FakeCmdbuf last, std::vector<FakeCmdbuf> splits, bool stats, Calls &calls,
                Output &out) {
-    completed_.resize(splits.size() + 1);
-    recordMetal3Commit(last, uint32_t(splits.size()), true, stats, completed_.back());
-    for (size_t i = 0; i < splits.size(); i++)
-      recordMetal3Commit(splits[i], uint32_t(i), false, stats, completed_[i]);
+    // as Metal3Submission::wait (gw2 #78)
+    recordMetal3Chunk(splits.size(), [&](size_t i) { return i < splits.size() ? splits[i] : last; }, stats, completed_);
     Sink sink{frame, seq, calls, out};
     reportCompletedChunk(std::span<const Record>(completed_), ReportOrder::LastFirst, stats, split_errors_, sink);
   }
@@ -358,6 +357,15 @@ counts(const std::vector<std::string> &calls) {
   return m;
 }
 
+static std::vector<std::string>
+waits(const std::vector<std::string> &calls) {
+  std::vector<std::string> w;
+  for (auto &c : calls)
+    if (c.rfind("wait ", 0) == 0)
+      w.push_back(c);
+  return w;
+}
+
 static size_t
 countOf(const std::vector<std::string> &calls, const char *prefix) {
   return std::count_if(calls.begin(), calls.end(), [&](auto &c) { return c.rfind(prefix, 0) == 0; });
@@ -386,7 +394,8 @@ parityMetal3(const char *name, const std::vector<Chunk> &chunks) {
 
     bool ok = true;
     ok &= cr.early.empty();
-    ok &= countOf(cr.list, "wait ") == countOf(cl.list, "wait ");
+    // the waits in the oracle's order: the last buffer first, then the split buffers in commit order
+    ok &= waits(cr.list) == waits(cl.list);
     for (auto &s : c.splits)
       ok &= countOf(cr.list, fmt("wait ", s.id).c_str()) == (s.pending ? 1u : 0u);
     ok &= countOf(cr.list, fmt("wait ", c.last.id).c_str()) == (c.last.pending ? 1u : 0u);

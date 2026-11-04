@@ -127,40 +127,6 @@ RingSection(double, uint32_t) {
 
 gw2::SectionRegistrar g_ring_section("RING", RingSection);
 
-// gw2 (#77): a Metal 3 command buffer as gw2::recordMetal3Commit reads it
-struct Metal3Buffer {
-  static constexpr auto kScheduled = WMTCommandBufferStatusScheduled;
-  static constexpr auto kError = WMTCommandBufferStatusError;
-  WMT::CommandBuffer cmdbuf;
-
-  WMTCommandBufferStatus
-  status() {
-    return cmdbuf.status();
-  }
-  void
-  waitUntilCompleted() {
-    cmdbuf.waitUntilCompleted();
-  }
-  WMT::Error
-  error() {
-    return cmdbuf.error();
-  }
-  void
-  logs(std::vector<std::string> &out) {
-    if (auto logs = cmdbuf.logs())
-      for (auto &log : logs.elements())
-        out.push_back(log.description().getUTF8String());
-  }
-  uint64_t
-  gpuStartTime() {
-    return cmdbuf.gpuStartTime();
-  }
-  uint64_t
-  gpuEndTime() {
-    return cmdbuf.gpuEndTime();
-  }
-};
-
 } // namespace
 
 void *
@@ -214,16 +180,28 @@ CommandQueue::CommandQueue(WMT::Device device) :
     else if (!gw2::residencyAttachMtl4Queue(device, mtl4->queue()))
       gw2::metal4Failed("attaching the residency set to the Metal 4 queue");
     else {
-      mtl4_ = std::move(mtl4);
+      submission_ = std::make_unique<Metal4Submission>(std::move(mtl4), event); // gw2 (#78)
+      metal4_ = true;
       Logger::info(str::format(
           "Metal 4: on (DXMT_METAL4=1, the default): this device's chunks go to an MTL4CommandQueue, with ", chunk_count_,
           " command allocators (one per chunk slot) and commit feedback"
       ));
     }
   }
+  // gw2 (#78): Metal 3, unless the queue is on Metal 4
+  if (!submission_)
+    submission_ = std::make_unique<Metal3Submission>(
+        chunk_count_,
+        Metal3Submission::Hooks{
+            .new_command_buffer = [this] { return CreateCommandBuffer(); },
+            .before_commit = gw2::residencyBeforeCommit,
+            .split_buffers = [this](uint64_t seq) { return ledger_.splits(seq); }, // gw2 (#66)
+            .wait_at_drain = [] { return gw2::residencyActive() || gw2::lifetime::keepUntilRetired(); },
+        }
+    );
   // gw2 (#69): which holds the chunks need, now that the queue is on Metal 3 or Metal 4 (before its
   // first chunk; the encode thread reads it only after a commit's release)
-  ledger_.setPolicy({.metal4 = mtl4_ != nullptr, .unretained = unretained_, .lifetime_check = gw2::lifetime::check()});
+  ledger_.setPolicy({.metal4 = metal4_, .unretained = unretained_, .lifetime_check = gw2::lifetime::check()});
 
   // gw2 (#8): the ring and the frame latency in effect, once per device
   g_ring_chunks.store(chunk_count_, std::memory_order_relaxed);
@@ -253,25 +231,10 @@ CommandQueue::~CommandQueue() {
   SharedEventListener_destroy(shared_event_listener);
   encodeThread.join();
   finishThread.join();
-  // gw2 (#29): with the residency set, a chunk's references are what keep its allocations in the set
-  // (and alive: the command buffers no longer retain them through useResource). The finish thread
-  // stopped without retiring every committed chunk, so wait for their command buffers first; the
-  // split-off ones were committed earlier on this queue and complete before their chunk's last.
-  // gw2 (#31): the same with DXMT_UNRETAINED=1 (the command buffers retain nothing at all) and with
-  // DXMT_LIFETIME_CHECK=1 (whose stamps assume it).
-  // gw2 (#32): Metal 4: every committed command buffer (attached_cmdbuf is null for its chunks)
-  if (mtl4_)
-    mtl4_->waitIdle();
-  if (gw2::residencyActive() || gw2::lifetime::keepUntilRetired()) {
-    for (unsigned i = 0; i < kCommandChunkCountMax; i++) {
-      auto &cmdbuf = chunks[i].attached_cmdbuf;
-      if (!cmdbuf)
-        continue;
-      auto status = cmdbuf.status();
-      if (status == WMTCommandBufferStatusCommitted || status == WMTCommandBufferStatusScheduled)
-        cmdbuf.waitUntilCompleted();
-    }
-  }
+  // gw2 (#78): the finish thread stopped without retiring every committed chunk: Metal 4 waits for
+  // every committed command buffer; Metal 3 for its chunks' buffers when the residency set (#29),
+  // DXMT_UNRETAINED=1 or DXMT_LIFETIME_CHECK=1 (#31) need it
+  submission_->drain();
   gw2::lifetime::detachQueue(lifetime_id_); // gw2 (#31): nothing of this queue is in use any more
   // gw2 (#66): chunk by chunk as before: its own state, then its ring slot's holds; the chunks past the
   // ring (never used) last
@@ -371,22 +334,43 @@ CommandQueue::CommitChunkInternal(CommandChunk &chunk, uint64_t seq) {
   // gw2 (#5): close the previous frame's GetPipeline waits (COMPILE frame= lines)
   gw2::compileEncodeFrame(chunk.frame_);
 
-  if (mtl4_) { // gw2 (#32): Metal 4
-    CommitChunkMetal4(chunk, seq);
-    ready_for_commit.fetch_add(1, std::memory_order_release);
-    ready_for_commit.notify_one();
-    return;
-  }
-
-  auto cmdbuf = CreateCommandBuffer(); // gw2 (#31): unretained with DXMT_UNRETAINED=1
-  chunk.attached_cmdbuf = cmdbuf;
+  // gw2 (#78): the chunk through the queue's submission (Metal 3 or Metal 4): a wait for the
+  // initializer's uploads first (Metal 3 in the chunk's command buffer, Metal 4 at the queue), then the
+  // chunk's encoders in the backend's encoding, then what is left open commits (after the residency
+  // sets' pending changes)
+  submission_->begin(seq);
   if (chunk.resource_initializer_event_id) {
-    cmdbuf.encodeWaitForEvent(initializer.event(), chunk.resource_initializer_event_id);
+    submission_->waitEvent(initializer.event(), chunk.resource_initializer_event_id);
     gw2::lifetime::use(lifetime_id_, seq, initializer.event(), gw2::lifetime::Kind::Event); // gw2 (#31)
   }
-  chunk.encode(chunk.attached_cmdbuf, this->argument_encoding_ctx);
-  gw2::residencyBeforeCommit(); // gw2 (#29): the set's pending adds and removes, if any
-  chunk.attached_cmdbuf.commit();
+  struct Encode final : ChunkEncoder {
+    CommandQueue &queue;
+    CommandChunk &chunk;
+    uint64_t seq;
+
+    Encode(CommandQueue &queue, CommandChunk &chunk, uint64_t seq) : queue(queue), chunk(chunk), seq(seq) {}
+
+    // Metal 3: the chunk keeps its command buffer (the last one, once encoded) until it resets
+    void
+    encode(WMT::CommandBuffer &cmdbuf) override {
+      chunk.attached_cmdbuf = cmdbuf;
+      chunk.encode(cmdbuf, queue.argument_encoding_ctx);
+      cmdbuf = chunk.attached_cmdbuf;
+    }
+    // gw2 (#32): Metal 4 (gw2::Mtl4Encoding: command buffers begin as encoders need them; queue events,
+    // the present split and the present pass commit; each commit carries the residency sets' pending
+    // changes and its feedback)
+    void
+    encode(gw2::Mtl4Queue &mtl4) override {
+      gw2::Mtl4Encoding encoding(mtl4, seq, [this](uint64_t size) {
+        auto [mapped, buffer, offset] = queue.AllocateArgumentBuffer(seq, size);
+        return std::pair<WMT::Buffer, uint64_t>{buffer, offset};
+      });
+      chunk.encodeMetal4(encoding, queue.argument_encoding_ctx);
+    }
+  } encode{*this, chunk, seq};
+  submission_->encode(seq, encode);
+  submission_->commit(seq);
 
   ready_for_commit.fetch_add(1, std::memory_order_release);
   ready_for_commit.notify_one();
@@ -422,16 +406,16 @@ CommandQueue::WaitForFinishThread() {
     if (stopped.load())
       break;
     auto &chunk = chunks[internal_seq % chunk_count_];
-    if (mtl4_) { // gw2 (#32): Metal 4: the chunk's commits, from their feedback
-      FinishChunkMetal4(chunk, internal_seq);
-    } else {
-      FinishChunkMetal3(chunk, internal_seq); // gw2 (#77)
-    }
+    // gw2 (#78): every commit of the chunk completed (Metal 4: and its completion event), with their
+    // records (#77); then its report
+    bool stats = gw2::statsEnabled();
+    auto completed = submission_->wait(internal_seq, chunk.chunk_event_id, stats);
+    ReportCompletedChunk(chunk, completed, stats);
 
     if (chunk.signal_frame_latency_fence_ != ~0ull)
       frame_latency_fence_.signal(chunk.signal_frame_latency_fence_);
 
-    RetireChunk(chunk, internal_seq); // gw2 (#66)
+    RetireChunk(chunk, std::move(completed)); // gw2 (#66)
 
     internal_seq++;
   }
@@ -441,16 +425,17 @@ CommandQueue::WaitForFinishThread() {
 
 // gw2 (#66): the one written retirement of a chunk, in the order the finish thread always used
 void
-CommandQueue::RetireChunk(CommandChunk &chunk, uint64_t seq) {
+CommandQueue::RetireChunk(CommandChunk &chunk, CompletedChunk &&completed) {
+  uint64_t seq = completed.seq();
   // gw2 (#31): the GPU is done with every buffer of the chunk; from here its references may go
   gw2::lifetime::completed(lifetime_id_, seq);
   chunk.reset();
   // gw2 (#66): its holds: split-off command buffers, objects, presenters, spatial and temporal scalers
   if (!ledger_.retire(seq))
     LedgerRefused("retirement", seq);
-  // gw2 (#32): after reset (its readbacks read the commits' feedback); resets the slot's allocator
-  if (mtl4_)
-    mtl4_->retire(seq);
+  // gw2 (#32, #78): after reset (Metal 4's readbacks read the commits' feedback): Metal 4 resets the
+  // ring slot's allocator; Metal 3 forgets the command buffer the chunk released
+  submission_->retire(std::move(completed));
   cpu_coherent.signal(seq);
   chunk_ongoing.fetch_sub(1, std::memory_order_release);
   chunk_ongoing.notify_one();
@@ -471,31 +456,12 @@ CommandQueue::LedgerRefused(const char *what, uint64_t seq) {
       ", retired up to ", ledger_.retired(), ", refusal ", n, "; only the first 8 are logged)");
 }
 
-// gw2 (#77): the finish thread's part for a Metal 3 chunk: the records of its last command buffer
-// and of the buffers the present split committed first (gw2 #10; held in the retirement ledger,
-// committed earlier on this queue, so done or about to be). A buffer still pending is waited for
-// here, never on the encode thread, the last one first as before. GPU times only with DXMT_STATS.
-void
-CommandQueue::FinishChunkMetal3(CommandChunk &chunk, uint64_t seq) {
-  bool stats = gw2::statsEnabled();
-  auto splits = ledger_.splits(seq); // gw2 (#66)
-  completed_.resize(splits.size() + 1);
-  Metal3Buffer last{chunk.attached_cmdbuf};
-  gw2::recordMetal3Commit(last, uint32_t(splits.size()), true, stats, completed_.back());
-  for (size_t i = 0; i < splits.size(); i++) {
-    Metal3Buffer split{splits[i]};
-    gw2::recordMetal3Commit(split, uint32_t(i), false, stats, completed_[i]);
-  }
-  // upstream's order: the last buffer's error and logs, then the split buffers'
-  ReportCompletedChunk(chunk, seq, gw2::ReportOrder::LastFirst, stats);
-}
-
 // gw2 (#77): what both finish paths report of a completed chunk, from its records: device errors (the
 // last buffer's as upstream's line, then its logs; a split buffer's with the chunk's frame and
 // sequence id, through the throttle, then its logs), and with DXMT_STATS the GPU spans (gw2 #3: the
 // split buffers', then the last one's) and the last one's end for PRESENT's aftergpu (gw2 #7).
 void
-CommandQueue::ReportCompletedChunk(CommandChunk &chunk, uint64_t seq, gw2::ReportOrder order, bool stats) {
+CommandQueue::ReportCompletedChunk(CommandChunk &chunk, const CompletedChunk &completed, bool stats) {
   struct Sink {
     CommandQueue &queue;
     uint64_t frame;
@@ -529,51 +495,8 @@ CommandQueue::ReportCompletedChunk(CommandChunk &chunk, uint64_t seq, gw2::Repor
     presentGpuEnd(uint64_t end_ns) {
       gw2::presentGpuEnd(frame, end_ns);
     }
-  } sink{*this, chunk.frame_, seq};
-  gw2::reportCompletedChunk(std::span<const CommitRecord>(completed_), order, stats, split_errors_, sink);
-}
-
-// gw2 (#32): the chunk's Metal 4 command buffers: a wait for the initializer's uploads at the queue,
-// then the chunk's encoders (gw2::Mtl4Encoding: command buffers begin as encoders need them; queue
-// events, the present split and the present pass commit; each commit carries the residency sets'
-// pending changes and its feedback), then the rest left open.
-void
-CommandQueue::CommitChunkMetal4(CommandChunk &chunk, uint64_t seq) {
-  if (chunk.resource_initializer_event_id) {
-    mtl4_->waitForEvent(initializer.event(), chunk.resource_initializer_event_id);
-    gw2::lifetime::use(lifetime_id_, seq, initializer.event(), gw2::lifetime::Kind::Event); // gw2 (#31)
-  }
-  // the encoders (command buffers begin as they need them; events and the present split commit)
-  gw2::Mtl4Encoding encoding(*mtl4_, seq, [this, seq](uint64_t size) {
-    auto [mapped, buffer, offset] = AllocateArgumentBuffer(seq, size);
-    return std::pair<WMT::Buffer, uint64_t>{buffer, offset};
-  });
-  chunk.encodeMetal4(encoding, argument_encoding_ctx);
-  encoding.commitOpen(); // the rest, if anything is left open
-}
-
-// gw2 (#32): the finish thread's part for a Metal 4 chunk: waits for every commit's feedback, then
-// reports the chunk from its commits' records as the Metal 3 path does (gw2 #77).
-void
-CommandQueue::FinishChunkMetal4(CommandChunk &chunk, uint64_t seq) {
-  auto &commits = mtl4_->wait(seq);
-  // The chunk's last queue operation is the signal of its completion event (flushCommands' end,
-  // Mtl4Encoding::encodeSignalEvent), ordered after every commit and every queue-level wait of the
-  // chunk. A chunk with no command buffer, or with queue waits or signals after its last one, is
-  // complete only once it fired: wait for it too before anything of the chunk is released.
-  if (event.signaledValue() < chunk.chunk_event_id) {
-    bool warned = false;
-    while (!event.waitUntilSignaledValue(chunk.chunk_event_id, 1000)) {
-      if (!warned)
-        WARN("Metal 4: chunk ", seq, "'s completion event not signalled after 1 s; still waiting");
-      warned = true;
-    }
-  }
-  // gw2 (#77): their records, reported in commit order (Metal 4 has no command buffer logs)
-  completed_.resize(commits.size());
-  for (size_t i = 0; i < commits.size(); i++)
-    gw2::recordMetal4Commit(*commits[i], uint32_t(i), completed_[i]);
-  ReportCompletedChunk(chunk, seq, gw2::ReportOrder::CommitOrder, gw2::statsEnabled());
+  } sink{*this, chunk.frame_, completed.seq()};
+  gw2::reportCompletedChunk(completed.records(), completed.order(), stats, split_errors_, sink);
 }
 
 void CommandQueue::Retain(uint64_t seq, Allocation* allocation) {

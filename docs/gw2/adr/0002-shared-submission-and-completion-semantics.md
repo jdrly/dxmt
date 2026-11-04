@@ -25,11 +25,26 @@ spatial swapchain need.
   buffers.
 - Readbacks that need a native handle (the timestamp queries reading a command buffer's `gpuEndTime`
   or an `Mtl4Commit`'s feedback) keep their own path; they are not record fields.
-- Still to come: Q2 (#78) puts both backends behind `ChunkSubmission` (begin, commit, waitEvent,
-  signalEvent; `wait` returns a completed chunk, `retire`, `drain`) and removes the `if (mtl4_)` sites
-  from the command queue; L3 then retires the ledger with the completed-chunk token. Q3 (one `split()`
-  and one present-mode function) waits for lane G's Metal 4 latency A/B. #33 adds real GPU timestamps
-  as a record field, not as a third readback kind.
+- Q2 (#78) puts both backends behind `ChunkSubmission` (`src/dxmt/dxmt_gw2_submission.hpp`): begin,
+  waitEvent, signalEvent, encode, commit on the encode thread; `wait` returns a `CompletedChunk` (the
+  records, valid until retired) and `retire` takes it back on the finish thread; `drain` at teardown.
+  `Metal3Submission` and `Metal4Submission` (which owns the `Mtl4Queue`) are the production adapters,
+  chosen once per command queue; the `if (mtl4_)` sites in `dxmt_command_queue.cpp` are gone.
+- The council's interface gained one call, `encode(seq, ChunkEncoder &)`: the adapter hands the
+  chunk's encoder its own target (a Metal 3 command buffer, or the `Mtl4Queue`), so the compile-time
+  encoding seam stays where it was, at one virtual call per chunk. Metal 4's `begin` opens nothing
+  (command buffers begin as the encoders need them), and its `wait` also waits for the chunk's
+  completion event, the chunk's last queue operation, which `wait` receives as a value.
+- Metal 3's chunk keeps owning its last command buffer and releases it when it resets, before the
+  ledger's holds, as ADR 0003's order says; the adapter only borrows it until `retire`. The present
+  split still commits inside the encoding (one `split()` is Q3's).
+- `tests/gw2/chunk_submission_test.mm` runs both production adapters on real Metal through the real
+  bridge table (empty chunks, 0, 1 and 3 splits, event waits, residency before every commit, timing,
+  drain), and a deterministic scripted adapter for error records, missing times and the token's
+  lifetime.
+- Still to come: L3 retires the ledger with the completed-chunk token and gives teardown one common
+  drain. Q3 (one `split()` and one present-mode function) waits for lane G's Metal 4 latency A/B. #33
+  adds real GPU timestamps as a record field, not as a third readback kind.
 
 Source: GW2 on Mac `council/2026-11-04-arch-grill/final.md` §2 (ADR draft 0002); Q1 implemented in
-jdrly/dxmt #77.
+jdrly/dxmt #77, Q2 in #78.

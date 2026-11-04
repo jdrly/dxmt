@@ -141,3 +141,10 @@ _Avoid_: feedback (that is Metal 4's source of it)
 **Completed chunk**:
 A chunk whose commits have all completed and whose commit records are final; it is reported, then
 retired.
+
+**Chunk submission**:
+How a command queue's chunks are committed and completed (`ChunkSubmission`): begin, event waits and
+signals, encode, commit on the encode thread; wait (a completed chunk) and retire on the finish thread;
+drain at teardown. One adapter per backend (`Metal3Submission`, `Metal4Submission`), chosen once per
+command queue; the encoding inside stays each backend's own.
+_Avoid_: backend (alone), submit path
