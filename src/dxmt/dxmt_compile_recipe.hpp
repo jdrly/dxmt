@@ -58,6 +58,9 @@ void applyRecipe(const PipelineRecipe &recipe, WMTRenderPipelineInfo &info);
 void serialize(const PipelineRecipe &recipe, gw2::RecipeBytes &out);
 // SHA-1 of the serialization: the recipe's stable key.
 Sha1Digest recipeKey(const PipelineRecipe &recipe);
+// The inverse of serialize (W2/W3 read recorded recipes): false for another schema, a short or long
+// record, or no vertex identity.
+bool deserialize(const uint8_t *data, size_t length, PipelineRecipe &recipe);
 
 // Builds a pipeline from a recipe and its functions (`ps` empty: no pixel shader).
 class PipelineBuilder {

@@ -7,6 +7,7 @@
 #include "d3d11_input_layout.hpp"
 #include "sha1/sha1_util.hpp"
 #include "log/log.hpp"
+#include "dxmt_compile_results.hpp"
 #include "dxmt_compile_service.hpp"
 #include "dxmt_gw2_compile.hpp"
 #include <variant>
@@ -210,11 +211,37 @@ public:
   false if this compiled shader has none
    */
   virtual bool GetIdentity(Sha1Digest *pShader, Sha1Digest *pVariant) { return false; }
+  /**
+  gw2 (C4): the shader's SHA-1 and variant digest whether or not #57 recorded them (the shared
+  results' stable key); false if this compiled shader has none
+   */
+  virtual bool GetStableKey(Sha1Digest *pShader, Sha1Digest *pVariant) { return false; }
+};
+
+// gw2 (C4, W2/W3): a shader variant's stable key in the shared results
+struct VariantId {
+  Sha1Digest shader;
+  Sha1Digest variant;
+  bool operator==(const VariantId &o) const { return shader == o.shader && variant == o.variant; }
+};
+struct VariantIdHash {
+  size_t operator()(const VariantId &k) const {
+    return std::hash<Sha1Digest>{}(k.shader) * 31 + std::hash<Sha1Digest>{}(k.variant);
+  }
+};
+
+// gw2 (C4): the compile service's shared results, by stable key (variants by shader SHA-1 and digest,
+// plain graphics pipelines by recipe key), per device; only while warming is on (DXMT_WARM).
+struct SharedResults {
+  compile::ResultTable<VariantId, WMT::Reference<WMT::Function>, ThreadpoolWork *, VariantIdHash> variants;
+  compile::ResultTable<Sha1Digest, WMT::Reference<WMT::RenderPipelineState>, ThreadpoolWork *> pipelines;
 };
 
 class Shader {
 public:
   virtual ~Shader() {};
+  // gw2 (C4): the device's shared results while warming is on, else null
+  virtual SharedResults *shared_results() { return nullptr; }
   /* FIXME: exposed implementation detail */
   virtual sm50_shader_t handle() = 0;
   /* FIXME: exposed implementation detail */

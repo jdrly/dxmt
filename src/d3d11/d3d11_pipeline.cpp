@@ -6,6 +6,7 @@
 #include "log/log.hpp"
 #include "dxmt_compile_recipe.hpp"
 #include "dxmt_gw2_compile.hpp"
+#include "dxmt_gw2_warm.hpp"
 #include "dxmt_gw2_recipe.hpp"
 #include <atomic>
 
@@ -19,7 +20,7 @@ public:
       : num_rtvs(pDesc->NumColorAttachments),
         depth_stencil_format(pDesc->DepthStencilFormat),
         topology_class(pDesc->TopologyClass), device_(pDevice),
-        pBlendState(pDesc->BlendState),
+        shared_(pDesc->VertexShader->shared_results()), pBlendState(pDesc->BlendState),
         RasterizationEnabled(pDesc->RasterizationEnabled),
         SampleCount(pDesc->SampleCount) {
     uint32_t unorm_output_reg_mask = 0;
@@ -125,11 +126,47 @@ public:
       }
     }
 
+    // gw2 (C4): while warming is on, the shared results first: one build per recipe key
+    Sha1Digest key{};
+    bool keyed = false;
+    if (shared_) {
+      Sha1Digest vs_sha1, vs_variant, ps_sha1, ps_variant;
+      bool has_ps = PixelShader && PixelShader->GetStableKey(&ps_sha1, &ps_variant);
+      if (VertexShader->GetStableKey(&vs_sha1, &vs_variant) && (has_ps || !PixelShader)) {
+        auto keyed_recipe = recipe;
+        keyed_recipe.vs = compile::VariantKey{vs_sha1, vs_variant};
+        keyed_recipe.ps.reset();
+        if (has_ps)
+          keyed_recipe.ps = compile::VariantKey{ps_sha1, ps_variant};
+        key = compile::recipeKey(keyed_recipe);
+        keyed = true;
+        WMT::Reference<WMT::RenderPipelineState> state;
+        ThreadpoolWork *owner = nullptr;
+        switch (shared_->pipelines.claim(key, this, &state, &owner)) {
+        case decltype(shared_->pipelines)::Claim::Done:
+          state_ = state;
+          gw2::warmCount(gw2::WarmCounter::LivePipelineHit);
+          return this;
+        case decltype(shared_->pipelines)::Claim::Busy:
+          gw2::warmCount(gw2::WarmCounter::LiveJoin);
+          return owner; // a warm job builds it: park on it (a demand promotes it)
+        case decltype(shared_->pipelines)::Claim::Mine:
+          break;
+        }
+      }
+    }
+
     compile::building(compile_job); // gw2 (#46, C1)
     auto t0 = gw2::compileClock(); // gw2 (#5)
     state_ = compile::Metal3PipelineBuilder(device_->GetMTLDevice())
                  .build(recipe, vs.Function, PixelShader ? ps.Function : WMT::Function{}, err); // gw2 (C3)
     gw2::compilePipelineBuilt(t0, state_ != nullptr); // gw2 (#5)
+    if (keyed) {
+      if (state_ != nullptr)
+        shared_->pipelines.publish(key, this, state_);
+      else
+        shared_->pipelines.abandon(key, this);
+    }
 
     if (state_ == nullptr) {
       ERR("Failed to create PSO: ", err.description().getUTF8String());
@@ -156,6 +193,7 @@ private:
   WMTPrimitiveTopologyClass topology_class;
   MTLD3D11Device *device_;
   std::atomic_bool ready_;
+  SharedResults *shared_; // gw2 (C4): null unless warming is on
   CompiledShader *VertexShader;
   CompiledShader *PixelShader;
   IMTLD3D11BlendState *pBlendState;
