@@ -140,7 +140,8 @@ CommandQueue::CommandQueue(WMT::Device device) :
     max_latency_override_(MaxLatencyOverrideFromEnv()),
     unretained_(gw2::lifetime::unretained()),
     lifetime_id_(gw2::lifetime::attachQueue()), // gw2 (#31): logs the command buffer mode once per queue
-    ledger_(chunk_count_),
+    // gw2 (#69): Metal 3's policy until the constructor knows whether the queue is on Metal 4
+    ledger_(chunk_count_, {.unretained = unretained_, .lifetime_check = gw2::lifetime::check()}),
     encodeThread([this]() { this->EncodingThread(); }),
     finishThread([this]() { this->WaitForFinishThread(); }),
     device(device),
@@ -186,6 +187,9 @@ CommandQueue::CommandQueue(WMT::Device device) :
       ));
     }
   }
+  // gw2 (#69): which holds the chunks need, now that the queue is on Metal 3 or Metal 4 (before its
+  // first chunk; the encode thread reads it only after a commit's release)
+  ledger_.setPolicy({.metal4 = mtl4_ != nullptr, .unretained = unretained_, .lifetime_check = gw2::lifetime::check()});
 
   // gw2 (#8): the ring and the frame latency in effect, once per device
   g_ring_chunks.store(chunk_count_, std::memory_order_relaxed);
