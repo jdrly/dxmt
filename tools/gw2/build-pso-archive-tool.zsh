@@ -1,7 +1,10 @@
 #!/bin/zsh
 # gw2 (#111): builds the native PSO archive tool (tools/gw2/pso_archive_tool.cpp) for macOS.
 #
-#   tools/gw2/build-pso-archive-tool.zsh <output> [arch]     # arch: x86_64 (default, as the game) or arm64
+#   tools/gw2/build-pso-archive-tool.zsh <output> [arch] [testing]
+#
+# arch: x86_64 (default, as the game) or arm64. `testing` (tests only) builds the unix side with
+# PSO_ARCHIVE_TESTING, so PSO_ARCHIVE_TEST_FAIL and friends fake Metal's packer failures.
 #
 # It links what the game runs, from this checkout: the bridge's PE side (winemetal_thunks.c) and its
 # real unix side (every source in winemetal_unix_src, src/winemetal/unix/meson.build) with
@@ -18,6 +21,8 @@ if (( $# < 1 )); then
 fi
 OUT=${1:A}
 ARCH=${2:-x86_64}
+TESTING=()
+[[ ${3:-} == testing ]] && TESTING=(-DPSO_ARCHIVE_TESTING)
 ROOT=${0:A:h:h:h}
 cd "$ROOT"
 
@@ -27,7 +32,7 @@ U=($(sed -n "/^winemetal_unix_src = files(/,/^)/s/^ *'\([a-z0-9_]*\.c\)'.*/\1/p"
 (( ${#U} >= 5 )) || { print -u2 "${0:t}: winemetal_unix_src not found"; exit 1 }
 MIN=-mmacosx-version-min=26.0
 for f in $U; do
-  clang -c -x objective-c -std=gnu17 -fblocks -fno-objc-arc -O2 -arch $ARCH $MIN -DDXMT_NATIVE=1 -Wno-unused-function \
+  clang -c -x objective-c -std=gnu17 -fblocks -fno-objc-arc -O2 -arch $ARCH $MIN -DDXMT_NATIVE=1 $TESTING -Wno-unused-function \
     -Isrc/airconv -Isrc/nativemetal -Isrc/winemetal src/winemetal/unix/$f -o $O/u_${f:r}.o
 done
 clang -c -std=gnu17 -O2 -arch $ARCH $MIN -DDXMT_NATIVE=1 -Isrc/nativemetal -Isrc/winemetal \
@@ -42,4 +47,4 @@ clang++ -std=c++20 -O2 -Wall -Wextra -arch $ARCH $MIN -Itests/gw2/shim -Isrc/win
   $O/sha1.o $O/thunks.o $O/u_*.o $O/airconv_absent.o \
   -framework Metal -framework MetalFX -framework QuartzCore -framework Foundation -framework CoreGraphics \
   -framework ColorSync -framework Cocoa -lsqlite3 -o "$OUT"
-print "built $OUT ($ARCH)"
+print "built $OUT ($ARCH${TESTING:+, testing})"

@@ -29,7 +29,7 @@
 //   build    (internal) the child of `run`: --from/--to/--skip select recipes; --publish or not.
 // Exit: 0 done, 1 usage or input error, 3 the store is busy (another process, a running game, holds
 // its writer lock: nothing is written), 4 publishing failed, 5 a crash or failure the bisection
-// couldn't isolate.
+// couldn't isolate, 6 published, but the verifying process failed.
 
 #include "Metal.hpp"
 #include "airconv_public.h"
@@ -64,7 +64,7 @@ using namespace dxmt;
 
 namespace {
 
-enum Exit { kOk = 0, kUsage = 1, kBusy = 3, kPublishFailed = 4, kUnisolated = 5 };
+enum Exit { kOk = 0, kUsage = 1, kBusy = 3, kPublishFailed = 4, kUnisolated = 5, kVerifyFailed = 6 };
 
 struct Options {
   std::string command;
@@ -424,10 +424,15 @@ commandBuild(const Options &o, bool verify) {
 
   int rc = kOk, flush = 0;
   if (o.publish) {
-    // a flush retries 3 times, excluding each shape Metal names; a later flush rebuilds and tries again
-    // while the failures keep naming new shapes
-    uint64_t excluded_before = UINT64_MAX;
-    for (int attempt = 0; attempt < 8; attempt++) {
+    // A flush tries 3 writes, each failure that names a pipeline excluding its shape (the archive's
+    // `skipped` counter grows by the records it leaves out). Flush again while the last one named
+    // something; one that named nothing would fail the same way (the bisection takes over). At most
+    // kMaxFlushes flushes: 3 named shapes each.
+    constexpr int kMaxFlushes = 64;
+    WMTPSOArchiveStats s0 = {};
+    WMTPSOArchiveQuery(&s0);
+    uint64_t skipped_before = s0.skipped;
+    for (int attempt = 0; attempt < kMaxFlushes; attempt++) {
       std::string r(1 << 16, '\0');
       flush = WMTPSOArchiveFlush(r.data(), uint32_t(r.size()));
       printReport(r);
@@ -435,9 +440,9 @@ commandBuild(const Options &o, bool verify) {
         break;
       WMTPSOArchiveStats s = {};
       WMTPSOArchiveQuery(&s);
-      if (s.excluded + s.rebuilds == excluded_before)
-        break; // nothing new named: retrying changes nothing (the bisection takes over)
-      excluded_before = s.excluded + s.rebuilds;
+      if (s.skipped == skipped_before)
+        break;
+      skipped_before = s.skipped;
     }
     if (flush < 0)
       rc = kPublishFailed;
@@ -446,13 +451,13 @@ commandBuild(const Options &o, bool verify) {
   WMTPSOArchiveQuery(&s);
   printf("RESULT recipes=%llu selected=%llu built=%llu failed=%llu nofunction=%llu airmiss=%llu fnfailed=%llu "
          "othertarget=%llu malformed=%llu hits=%llu misses=%llu known=%llu new=%llu missexcl=%llu excluded=%llu "
-         "generation=%llu published=%llu flush=%d mode=%s\n",
+         "skipped=%llu generation=%llu published=%llu flush=%d mode=%s\n",
          (unsigned long long)plan.pipelines.size(), (unsigned long long)selected, (unsigned long long)built,
          (unsigned long long)failed, (unsigned long long)no_function, (unsigned long long)air_miss,
          (unsigned long long)fn_failed, (unsigned long long)plan.other_target, (unsigned long long)plan.malformed,
          (unsigned long long)s.lookup_hits, (unsigned long long)s.lookup_misses, (unsigned long long)s.miss_known,
          (unsigned long long)s.miss_new, (unsigned long long)s.miss_excluded, (unsigned long long)s.excluded,
-         (unsigned long long)s.generation, (unsigned long long)s.published, flush,
+         (unsigned long long)s.skipped, (unsigned long long)s.generation, (unsigned long long)s.published, flush,
          s.mode == 1 ? "writer" : s.mode == 2 ? "lookup" : "off");
   fflush(stdout);
   // the pipelines and functions go with the process; the archive's atexit report says what is unflushed
@@ -670,10 +675,13 @@ commandRun(const Options &o) {
     }
     Child v = spawnSelf(o, extra);
     std::string line = resultLine(v);
-    if (line.empty())
-      printf("VERIFY failed exit=%d\n", v.status); // the generation is published; only the check failed
-    else
+    if (v.status != kOk || line.empty()) {
+      // the generation is published (it stays); the check of it failed
+      printf("VERIFY failed exit=%d\n", v.status);
+      rc = kVerifyFailed;
+    } else {
       printf("VERIFY %s\n", line.c_str() + 7);
+    }
     if (!skip.empty())
       printf("LEFTOUT %zu\n", skip.size());
   }
@@ -706,7 +714,7 @@ commandStatus(const Options &o) {
     FILE *f = fopen((dir + "/CURRENT").c_str(), "r");
     char magic[16] = "";
     unsigned long long gen = 0;
-    if (!f || fscanf(f, "%15s %llu", magic, &gen) != 2) {
+    if (!f || fscanf(f, "%15s %16llx", magic, &gen) != 2 || strcmp(magic, "DXMTCUR1")) { // the publisher's index
       printf("  no current generation\n");
       if (f)
         fclose(f);

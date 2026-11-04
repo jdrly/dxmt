@@ -1,9 +1,10 @@
 // gw2-test: metal
 // gw2-build: tools/gw2/build-pso-archive-tool.zsh ${OUT}_tool_x86_64 x86_64
 // gw2-build: tools/gw2/build-pso-archive-tool.zsh ${OUT}_tool_arm64 arm64
+// gw2-build: tools/gw2/build-pso-archive-tool.zsh ${OUT}_tool_testing x86_64 testing
 // gw2-build: clang -c -O1 -mmacosx-version-min=26.0 src/util/sha1/sha1.c -o ${OUT}_sha1.o
 // gw2-build: clang++ -std=c++20 -fobjc-arc -O1 -Wall -Wextra -mmacosx-version-min=26.0 -Itests/gw2/shim -Isrc/winemetal -Isrc/dxmt -Isrc/util tests/gw2/pso_archive_tool_test.mm src/dxmt/dxmt_compile_recipe.cpp src/util/sha1/sha1_util.cpp ${OUT}_sha1.o -framework Metal -framework Foundation -lsqlite3 -o ${OUT}_gen
-// gw2-run: tests/gw2/pso_archive_tool.zsh ${OUT}_gen ${OUT}_tool_x86_64 ${OUT}_tool_arm64 "$T/pso_archive_tool"
+// gw2-run: tests/gw2/pso_archive_tool.zsh ${OUT}_gen ${OUT}_tool_x86_64 ${OUT}_tool_arm64 ${OUT}_tool_testing "$T/pso_archive_tool"
 //
 // gw2 (#111): the synthetic recipes for the native PSO archive tool's test (tests/gw2/pso_archive_tool.zsh).
 // No real recipes_1.db exists yet (nobody has played since W1), so this writes one from real AIR: GW2's

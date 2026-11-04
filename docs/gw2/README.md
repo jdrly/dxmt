@@ -1078,8 +1078,10 @@ workspace; skipped without it), copied again into the test's directory. Its reci
 serializer in five shapes (full VS/PS, blending, sparse color slots, MSAA, fragment-less), each checked
 to build on the device. `pso_archive_tool.zsh` then checks that `run` publishes all of them, that fresh
 processes on both architectures hit every one, `status`, the refusal under a held writer lock (the
-store unchanged), a second run's newer generation, and an injected crash at one recipe isolated by
-the bisection, the rest published and hit.
+store unchanged), a second run's newer generation, an injected crash at one recipe isolated by
+the bisection, the rest published and hit, and six faked named packer failures (a third build with
+`PSO_ARCHIVE_TESTING`) excluded over several flushes, the rest published and the six classified as
+excluded misses.
 
 ## PSO archive tool
 
@@ -1098,7 +1100,7 @@ retries and the last good generation). Build it with `tools/gw2/build-pso-archiv
 
 | Command | What it does |
 |---|---|
-| `run` | Builds every recipe in a child process and publishes one generation (this run is one session of the store: its shard, plus the newest 3 other sessions' shards). A child that crashes, or whose publish fails without Metal naming a pipeline, is bisected in probe processes, each publishing a range into an empty scratch store no game reads; a recipe that fails alone is left out and the rest published (up to 4 rounds). Then a fresh process verifies the lookup |
+| `run` | Builds every recipe in a child process and publishes one generation (this run is one session of the store: its shard, plus the newest 3 other sessions' shards). A publish failure that names a pipeline excludes its shape (the archive's exact-shape policy, 3 writes a flush); the child flushes again while the failures keep naming shapes (up to 64 flushes). A child that crashes, or whose publish fails without Metal naming a pipeline, is bisected in probe processes, each publishing a range into an empty scratch store no game reads; a recipe that fails alone is left out and the rest published (up to 4 rounds). Then a fresh process verifies the lookup |
 | `verify` | A fresh process builds the recipes against the published generation and reports hits and misses; it captures and publishes nothing |
 | `status` | Each store's current generation (shards, pipeline keys, size, excluded shapes), whether its writer lock is held, and the recipe file. Opens nothing for writing; probes the lock for an instant |
 
@@ -1109,15 +1111,18 @@ Options: `--cache-dir` (DXMT's per-exe cache, default `$(getconf DARWIN_USER_CAC
 DXMT picks it: 320 on macOS 15+ with an Apple7 GPU), `--quiet`.
 
 Output lines (stdout): `RESULT recipes= selected= built= failed= nofunction= airmiss= fnfailed=
-othertarget= malformed= hits= misses= known= new= missexcl= excluded= generation= published= flush=
-mode=` per child (`failed`: Metal refused the pipeline, listed as `BUILDFAILED <index> <recipe key>
+othertarget= malformed= hits= misses= known= new= missexcl= excluded= skipped= generation= published=
+flush= mode=` per child (`failed`: Metal refused the pipeline, listed as `BUILDFAILED <index> <recipe key>
 <error>` without `--quiet`; `nofunction`: a function missing, its AIR (`airmiss`) or the library
-(`fnfailed`); `hits`/`misses` as the archive counts them; `mode` `writer` or `lookup`), `ISOLATED
+(`fnfailed`); `hits`/`misses` as the archive counts them; `skipped`: pipelines left out after Metal's packer named
+their shape; `mode` `writer` or `lookup`), `ISOLATED
 <index> exit=<code>` per recipe the bisection left out, `VERIFY …` (the verifying process's result) and
 `LEFTOUT <n>`. The archive's own report lines go to stderr.
 
 Exit codes: 0 done; 1 usage or input error (no recipes or AIR file, no device); 3 the store is busy:
 another process (a running game with generations on) holds its writer lock, and nothing was written;
-4 publishing failed; 5 a failure the bisection couldn't isolate. A failed run leaves the last good
+4 publishing failed; 5 a failure the bisection couldn't isolate; 6 published, but the verifying process
+failed (`VERIFY failed exit=<n>`; the generation stays). A failed run leaves the last good
 generation. A game started while the tool writes gets the store's lookup-only role for that session.
-`PSO_ARCHIVE_TOOL_TEST_CRASH=<index>` (tests only) aborts a child at that recipe.
+`PSO_ARCHIVE_TOOL_TEST_CRASH=<index>` (tests only) aborts a child at that recipe; a build with
+`build-pso-archive-tool.zsh <output> <arch> testing` also takes the archive's `PSO_ARCHIVE_TEST_*` fakes.

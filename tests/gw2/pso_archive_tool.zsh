@@ -2,7 +2,7 @@
 # gw2 (#111): the native PSO archive tool (tools/gw2/pso_archive_tool.cpp) end to end, across
 # processes, on real AIR. Run by tests/gw2/pso_archive_tool_test.mm:
 #
-#   pso_archive_tool.zsh <recipe generator> <tool x86_64> <tool arm64> <work dir>
+#   pso_archive_tool.zsh <recipe generator> <tool x86_64> <tool arm64> <tool built "testing"> <work dir>
 #
 # The AIR is a copy, made here, of an isolated copy of DXMT's AIR cache: $GW2_AIR_DB, else lane C's
 # work/dxmt-squeeze/native/w0/sample.db in the GW2 on Mac workspace. Without it the test is skipped
@@ -14,12 +14,14 @@
 # arm64; `status` reads the store; a held writer lock (a running game) makes `run` refuse and leaves
 # the store as it was; a second run publishes a newer generation that still hits everything; an
 # injected crash at one recipe is bisected in probe processes, that recipe left out and the rest
-# published and hit.
+# published and hit; six named packer failures (faked, more than one flush's three attempts) exclude
+# six shapes over several flushes and publish the rest (#112 review).
 
 emulate -L zsh
 setopt pipefail
-G=$1 TX=$2 TA=$3 W=$4
-[[ -x $G && -x $TX && -x $TA && -n $W ]] || { print -u2 "usage: $0 <generator> <tool x86_64> <tool arm64> <dir>"; exit 2 }
+G=$1 TX=$2 TA=$3 TT=$4 W=$5
+[[ -x $G && -x $TX && -x $TA && -x $TT && -n $W ]] ||
+  { print -u2 "usage: $0 <generator> <tool x86_64> <tool arm64> <tool testing> <dir>"; exit 2 }
 AIR=${GW2_AIR_DB:-$HOME/Development/personal/gw2-on-mac/work/dxmt-squeeze/native/w0/sample.db}
 if [[ ! -f $AIR ]]; then
   print "SKIP: no isolated AIR copy at $AIR (set GW2_AIR_DB)"
@@ -111,6 +113,22 @@ expect $W/crash.out "^ISOLATED 3 exit=134" "^RESULT recipes=$N selected=$M built
 expect $W/crash.err "bisecting $N recipes" "recipe 3 fails alone"
 [[ -z $(ls $W/store2/Gw2-64.exe/os-*/gen1 2>/dev/null | grep -v -E '^(CURRENT|LOCK|g[0-9a-f]{16}\.manifest|[0-9a-f]{64}\.shard)$') ]] ||
   fail "leftover files in the store after the crash run"
+
+# 7. six named packer failures (faked: each names the archive's pipeline no. 2): one flush tries three
+#    writes, so the tool must flush again while failures name new shapes; six shapes are excluded and
+#    the rest published; a fresh process hits the rest and classifies the six as excluded misses
+S3=$W/store3
+A3=(--recipes $W/recipes_1.db --air $W/air.db --archive-dir $S3 --exe Gw2-64.exe --metal-version 320)
+K=$((N - 6))
+PSO_ARCHIVE_TEST_FAIL=6 PSO_ARCHIVE_TEST_INDEX=2 $TT run $A3 >$W/named.out 2>$W/named.err
+rc=$?
+(( rc == 0 )) || fail "the named-failure run exited $rc"
+expect $W/named.out "^RESULT recipes=$N selected=$N built=$N .* skipped=6 generation=1 published=$K flush=1" \
+  "^VERIFY .* built=$N .* hits=$K misses=6 .* missexcl=6 "
+expect $W/named.err "published generation 1: $K pipelines .* 6 excluded shapes"
+grep -q '^ISOLATED' $W/named.out && fail "named failures were bisected instead of excluded"
+$TX status $A3 >$W/status_named.out 2>&1
+expect $W/status_named.out "generation 1: 1 shards, $K pipeline keys, .* 6 excluded shapes"
 
 if (( fails )); then
   print "pso_archive_tool: $fails failures (logs in $W)"
