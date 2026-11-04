@@ -5,8 +5,8 @@
 //
 // The immediate context counts every Map and Unmap in its bucket (kind x op). It times every call on
 // a resource that isn't a dynamic or default-usage buffer, and one buffer call in 16, scaled by 16:
-// a timed call costs two clock reads, and in Wine a clock read (steady_clock: gettimeofday) is a
-// syscall. The 1 in 16 is pseudo-random (sampleDraw), so it doesn't alias with repeating sequences
+// a timed call costs two clock reads, and in Wine a clock read (QueryPerformanceCounter, see nowNs)
+// is a syscall. The 1 in 16 is pseudo-random (sampleDraw), so it doesn't alias with repeating sequences
 // (Map/Unmap, kinds, periodic renames); it reuses the call's ApiScope draw when there is one, with
 // another value, so MAP and PACE never time the same call and neither's clock reads land in the
 // other's window. Counting is plain increments on the render thread; publish() hands the totals over once

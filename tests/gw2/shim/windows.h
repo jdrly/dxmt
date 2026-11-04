@@ -2,6 +2,7 @@
 // gw2 (#28): a host-side stand-in for the Win32 calls dxmt_gw2_stats.cpp makes, with simulated
 // threads: fake::tid is the "current thread", fake::exitThread() runs its fiber-local callbacks the
 // way the loader does when a thread exits.
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -66,6 +67,26 @@ FlsFree(DWORD i) {
     }
   }
   fake::slots.erase(i);
+  return 1;
+}
+// gw2 (#28): gw2::nowNs reads QueryPerformanceCounter; here, the host's steady clock at Wine's 10 MHz
+typedef union {
+  struct {
+    DWORD LowPart;
+    long HighPart;
+  } u;
+  long long QuadPart;
+} LARGE_INTEGER;
+inline BOOL
+QueryPerformanceFrequency(LARGE_INTEGER *f) {
+  f->QuadPart = 10'000'000;
+  return 1;
+}
+inline BOOL
+QueryPerformanceCounter(LARGE_INTEGER *c) {
+  c->QuadPart = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
+                    .count() /
+                100;
   return 1;
 }
 inline char *
