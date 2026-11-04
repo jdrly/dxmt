@@ -8,7 +8,7 @@
  *  - is then added to this session's archive, on a serial background queue (utility QoS), so the
  *    extra backend work never delays the pipeline the game waits for.
  * The PE side serializes this session's archive every DXMT_PSO_FLUSH_EVERY new pipelines (on its
- * own thread, WMTPSOArchiveFlush) and every 120 s if any are new. Exit never flushes; it only
+ * own thread, WMTPSOArchiveFlush) and every 30 s if any are new. Exit never flushes; it only
  * reports what the last flush missed.
  *
  * Rules carried over from d9mt's Metal 4 archives (work/d9mt-ref, docs/state-cache.md §6):
@@ -23,6 +23,16 @@
  *    session built, hits included, so dropping old sessions loses nothing still in use.
  * MTLBinaryArchive serializes all of its contents each time, so each session has one file,
  * <unix time>-<pid>.mtlarchive, rewritten on every flush.
+ *
+ * gw2 (#52): every pipeline added is recorded (descriptor, stable key, compute or render) so that
+ *  - a flush that fails is retried once into a fresh archive rebuilt from the records, without the
+ *    pipeline Metal's error names ("pipeline no. N"), whose shape is logged; a pipeline left out
+ *    that way stays out (counted as `skipped`);
+ *  - each successful flush writes <archive>.keys next to it (the keys of the pipelines in it), and
+ *    a lookup miss is classified against the loaded sessions' keys: `known` (archived before, yet
+ *    Metal missed it, or it was lost before a flush) or `new` (never archived).
+ * A key is FNV-1a 64 over the function names (which carry content hashes: <stage>_<shader sha1
+ * prefix>_<variant digest>) and every descriptor field the bridge sets.
  */
 
 #import <Foundation/Foundation.h>
@@ -56,6 +66,121 @@ static _Atomic uint64_t g_hits, g_misses, g_added, g_add_failed, g_capped, g_que
 static _Atomic uint64_t g_flushes, g_flushed_bytes, g_reserved;
 /* g_added when the last successful flush began: what is on disk (adds and flushes hold g_lock). */
 static _Atomic uint64_t g_persisted;
+
+/* gw2 (#52): the session's added pipelines in add order (g_lock), and the loaded sessions' keys */
+struct pso_record {
+  uint64_t key;
+  id desc; /* retained MTLRenderPipelineDescriptor or MTLComputePipelineDescriptor */
+  bool compute;
+  bool skipped; /* left out of the archive after Metal's packer named it */
+};
+static struct pso_record *g_rec;
+static uint64_t g_rec_count, g_rec_cap;
+static uint64_t *g_known;  /* open addressing, 0 = empty (a key of 0 is stored as 1) */
+static uint64_t g_known_mask;
+static _Atomic uint64_t g_miss_known, g_miss_new, g_skipped, g_rebuilds;
+
+static uint64_t
+fnv(uint64_t h, const void *p, size_t n) {
+  const uint8_t *b = p;
+  for (size_t i = 0; i < n; i++)
+    h = (h ^ b[i]) * 0x100000001b3ull;
+  return h;
+}
+#define FNV_U(h, v)                                                                                                    \
+  do {                                                                                                                 \
+    uint64_t v_ = (uint64_t)(v);                                                                                       \
+    h = fnv(h, &v_, sizeof(v_));                                                                                       \
+  } while (0)
+
+static uint64_t
+fnv_str(uint64_t h, NSString *s) {
+  const char *u = s ? s.UTF8String : "";
+  return fnv(h, u, strlen(u) + 1);
+}
+
+/* the stable key of a pipeline descriptor (render or compute), and optionally its shape */
+static uint64_t
+pso_key(id desc, bool compute, char *shape, size_t shape_size) {
+  uint64_t h = 0xcbf29ce484222325ull;
+  if (compute) {
+    MTLComputePipelineDescriptor *d = desc;
+    h = fnv(h, "C", 1);
+    h = fnv_str(h, d.computeFunction.name);
+    FNV_U(h, d.threadGroupSizeIsMultipleOfThreadExecutionWidth);
+    FNV_U(h, d.supportIndirectCommandBuffers);
+    for (unsigned i = 0; i < 31; i++)
+      FNV_U(h, d.buffers[i].mutability);
+    if (shape)
+      snprintf(shape, shape_size, "compute cs=%s", d.computeFunction.name.UTF8String ?: "-");
+  } else {
+    MTLRenderPipelineDescriptor *d = desc;
+    h = fnv(h, "R", 1);
+    h = fnv_str(h, d.vertexFunction.name);
+    h = fnv_str(h, d.fragmentFunction.name);
+    char colors[96] = "";
+    size_t cl = 0;
+    for (unsigned i = 0; i < 8; i++) {
+      MTLRenderPipelineColorAttachmentDescriptor *c = d.colorAttachments[i];
+      FNV_U(h, c.pixelFormat);
+      FNV_U(h, c.blendingEnabled);
+      FNV_U(h, c.writeMask);
+      FNV_U(h, c.rgbBlendOperation);
+      FNV_U(h, c.alphaBlendOperation);
+      FNV_U(h, c.sourceRGBBlendFactor);
+      FNV_U(h, c.sourceAlphaBlendFactor);
+      FNV_U(h, c.destinationRGBBlendFactor);
+      FNV_U(h, c.destinationAlphaBlendFactor);
+      if (shape && c.pixelFormat != MTLPixelFormatInvalid && cl < sizeof(colors) - 12)
+        cl += snprintf(colors + cl, sizeof(colors) - cl, "%s%u:%lu", cl ? "," : "", i, (unsigned long)c.pixelFormat);
+    }
+    FNV_U(h, d.depthAttachmentPixelFormat);
+    FNV_U(h, d.stencilAttachmentPixelFormat);
+    FNV_U(h, d.rasterSampleCount);
+    FNV_U(h, d.alphaToCoverageEnabled);
+    FNV_U(h, d.rasterizationEnabled);
+    FNV_U(h, d.inputPrimitiveTopology);
+    FNV_U(h, d.supportIndirectCommandBuffers);
+    FNV_U(h, d.maxTessellationFactor);
+    FNV_U(h, d.tessellationPartitionMode);
+    FNV_U(h, d.tessellationFactorStepFunction);
+    FNV_U(h, d.tessellationOutputWindingOrder);
+    for (unsigned i = 0; i < 31; i++) {
+      FNV_U(h, d.vertexBuffers[i].mutability);
+      FNV_U(h, d.fragmentBuffers[i].mutability);
+    }
+    if (shape)
+      snprintf(shape, shape_size, "render vs=%s fs=%s colors=[%s] depth=%lu stencil=%lu samples=%lu raster=%d topology=%lu",
+               d.vertexFunction.name.UTF8String ?: "-", d.fragmentFunction.name.UTF8String ?: "none", colors,
+               (unsigned long)d.depthAttachmentPixelFormat, (unsigned long)d.stencilAttachmentPixelFormat,
+               (unsigned long)d.rasterSampleCount, (int)d.rasterizationEnabled, (unsigned long)d.inputPrimitiveTopology);
+  }
+  return h ? h : 1;
+}
+
+static void
+pso_known_insert(uint64_t key) {
+  for (uint64_t i = key & g_known_mask;; i = (i + 1) & g_known_mask) {
+    if (g_known[i] == key)
+      return;
+    if (!g_known[i]) {
+      g_known[i] = key;
+      return;
+    }
+  }
+}
+
+static bool
+pso_known_has(uint64_t key) {
+  if (!g_known)
+    return false;
+  for (uint64_t i = key & g_known_mask;; i = (i + 1) & g_known_mask) {
+    if (g_known[i] == key)
+      return true;
+    if (!g_known[i])
+      return false;
+  }
+}
 
 struct report {
   char *buf;
@@ -131,6 +256,7 @@ static void
 pso_remove_archive(NSString *path) {
   unlink(path.fileSystemRepresentation);
   unlink([path stringByAppendingString:@".sum"].fileSystemRepresentation);
+  unlink([path stringByAppendingString:@".keys"].fileSystemRepresentation); /* gw2 (#52) */
 }
 
 static NSString *
@@ -151,6 +277,122 @@ mib(uint64_t bytes) {
   return (double)bytes / (1024.0 * 1024.0);
 }
 
+/* gw2 (#52): <archive>.keys: "DXMTKEY1", a uint64 count, then the keys; written after the archive
+ * and its .sum, through a .tmp. Advisory only: a missing or short file just classifies fewer misses. */
+static void
+pso_write_keys(NSString *path) {
+  NSString *kp = [path stringByAppendingString:@".keys"];
+  NSString *kt = [kp stringByAppendingString:@".tmp"];
+  FILE *f = fopen(kt.fileSystemRepresentation, "wb");
+  if (!f)
+    return;
+  uint64_t n = 0;
+  for (uint64_t i = 0; i < g_rec_count; i++)
+    n += !g_rec[i].skipped;
+  bool ok = fwrite("DXMTKEY1", 8, 1, f) == 1 && fwrite(&n, sizeof(n), 1, f) == 1;
+  for (uint64_t i = 0; ok && i < g_rec_count; i++)
+    if (!g_rec[i].skipped)
+      ok = fwrite(&g_rec[i].key, sizeof(uint64_t), 1, f) == 1;
+  ok = !fclose(f) && ok;
+  if (!ok || rename(kt.fileSystemRepresentation, kp.fileSystemRepresentation))
+    unlink(kt.fileSystemRepresentation);
+}
+
+/* appends the keys of <archive>.keys to `out` (grown with realloc); the number read */
+static uint64_t
+pso_read_keys(NSString *path, uint64_t **out, uint64_t *count) {
+  FILE *f = fopen([path stringByAppendingString:@".keys"].fileSystemRepresentation, "rb");
+  if (!f)
+    return 0;
+  char magic[8];
+  uint64_t n = 0, got = 0;
+  if (fread(magic, 8, 1, f) == 1 && !memcmp(magic, "DXMTKEY1", 8) && fread(&n, sizeof(n), 1, f) == 1 &&
+      n < (1u << 24)) {
+    uint64_t *grown = realloc(*out, (*count + n) * sizeof(uint64_t));
+    if (grown) {
+      *out = grown;
+      got = fread(*out + *count, sizeof(uint64_t), n, f);
+      *count += got;
+    }
+  }
+  fclose(f);
+  return got;
+}
+
+/* Serializes `archive` to g_path through .tmp and writes the .sum; NULL on success, else why. */
+static const char *
+pso_write_archive(id<MTLBinaryArchive> archive, uint64_t *size, char *why, size_t why_size) {
+  NSString *sum_path = [g_path stringByAppendingString:@".sum"];
+  NSString *tmp = [g_path stringByAppendingString:@".tmp"];
+  NSString *sum_tmp = [g_path stringByAppendingString:@".sum.tmp"];
+  NSError *err = nil;
+  const char *failed = NULL;
+#ifdef PSO_ARCHIVE_TESTING
+  /* the native harness (GW2 on Mac work/dxmt-squeeze/native) fakes Metal's packer error once */
+  static int fake_failures = -1;
+  if (fake_failures < 0)
+    fake_failures = getenv("PSO_ARCHIVE_TEST_FAIL") ? atoi(getenv("PSO_ARCHIVE_TEST_FAIL")) : 0;
+  if (fake_failures > 0) {
+    fake_failures--;
+    snprintf(why, why_size, "Failed to generate machO:error: cannot pack (test): expecting 'fragment' stage in "
+             "pipeline no. '%s'", getenv("PSO_ARCHIVE_TEST_INDEX") ?: "3");
+    return why;
+  }
+#endif
+  if (![archive serializeToURL:[NSURL fileURLWithPath:tmp] error:&err]) {
+    snprintf(why, why_size, "%s", err ? err.localizedDescription.UTF8String : "serializeToURL failed");
+    failed = why;
+  } else {
+    NSString *sum = pso_sum_text(tmp, size);
+    if (!sum)
+      failed = "cannot read the serialized archive back";
+    else if (![sum writeToFile:sum_tmp atomically:NO encoding:NSUTF8StringEncoding error:nil])
+      failed = "cannot write the .sum";
+    else if (rename(tmp.fileSystemRepresentation, g_path.fileSystemRepresentation))
+      failed = "rename failed"; /* the previous flush's pair is still intact */
+    else if (rename(sum_tmp.fileSystemRepresentation, sum_path.fileSystemRepresentation)) {
+      failed = "rename of the .sum failed";
+      pso_remove_archive(g_path); /* new archive, old .sum: never leave a mismatched pair */
+    }
+  }
+  if (failed) {
+    unlink(tmp.fileSystemRepresentation);
+    unlink(sum_tmp.fileSystemRepresentation);
+  }
+  return failed;
+}
+
+/* gw2 (#52): Metal's packer names the pipeline it choked on as "pipeline no. 'N'"; -1 if not */
+static long
+pso_failed_index(const char *why) {
+  const char *p = strstr(why, "pipeline no. '");
+  return p ? strtol(p + 14, NULL, 10) : -1;
+}
+
+/* gw2 (#52): a fresh archive with every recorded pipeline that isn't skipped; nil if it can't be
+ * made. Adding recompiles each pipeline's backend code, served mostly by Metal's shader cache. */
+static id<MTLBinaryArchive>
+pso_rebuild(id<MTLDevice> device, uint64_t *readded) {
+  NSError *err = nil;
+  MTLBinaryArchiveDescriptor *cd = [[MTLBinaryArchiveDescriptor alloc] init];
+  id<MTLBinaryArchive> fresh = [device newBinaryArchiveWithDescriptor:cd error:&err];
+  [cd release];
+  if (!fresh)
+    return nil;
+  uint64_t n = 0;
+  for (uint64_t i = 0; i < g_rec_count; i++) {
+    if (g_rec[i].skipped)
+      continue;
+    BOOL ok = g_rec[i].compute ? [fresh addComputePipelineFunctionsWithDescriptor:g_rec[i].desc error:&err]
+                               : [fresh addRenderPipelineFunctionsWithDescriptor:g_rec[i].desc error:&err];
+    n += ok;
+  }
+  *readded = n;
+  return fresh;
+}
+
+static id<MTLDevice> g_device;
+
 /* Caller holds g_lock. 1: written, 0: nothing new, -1: failed (retried on the next flush). */
 static int
 pso_flush_locked(struct report *r) {
@@ -164,43 +406,58 @@ pso_flush_locked(struct report *r) {
   if (!n)
     return 0;
   uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-  NSString *sum_path = [g_path stringByAppendingString:@".sum"];
-  NSString *tmp = [g_path stringByAppendingString:@".tmp"];
-  NSString *sum_tmp = [g_path stringByAppendingString:@".sum.tmp"];
-  NSError *err = nil;
-  const char *failed = NULL;
   uint64_t size = 0;
-  if (![g_current serializeToURL:[NSURL fileURLWithPath:tmp] error:&err]) {
-    failed = err ? err.localizedDescription.UTF8String : "serializeToURL failed";
-  } else {
-    NSString *sum = pso_sum_text(tmp, &size);
-    if (!sum)
-      failed = "cannot read the serialized archive back";
-    else if (![sum writeToFile:sum_tmp atomically:NO encoding:NSUTF8StringEncoding error:nil])
-      failed = "cannot write the .sum";
-    else if (rename(tmp.fileSystemRepresentation, g_path.fileSystemRepresentation))
-      failed = "rename failed"; /* the previous flush's pair is still intact */
-    else if (rename(sum_tmp.fileSystemRepresentation, sum_path.fileSystemRepresentation)) {
-      failed = "rename of the .sum failed";
-      pso_remove_archive(g_path); /* new archive, old .sum: never leave a mismatched pair */
+  char why[1024];
+  const char *failed = pso_write_archive(g_current, &size, why, sizeof(why));
+  const char *retried = "";
+  char retry_note[2048] = "";
+  if (failed) {
+    /* gw2 (#52): say which pipeline Metal named, then rebuild without it and try once more */
+    long idx = pso_failed_index(failed);
+    char shape[512] = "not a recorded pipeline";
+    if (idx >= 0 && (uint64_t)idx < g_rec_count && !g_rec[idx].skipped) {
+      pso_key(g_rec[idx].desc, g_rec[idx].compute, shape, sizeof(shape));
+      g_rec[idx].skipped = true;
+      atomic_fetch_add(&g_skipped, 1);
+    }
+    report_line(r, "PSO archive: flush of %s failed: %s", g_path.lastPathComponent.UTF8String, failed);
+    if (idx >= 0)
+      report_line(r, "PSO archive: Metal names pipeline no. %ld; this session's pipeline no. %ld is: %s (left out "
+                  "of the archive from now on)",
+                  idx, idx, shape);
+    uint64_t readded = 0;
+    id<MTLBinaryArchive> fresh = g_device ? pso_rebuild(g_device, &readded) : nil;
+    char why2[1024];
+    const char *failed2 = fresh ? pso_write_archive(fresh, &size, why2, sizeof(why2)) : "cannot create an archive";
+    if (!failed2) {
+      [g_current release];
+      g_current = fresh;
+      atomic_fetch_add(&g_rebuilds, 1);
+      snprintf(retry_note, sizeof(retry_note), " (rebuilt with %llu pipelines after a failed flush)",
+               (unsigned long long)readded);
+      retried = retry_note;
+      failed = NULL;
+    } else {
+      [fresh release];
+      snprintf(retry_note, sizeof(retry_note), "%s; the rebuilt archive failed too: %s", failed, failed2);
+      failed = retry_note;
     }
   }
   double ms = (double)(clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0) / 1e6;
   if (failed) {
-    unlink(tmp.fileSystemRepresentation);
-    unlink(sum_tmp.fileSystemRepresentation);
     atomic_fetch_add(&g_unflushed, n);
     report_line(r, "PSO archive: flush of %s failed after %.0f ms: %s", g_path.lastPathComponent.UTF8String, ms,
                 failed);
     return -1;
   }
+  pso_write_keys(g_path);
   atomic_fetch_add(&g_flushes, 1);
   atomic_store(&g_flushed_bytes, size);
   atomic_store(&g_persisted, added);
-  report_line(r, "PSO archive: flushed %s: %llu pipelines (+%llu), %.1f MB in %.0f ms%s",
+  report_line(r, "PSO archive: flushed %s: %llu pipelines (+%llu), %.1f MB in %.0f ms%s%s",
               g_path.lastPathComponent.UTF8String, (unsigned long long)atomic_load(&g_added),
               (unsigned long long)n, mib(size), ms,
-              atomic_load(&g_capped) ? " (session cap reached, later pipelines not added)" : "");
+              atomic_load(&g_capped) ? " (session cap reached, later pipelines not added)" : "", retried);
   return 1;
 }
 
@@ -208,7 +465,7 @@ static void
 pso_report_atexit(void) {
   /* Exit does no Metal or disk work: serializing can take long, and the threads Metal depends on
    * may already be gone. The periodic flushes bound what is lost (at most DXMT_PSO_FLUSH_EVERY - 1
-   * pipelines or 120 s); only report it. Counted against the last completed flush (one still
+   * pipelines or 30 s); only report it. Counted against the last completed flush (one still
    * running counts as not done); an add in progress can count twice, hence "about". */
   uint64_t persisted = atomic_load(&g_persisted); /* first: never above the g_added read after it */
   uint64_t n = atomic_load(&g_added) - persisted + atomic_load(&g_queued);
@@ -219,7 +476,7 @@ pso_report_atexit(void) {
 }
 
 static void
-pso_queue_add(id desc, bool compute) {
+pso_queue_add(id desc, bool compute, uint64_t key) {
   if (atomic_fetch_add(&g_reserved, 1) >= g_max_pipelines) {
     atomic_fetch_add(&g_capped, 1);
     return;
@@ -238,6 +495,22 @@ pso_queue_add(id desc, bool compute) {
       if (ok) {
         atomic_fetch_add(&g_added, 1);
         atomic_fetch_add(&g_unflushed, 1);
+        /* gw2 (#52): record it for rebuilds and the .keys sidecar */
+        if (g_rec_count == g_rec_cap) {
+          uint64_t cap = g_rec_cap ? g_rec_cap * 2 : 256;
+          struct pso_record *grown = realloc(g_rec, cap * sizeof(*g_rec));
+          if (grown) {
+            g_rec = grown;
+            g_rec_cap = cap;
+          }
+        }
+        if (g_rec_count < g_rec_cap) {
+          g_rec[g_rec_count].key = key;
+          g_rec[g_rec_count].desc = [desc retain];
+          g_rec[g_rec_count].compute = compute;
+          g_rec[g_rec_count].skipped = false;
+          g_rec_count++;
+        }
       } else {
         atomic_fetch_add(&g_add_failed, 1);
         if (!g_add_error[0])
@@ -264,14 +537,16 @@ pso_archive_new_render(id<MTLDevice> device, MTLRenderPipelineDescriptor *desc, 
     }
     desc.binaryArchives = nil;
   }
+  uint64_t key = pso_key(desc, false, NULL, 0); /* gw2 (#52) */
   if (pso) {
     atomic_fetch_add(&g_hits, 1);
   } else {
     atomic_fetch_add(&g_misses, 1);
+    atomic_fetch_add(pso_known_has(key) ? &g_miss_known : &g_miss_new, 1);
     pso = [device newRenderPipelineStateWithDescriptor:desc options:MTLPipelineOptionNone reflection:nil error:err];
   }
   if (pso)
-    pso_queue_add(desc, false);
+    pso_queue_add(desc, false, key);
   return pso;
 }
 
@@ -288,14 +563,16 @@ pso_archive_new_compute(id<MTLDevice> device, MTLComputePipelineDescriptor *desc
     }
     desc.binaryArchives = nil;
   }
+  uint64_t key = pso_key(desc, true, NULL, 0); /* gw2 (#52) */
   if (pso) {
     atomic_fetch_add(&g_hits, 1);
   } else {
     atomic_fetch_add(&g_misses, 1);
+    atomic_fetch_add(pso_known_has(key) ? &g_miss_known : &g_miss_new, 1);
     pso = [device newComputePipelineStateWithDescriptor:desc options:MTLPipelineOptionNone reflection:nil error:err];
   }
   if (pso)
-    pso_queue_add(desc, true);
+    pso_queue_add(desc, true, key);
   return pso;
 }
 
@@ -353,7 +630,7 @@ pso_archive_init(id<MTLDevice> device, const struct WMTPSOArchiveConfig *cfg, st
         unlink(path.fileSystemRepresentation);
         leftovers++;
       }
-    } else if ([name hasSuffix:@".mtlarchive.sum"]) {
+    } else if ([name hasSuffix:@".mtlarchive.sum"] || [name hasSuffix:@".mtlarchive.keys"]) {
       if (![fm fileExistsAtPath:[path stringByDeletingPathExtension]]) {
         unlink(path.fileSystemRepresentation);
         leftovers++;
@@ -367,6 +644,7 @@ pso_archive_init(id<MTLDevice> device, const struct WMTPSOArchiveConfig *cfg, st
 
   NSMutableArray *archives = [NSMutableArray array];
   uint64_t loaded_bytes = 0;
+  uint64_t *keys = NULL, key_count = 0, keyed_archives = 0; /* gw2 (#52) */
   for (NSString *name in names) {
     NSString *path = [dir stringByAppendingPathComponent:name];
     if (archives.count >= cfg->keep_sessions) {
@@ -396,6 +674,7 @@ pso_archive_init(id<MTLDevice> device, const struct WMTPSOArchiveConfig *cfg, st
     [archives addObject:a];
     [a release];
     loaded_bytes += size;
+    keyed_archives += pso_read_keys(path, &keys, &key_count) > 0;
     report_line(r, "PSO archive: loaded %s (%.1f MB)", name.UTF8String, mib(size));
   }
 
@@ -410,6 +689,20 @@ pso_archive_init(id<MTLDevice> device, const struct WMTPSOArchiveConfig *cfg, st
   }
   g_lookup = [archives copy];
   g_loaded = archives.count;
+  /* gw2 (#52): the loaded sessions' keys, for classifying misses */
+  if (key_count) {
+    uint64_t cap = 64;
+    while (cap < key_count * 2)
+      cap <<= 1;
+    g_known = calloc(cap, sizeof(uint64_t));
+    if (g_known) {
+      g_known_mask = cap - 1;
+      for (uint64_t i = 0; i < key_count; i++)
+        pso_known_insert(keys[i] ? keys[i] : 1);
+    }
+  }
+  free(keys);
+  g_device = [device retain];
   g_max_pipelines = cfg->max_pipelines;
   g_path = [[dir stringByAppendingPathComponent:[NSString stringWithFormat:@"%010llu-%d.mtlarchive",
                                                                            (unsigned long long)now, (int)getpid()]]
@@ -422,6 +715,8 @@ pso_archive_init(id<MTLDevice> device, const struct WMTPSOArchiveConfig *cfg, st
               "at most %u pipelines each)",
               (unsigned long)archives.count, mib(loaded_bytes), dir.UTF8String, g_path.lastPathComponent.UTF8String,
               cfg->keep_sessions, cfg->max_pipelines);
+  report_line(r, "PSO archive: %llu pipeline keys from %llu of the loaded archives classify lookup misses (known/new)",
+              (unsigned long long)key_count, (unsigned long long)keyed_archives);
   return true;
 }
 
@@ -486,5 +781,9 @@ _WMTPSOArchiveQuery(void *obj) {
   s->unflushed = atomic_load(&g_unflushed);
   s->flushes = atomic_load(&g_flushes);
   s->flushed_bytes = atomic_load(&g_flushed_bytes);
+  s->miss_known = atomic_load(&g_miss_known); /* gw2 (#52) */
+  s->miss_new = atomic_load(&g_miss_new);
+  s->skipped = atomic_load(&g_skipped);
+  s->rebuilds = atomic_load(&g_rebuilds);
   return 0;
 }
