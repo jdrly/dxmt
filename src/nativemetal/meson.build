@@ -1,17 +1,9 @@
-winemetal_src = [
-  '../winemetal/winemetal_thunks.c',
-  '../winemetal/unix/winemetal_unix.c',
-  '../winemetal/unix/cache.c',
-]
+# gw2 (B1, #61): the unix sources and their link arguments come from src/winemetal/unix/meson.build,
+# the list the Wine build uses (this list had lost pso_archive.c and mtl4.c)
+winemetal_src = files('../winemetal/winemetal_thunks.c') + winemetal_unix_src
 winemetal_link_depends = []
 
-winemetal_ld_args = [
-  '-weak_framework', 'CoreFoundation', '-weak_framework', 'Metal',
-  '-framework', 'MetalFX', '-weak_framework', 'Foundation',
-  '-weak_framework', 'CoreGraphics', '-weak_framework', 'QuartzCore',
-  '-weak_framework', 'ColorSync',   '-weak_framework', 'Cocoa',
-  '-lsqlite3',
-]
+winemetal_ld_args = winemetal_unix_link_args
 
 winemetal_dll = shared_library('winemetal', winemetal_src,
   name_prefix         : '',
