@@ -41,7 +41,9 @@
 // - with the deterministic test completion adapter (ScriptedSubmission, no GPU): error records and
 //   the throttle, missing GPU times reported as 0, the token's records unchanged until retire, wait and
 //   retire in order, drain() with chunks committed and never waited for, the same token checks, and
-//   (the review of #97) a stale token of the adapter's own, from an earlier wait, refused and kept.
+//   (the review of #97) a stale token of the adapter's own, from an earlier wait, refused and kept;
+//   gw2 (#113): after a refused retirement, retireWaited() retires the last wait's chunk once, with that
+//   wait's records, and nothing else.
 // No deliberate GPU faults (council §2); the parity of the records with the code they replaced is
 // tests/gw2/commit_record_test.cpp's.
 // Exit 77 without a Metal device; without Metal 4, the Metal 3 half runs and the test exits 77
@@ -647,6 +649,39 @@ scriptedStaleToken() {
   std::printf("%s scripted adapter: a stale token of its own is refused and kept\n", failures ? "...." : "ok  ");
 }
 
+// gw2 (#113): CommandQueue's recovery (DXMT_RETIRE_RECOVERY) after the adapter's retire() refused a token
+// (here an empty one): retireWaited(seq) retires the chunk of the last wait once, through retireChunk with
+// that wait's records (the adapter checks them), and refuses another sequence, a repeat, or a chunk
+// retired normally. The next chunk then waits and retires as usual.
+static void
+scriptedRetireWaited() {
+  ScriptedSubmission sub;
+  sub.script.resize(4);
+  for (auto &records : sub.script)
+    records.resize(2);
+  NullEncoder encoder;
+  CHECK(!sub.retireWaited(0) && !sub.retireWaited(1), "retireWaited: retired before any wait");
+  for (uint64_t seq = 1; seq <= 3; seq++) {
+    sub.begin(seq);
+    sub.encode(seq, encoder);
+    sub.commit(seq);
+    auto completed = sub.wait(seq, 0, false);
+    if (seq == 2) {
+      auto taken = std::move(completed); // the injected bug: the token is gone before the retirement
+      CHECK(!sub.retire(std::move(completed)) && sub.retired == 1, "retireWaited: an empty token retired chunk 2");
+      CHECK(!sub.retireWaited(1) && !sub.retireWaited(3), "retireWaited: retired a chunk it didn't last wait for");
+      CHECK(sub.retireWaited(2) && sub.retired == 2, "retireWaited: didn't retire the last wait's chunk");
+      CHECK(!sub.retireWaited(2) && sub.retired == 2, "retireWaited: retired chunk 2 twice");
+      CHECK(!sub.retire(std::move(taken)), "retireWaited: retire() took the token of a recovered chunk");
+    } else {
+      CHECK(sub.retire(std::move(completed)) && sub.retired == seq, "retireWaited: the normal retire() refused");
+      CHECK(!sub.retireWaited(seq), "retireWaited: retired a chunk retire() had retired");
+    }
+  }
+  CHECK(sub.contract == 0, "retireWaited: %d contract violations", sub.contract);
+  std::printf("%s scripted adapter: retireWaited() after a refused retirement\n", failures ? "...." : "ok  ");
+}
+
 int
 main() {
   @autoreleasepool {
@@ -659,6 +694,7 @@ main() {
     auto completion = device.newSharedEvent();
     scripted();
     scriptedStaleToken();
+    scriptedRetireWaited(); // gw2 (#113)
 
     {
       auto metal3_queue = device.newCommandQueue(64);

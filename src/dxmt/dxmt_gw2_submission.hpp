@@ -91,14 +91,29 @@ public:
   virtual CompletedChunk wait(uint64_t seq, uint64_t completion_value, bool timing) = 0;
   // After the report and the chunk's own reset and holds: takes the token back and releases what the
   // submission keeps of the chunk (retireChunk). gw2 (#91): false: refused (not this submission's
-  // token, or not its last wait's: empty, another queue's, repeated); the token stays with the caller
-  // and nothing changes
+  // token, or not its last wait's: empty, another queue's, repeated; gw2 #113: or retireWaited() retired
+  // it); the token stays with the caller and nothing changes
   [[nodiscard]] bool
   retire(CompletedChunk &&chunk) {
-    if (!issued(chunk) || chunk.seq() != waited_)
+    if (!issued(chunk) || chunk.seq() != waited_ || chunk.seq() == retired_) // gw2 (#113): or retireWaited's
       return false;
     CompletedChunk token = std::move(chunk);
     retireChunk(token);
+    retired_ = token.seq(); // gw2 (#113)
+    return true;
+  }
+  // gw2 (#113): recovery after retire() refused chunk `seq`'s token (never expected; the command queue
+  // with DXMT_RETIRE_RECOVERY): retires the chunk this submission last waited for, if that is `seq` and
+  // it isn't retired yet. Its wait() proved the chunk complete, so what the submission keeps of it may go
+  // (Metal 4: the ring slot's allocator resets; Metal 3: the borrowed buffer is forgotten), as retire()
+  // would have done, with a token like the one that wait() gave (its records). False: nothing to retire
+  // (not the last wait, or retired already).
+  [[nodiscard]] bool
+  retireWaited(uint64_t seq) {
+    if (seq == 0 || seq != waited_ || seq == retired_)
+      return false;
+    retireChunk(completed(seq, waited_records_, waited_order_));
+    retired_ = seq;
     return true;
   }
 
@@ -113,13 +128,18 @@ protected:
   CompletedChunk
   issue(uint64_t seq, std::span<const CommitRecord> records, gw2::ReportOrder order) {
     waited_ = seq;
+    waited_records_ = records; // gw2 (#113): for retireWaited()
+    waited_order_ = order;
     return completed(seq, records, order);
   }
   // the adapter's part of retire(), with the token it issued for the chunk it last waited for
   virtual void retireChunk(const CompletedChunk &chunk) = 0;
 
 private:
-  uint64_t waited_ = 0; // finish thread: the chunk of the last wait()
+  uint64_t waited_ = 0;  // finish thread: the chunk of the last wait()
+  uint64_t retired_ = 0; // finish thread: the chunk of the last retirement (gw2 #113)
+  std::span<const CommitRecord> waited_records_;                    // gw2 (#113): the last wait's
+  gw2::ReportOrder waited_order_ = gw2::ReportOrder::CommitOrder; // gw2 (#113): the last wait's
 };
 
 // gw2 (#78): Metal 3 (production)

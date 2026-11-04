@@ -43,6 +43,16 @@ withdrawn: unconditional holds would be a separate, measured decision.)
   and Metal 4. Allocation tracking, the ring allocators and the handshake counters stay where they
   are; the lifetime check's stamps stay at their call sites (moving them into the ledger's hold
   would move when they are taken).
+- #113 (the night risk review's L1) gives a refusal a defined recovery, `DXMT_RETIRE_RECOVERY` (on):
+  without one, a single refused retirement stopped the ledger, and once the ring wrapped every later
+  hold (on Metal 4 every drawable) was refused and kept until teardown. Completion still authorizes
+  every release: a refused token of the queue's own submission for chunk `S` proves `S` complete, and
+  since the finish thread waits for every chunk in sequence order, every chunk before it, so the ledger
+  retires by sequence up to `S` (`retireOrRecover`); an empty or foreign token proves nothing and
+  releases nothing. A refused hold is now kept until the last chunk that may use it completed (its own
+  while unretired; for a retired sequence, any chunk the ring may still have in flight) rather than
+  until teardown. The submission retires the chunk its last wait proved complete (`retireWaited`).
+  `retire` and `drain` are unchanged, and `DXMT_RETIRE_RECOVERY=0` keeps the old behaviour.
 - Native tests don't replace in-game evidence: the #31 lifetime check (`DXMT_LIFETIME_CHECK=1`) stays
   the proof that nothing is released early in GW2.
 
