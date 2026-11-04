@@ -155,3 +155,35 @@ signals, encode, commit on the encode thread; wait (a completed chunk) and retir
 drain at teardown. One adapter per backend (`Metal3Submission`, `Metal4Submission`), chosen once per
 command queue; the encoding inside stays each backend's own.
 _Avoid_: backend (alone), submit path
+
+### PSO archives
+
+**Persisted key**:
+The stable key of a pipeline in a written archive, recorded next to it (a `.keys` sidecar, or a shard's
+entry in a manifest). A lookup miss whose key is persisted is **known**; otherwise **new**.
+_Avoid_: cached key
+
+**Generation**:
+One published state of a PSO archive store: a manifest naming the shards to look up and the excluded
+shapes. The index (`CURRENT`) names the current generation; the one before it is kept as the **last
+good generation**.
+_Avoid_: version, snapshot
+
+**Shard**:
+One immutable archive file of a generation, named by its content's SHA-256 and never rewritten. A
+session publishes a **delta** shard per flush (its pipelines since the last one) and may merge its
+shards into one.
+_Avoid_: archive file, chunk (that is the command queue's)
+
+**Manifest**:
+The checksummed list of one generation: each shard's session, size, SHA-256 and persisted keys, then the
+excluded shapes.
+
+**Excluded shape**:
+A pipeline key Metal's packer named while writing an archive never serialized before. Its pipelines are
+built and used, but never archived again. Only that exact key: never a class of pipelines.
+_Avoid_: blacklisted pipeline, skipped class
+
+**Archive policy**:
+The pure rules of the PSO archive (`pso_archive_policy.h`): what is kept, what a failed write skips, and
+how a miss is classified. It knows keys and record indices, never Metal's archive types.

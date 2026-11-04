@@ -50,6 +50,7 @@ because Wine raises `0x80000005` (`STATUS_BUFFER_OVERFLOW`) for a line over its 
 | `DXMT_SUBSAMPLE_METALFX` | off | GW2's Render Sampling: Subsample pass with MetalFX (#56; see [SUBSAMPLE](#subsample)). `log`: capture only, every candidate draw's shape is logged once and nothing changes. `1`: an accepted pass (the full-screen draw that samples the low-resolution 3D scene into a target of the swapchain's size) samples a MetalFX spatial upscale of its source instead, on Metal 3 (`MTLFXSpatialScaler`) and Metal 4 (`MTL4FXSpatialScaler`, bridge calls 190–192); the game's pixel shader still runs, and the UI drawn after it is untouched. Anything that doesn't match runs unchanged | unset or `=0`: no detection, no counting, no bridge call |
 | `DXMT_SUBSAMPLE_METALFX_PS` | unset | With `DXMT_SUBSAMPLE_METALFX`: only a pass whose pixel shader's SHA-1 (as the candidate line prints it) starts with this hex prefix is accepted (`no(pin)` otherwise) | any pixel shader that passes the other checks |
 | `DXMT_PSO_RECORD` | on | Shader warming W1 (#57; see [RECORD](#record)): records, durably, what each pipeline was built from, so later stages (W2/W3) can prepare shaders and pipelines before GW2 asks for them. Into `$(getconf DARWIN_USER_CACHE_DIR)dxmt/<exe>/recipes_1.db` (its own sqlite file, through the bridge's cache writer): each shader's DXBC by its SHA-1, each variant's translation inputs (VS, PS, plain) by shader SHA-1, variant digest and Metal target, and each plain graphics pipeline's recipe by the SHA-1 of an explicit serialization of the target, the vertex/pixel identities and every field of the descriptor Metal gets. Once per key and process. The callers never wait on the recorder: a fixed lock-free table of key fingerprints (2 MB) and a bounded lock-free queue (16,384 records or 128 MB), then counted drops. One lowest-priority writer thread skips rows the file already has and stops at a 256 MB file, or after 8 failed writes in a row; it never calls the logger (Present logs its lines). Changes nothing that is built or drawn | `=0`: no recording, no thread, no database opened |
+| `DXMT_PSO_GENERATIONS` | off | `=1` (exactly), with `DXMT_PSO_ARCHIVE=1` (#75; see [COMPILE](#compile), *Generations*): the archives are published as generations in `…/os-<OS build>-<GPU>/gen1/` instead of one file per session: each flush writes the pipelines added since the last one into an immutable shard of their own (never re-serializing an archive, which Metal fails at), a checksummed manifest lists the shards and their keys, and one index file (`CURRENT`) is replaced atomically, so a kill or a failed write leaves the last good generation. A pipeline Metal's packer names is excluded by its key from capture, in this and later sessions. One process writes a store; another gets lookup only | the session files of #52, unchanged (they and a store sit side by side; neither reads the other) |
 
 Not switchable: `SetMaximumFrameLatency(0)` means the default, 3 (DXGI's definition; only
 `DXMT_MAX_FRAME_LATENCY` replaces the result). Typeless depth targets without stencil
@@ -104,7 +105,7 @@ Sections: a feature registers a function with `gw2::SectionRegistrar` (`src/dxmt
 
 | Line | When |
 |---|---|
-| `GW2 fork <commit>: DXMT_STATS=1 DXMT_HITCH_MS=… DXMT_PRESENT_SPLIT=… DXMT_DISPLAY_SYNC=… DXMT_PRESENT_DEADLINE=… DXMT_CAP_LIMITER=… DXMT_STENCIL_PFV=… DXMT_DEPTH_PFV=… DXMT_BG_FPS=… DXMT_BG_FPS_MINIMIZED=… DXMT_BG_POLICY=… DXMT_RENDER_THREAD_PRIORITY=… DXMT_PSO_BLEND_HASH=… DXMT_PSO_MRU=… DXMT_PSO_TOPOLOGY_KEEP=… DXMT_CHUNKS=… DXMT_MAX_FRAME_LATENCY=… DXMT_COMPILE_WAIT_MS=… DXMT_PSO_ARCHIVE=… DXMT_PSO_ARCHIVE_DIR=… DXMT_PSO_FLUSH_EVERY=… DXMT_PROMOTE_FLUSH_MIN=… DXMT_PROMOTE_FLUSH_MS=… DXMT_TIMESTAMP_MODE=… DXMT_MAP_FAST=… DXMT_SKIP_REBIND=… DXMT_CONTROL=… DXMT_RESIDENCY_SET=… DXMT_UNRETAINED=… DXMT_LIFETIME_CHECK=… DXMT_METAL4=… DXMT_SUBSAMPLE_METALFX=… DXMT_PSO_RECORD=… DXMT_COMPILE_DEMAND=… cpus=… refresh=…` then `GW2 fork <commit> set: …` | Two lines (#43; one before), once per process, at the first Present: the build, the **effective** value of every switch above (defaults included; `DXMT_PRESENT_DEADLINE=refresh` is one refresh, `DXMT_CHUNKS` is the ring size in effect, `DXMT_MAX_FRAME_LATENCY=unset` leaves the game's value, `DXMT_PSO_ARCHIVE` is `1` when the archives are on, `0` when not asked for, `failed` when asked for but they couldn't start, `DXMT_PSO_ARCHIVE_DIR=default` is the user cache dir, `DXMT_PROMOTE_FLUSH_MIN`/`_MS` as the immediate context parsed them: `MS` is at least 1 and is shown even when `MIN=0` turns it off, `DXMT_TIMESTAMP_MODE` is `exact`, `estimate` or `boundary`, `DXMT_MAP_FAST` and `DXMT_SKIP_REBIND` are `1` or `0`, `DXMT_CONTROL` is the path or `off`, `DXMT_RESIDENCY_SET` is `1` when the set is on, `0` when switched off, `failed` when asked for but unavailable, `DXMT_UNRETAINED` is `1` or `0`, `DXMT_LIFETIME_CHECK` is `1`, `0` or `unbuilt` (asked for in a build without it), `DXMT_METAL4` is `1` (Metal 4 in use, the default), `0` (`DXMT_METAL4=0`), or `unsupported` (on, but the device, macOS or another setting keeps Metal 3; a warning says which), `DXMT_SUBSAMPLE_METALFX` is `0`, `log` or `1`, `DXMT_PSO_RECORD` is `1` or `0`, `DXMT_COMPILE_DEMAND` is `1` or `0`), the CPUs the game sees, the refresh rate (0 if unknown); the second line lists every `DXMT_*`, `WINENCPU` and `WINEMSYNC` variable set (`set: none` if none). Since #60 the line is generated from the switch registry (`src/dxmt/dxmt_gw2_switches.hpp`) in this order, unchanged: a PR that adds a switch declares it with `sw::Switch` (its effective value through `sw::provideEffective` if it differs from the parsed one) and doesn't edit `LogStartup`; such switches follow `DXMT_PSO_RECORD`, sorted by name, before `cpus` and `refresh`. It adds the name here |
+| `GW2 fork <commit>: DXMT_STATS=1 DXMT_HITCH_MS=… DXMT_PRESENT_SPLIT=… DXMT_DISPLAY_SYNC=… DXMT_PRESENT_DEADLINE=… DXMT_CAP_LIMITER=… DXMT_STENCIL_PFV=… DXMT_DEPTH_PFV=… DXMT_BG_FPS=… DXMT_BG_FPS_MINIMIZED=… DXMT_BG_POLICY=… DXMT_RENDER_THREAD_PRIORITY=… DXMT_PSO_BLEND_HASH=… DXMT_PSO_MRU=… DXMT_PSO_TOPOLOGY_KEEP=… DXMT_CHUNKS=… DXMT_MAX_FRAME_LATENCY=… DXMT_COMPILE_WAIT_MS=… DXMT_PSO_ARCHIVE=… DXMT_PSO_ARCHIVE_DIR=… DXMT_PSO_FLUSH_EVERY=… DXMT_PROMOTE_FLUSH_MIN=… DXMT_PROMOTE_FLUSH_MS=… DXMT_TIMESTAMP_MODE=… DXMT_MAP_FAST=… DXMT_SKIP_REBIND=… DXMT_CONTROL=… DXMT_RESIDENCY_SET=… DXMT_UNRETAINED=… DXMT_LIFETIME_CHECK=… DXMT_METAL4=… DXMT_SUBSAMPLE_METALFX=… DXMT_PSO_RECORD=… DXMT_COMPILE_DEMAND=… DXMT_PSO_GENERATIONS=… cpus=… refresh=…` then `GW2 fork <commit> set: …` | Two lines (#43; one before), once per process, at the first Present: the build, the **effective** value of every switch above (defaults included; `DXMT_PRESENT_DEADLINE=refresh` is one refresh, `DXMT_CHUNKS` is the ring size in effect, `DXMT_MAX_FRAME_LATENCY=unset` leaves the game's value, `DXMT_PSO_ARCHIVE` is `1` when the archives are on, `0` when not asked for, `failed` when asked for but they couldn't start, `DXMT_PSO_ARCHIVE_DIR=default` is the user cache dir, `DXMT_PROMOTE_FLUSH_MIN`/`_MS` as the immediate context parsed them: `MS` is at least 1 and is shown even when `MIN=0` turns it off, `DXMT_TIMESTAMP_MODE` is `exact`, `estimate` or `boundary`, `DXMT_MAP_FAST` and `DXMT_SKIP_REBIND` are `1` or `0`, `DXMT_CONTROL` is the path or `off`, `DXMT_RESIDENCY_SET` is `1` when the set is on, `0` when switched off, `failed` when asked for but unavailable, `DXMT_UNRETAINED` is `1` or `0`, `DXMT_LIFETIME_CHECK` is `1`, `0` or `unbuilt` (asked for in a build without it), `DXMT_METAL4` is `1` (Metal 4 in use, the default), `0` (`DXMT_METAL4=0`), or `unsupported` (on, but the device, macOS or another setting keeps Metal 3; a warning says which), `DXMT_SUBSAMPLE_METALFX` is `0`, `log` or `1`, `DXMT_PSO_RECORD` is `1` or `0`, `DXMT_COMPILE_DEMAND` is `1` or `0`, `DXMT_PSO_GENERATIONS` is `1` (in use), `lookup` (another process writes the store), `unused` (asked for, but the archives are off or failed) or `0`), the CPUs the game sees, the refresh rate (0 if unknown); the second line lists every `DXMT_*`, `WINENCPU` and `WINEMSYNC` variable set (`set: none` if none). Since #60 the line is generated from the switch registry (`src/dxmt/dxmt_gw2_switches.hpp`) in this order, unchanged: a PR that adds a switch declares it with `sw::Switch` (its effective value through `sw::provideEffective` if it differs from the parsed one) and doesn't edit `LogStartup`; such switches follow `DXMT_PSO_RECORD`, sorted by name, before `cpus` and `refresh`. It adds the name here |
 | `HITCH frame=… ms=… commit=…x… sync=…x… bgsleep=… dxmt(ms/calls): …` | A Present-to-Present interval of at least `DXMT_HITCH_MS`, logged at the top of the Present that ends it. `frame` is the frame that Present presents (1-based, as the latency fence counts); the interval holds the previous Present and the game's work on this frame. `commit` (waits for a free chunk) and `sync` (Map's waits for the GPU) are ms × count, from the same interval; they overlap the categories they happen in. `bgsleep` is whether the background throttle was on. The categories are as `PACE`'s `dxmt` (`presentwait` is the latency wait) |
 | `SetMaximumFrameLatency(n)` | Every call; 0 is taken as 3 |
 | `SetMaximumFrameLatency(n): DXMT_MAX_FRAME_LATENCY keeps m` | Every call while `DXMT_MAX_FRAME_LATENCY` is set: the game asked for `n`, `m` stays in effect |
@@ -311,7 +312,7 @@ pipeline is built. A frame with such waits is a hitch DXMT causes.
 
 `COMPILE variants= air=hit/miss pso=hit/miss built= failed= build=shader:ms/max pipeline:ms/max
 queue=now/max threads= wait=Nx ms/max slow= [waitcause=queued:N/ms,variantq:N/ms,variant:N/ms,building:N/ms[,other:N/ms]
-[archbusy=N]] [promoted=N] [archive=hit/miss miss=new:N,known:N added= queued= unflushed= addfailed= capped= skipped= rebuilt=]`
+[archbusy=N]] [promoted=N] [archive=hit/miss miss=new:N,known:N added= queued= unflushed= addfailed= capped= skipped= rebuilt= [gen= published= excluded= missexcl=]]`
 
 Counts are **totals in the 2 s window**; the `COMPILE frame=` line below has them per frame. Times are ms. Without `DXMT_STATS` nothing is counted or timed (no clock reads), except the count of built pipelines that `DXMT_PSO_FLUSH_EVERY` needs.
 
@@ -332,6 +333,7 @@ Counts are **totals in the 2 s window**; the `COMPILE frame=` line below has the
 | `archive` | Only with `DXMT_PSO_ARCHIVE=1`: pipelines found in earlier sessions' archives / built without a hit in the window, pipelines added to this session's archive in the window, adds still queued, adds not yet serialized, adds that failed and pipelines not added because the session reached 8192 (both since start) |
 | `miss` | (#52) With `DXMT_PSO_ARCHIVE=1`: the window's lookup misses, `new` (never in an earlier session's archive) and `known` (an earlier session's `.keys` has the pipeline's key, yet Metal missed it: keying, or a pipeline lost before a flush) |
 | `skipped`, `rebuilt` | (#52) Since start: pipelines left out of the archive after Metal's packer named them in a failed flush, and flushes that succeeded only after rebuilding the archive without them |
+| `gen`, `published`, `excluded`, `missexcl` | (#75) Only with `DXMT_PSO_GENERATIONS=1`: the generation loaded at start, then the last one published; pipelines in this session's shard of that publish; adds refused since start because their key is an excluded failing shape; the window's lookup misses of an excluded shape (not counted in `new` or `known`) |
 
 **`COMPILE frame=N wait=Nx ms/max queue=Q variants= air=hit/miss pso=hit/miss built= failed=
 build=shader:ms pipeline:ms cause=queued:N,variantq:N,variant:N,building:N,other:N longest=<cause>
@@ -411,6 +413,52 @@ bridge calls 149–151):
 | `PSO archive: N pipeline keys from M of the loaded archives classify lookup misses (known/new)` | (#52) Once, at start: the keys read from the loaded archives' `.keys` sidecars |
 | `dxmt: PSO archive: about N pipelines added since the last flush are not saved (no flush at exit)` | At exit, on Wine's stderr (DXMT's log is gone by then), if the last completed flush missed some: adds not in it plus adds still queued (a flush still running counts as not done; an add in progress can count twice) |
 | `PSO archive: N pipelines could not be added so far; first error: …` | At the next flush after an add failed |
+
+**Generations** (#75, `DXMT_PSO_GENERATIONS=1` with `DXMT_PSO_ARCHIVE=1`, off by default). The same
+archives, published by the generation publisher (`src/winemetal/unix/pso_archive_publish.c`) instead of
+one rewritten file per session, from the instance's pure policy (`pso_archive_policy.c`):
+
+- Files in `…/os-<OS build>-<GPU>/gen1/`: shards `<sha256>.shard` (an `MTLBinaryArchive`'s
+  serialization, named by its content, never rewritten); one manifest per generation,
+  `g<16 hex>.manifest` (each shard's session, size, SHA-256 and pipeline keys, newest session first,
+  then the excluded shapes, then a SHA-256 over all of it); the index `CURRENT` (the generation and its
+  manifest's SHA-256), the only file ever replaced; `LOCK`.
+- A flush publishes the pipelines added since the last publish as a new shard (a delta); a session's
+  ninth publish merges its eight shards into one. The archive written is always one never serialized
+  before: Metal fails to serialize an archive again after more pipelines were added to it, naming a
+  good pipeline (`missing 'vertex' stage in pipeline no. N`, reproduced natively by
+  `tests/gw2/pso_archive_test.m`), which the session-file mode then leaves out. The shard is written,
+  synced and renamed into place, then the manifest, then `CURRENT`; a failure at any step leaves the last
+  good generation, and the next flush tries again.
+- At start the generation `CURRENT` names is loaded if its manifest verifies, else the newest older
+  one that does (the last good one); a shard whose size or SHA-256 doesn't match is dropped. The
+  newest 4 sessions' shards are used for lookup. Only the store's writer (an exclusive `flock` on
+  `LOCK`) publishes and removes files: everything but the current and the previous generation's.
+  Another process at the same time gets lookup only and captures nothing.
+- Exact-shape failure policy: a pipeline Metal's packer names in an archive never serialized before is
+  a failing shape. Every pipeline of its full key is left out, the shard is rebuilt without them and
+  written again (at most 3 tries a flush), and the key is excluded from capture, recorded in the
+  manifest for later sessions. Nothing broader is excluded: no class of pipelines (fragment-less or
+  any other) is skipped. Excluded shapes are still built and used, only not archived. A flush whose
+  new pipelines are all excluded publishes an exclusion-only generation (no new shard, every shard
+  carried); until that succeeds the flush counts as failed and the next one tries again.
+
+| Line | When |
+|---|---|
+| `PSO archive: on (generations[, lookup only]): generation G, N shards for lookup (X MB) in <dir>; this session publishes new generations\|captures nothing (keep 4 sessions, at most 8192 pipelines each)` | Once, at the first device creation |
+| `PSO archive: N pipeline keys classify lookup misses (known/new), M failing shapes are excluded from capture` | Once, at start |
+| `PSO archive: loaded shard <sha256 prefix> (session <time>-<pid>, X MB, N pipeline keys)` | Each shard used for lookup |
+| `PSO archive: shard <prefix> (session …) not used: Metal refused it: …` | A verified shard Metal won't open; left out of the next generation |
+| `PSO archive: dropped shard <prefix> (session …) of generation G: <reason>` | At start: `missing or unreadable`, `size or SHA-256 does not match`, `older than the newest sessions kept` |
+| `PSO archive: generation G failed verification: <reason>; using the last good generation` (or `…; no earlier generation verifies, starting empty`), `PSO archive: no valid index (CURRENT); using generation G, the newest that verifies` | At start, when the index or its manifest is bad |
+| `PSO archive: another process (pid P) writes <dir>: lookup only, this session captures nothing` | At start, when another process holds the store |
+| `PSO archive: removed N files no generation since the previous one uses (or leftovers)` | At start (writer only) |
+| `PSO archive: published generation G: N pipelines (+M) in shard <prefix>, X MB, S shards, E excluded shapes, in T ms` | Each successful flush: N pipelines in the new shard, M added since the last publish; `(merged this session's 8 shards into one)`, `(after excluding K failing shapes)`, `(session cap reached …)` when they apply |
+| `PSO archive: publish of generation G failed: <reason>` | One try of a flush failed (Metal's error, or the step: `cannot write the manifest`, `cannot replace the index`, …) |
+| `PSO archive: Metal names pipeline no. N of an archive never serialized before: <shape> (its key is excluded from capture from now on)` | That failure named a pipeline: its shape (as in #52's line); the next try rebuilds without it |
+| `PSO archive: publish of generation G failed after T ms: <reason> (generation P stays)` | The flush gave up; `CURRENT` still names generation P |
+| `PSO archive: published generation G: no shard, the N new pipelines are all excluded shapes; S shards, E excluded shapes, in T ms` | A flush whose new pipelines were all excluded, with an exclusion the store didn't record yet: the exclusion-only generation |
+| `PSO archive: nothing to publish: the N new pipelines are all excluded shapes` | The same, when the store already records every one of those exclusions |
 
 ### CMDS
 
@@ -954,3 +1002,16 @@ release), and teardown's slot-by-slot drain. Since L2 (#69) also the retention p
 hold call site's former gate in each reachable configuration (Metal 3 retained or unretained, the
 lifetime check, the residency set, Metal 4), with the scripted release-trace parity run per
 configuration.
+
+The PSO archive (#75): `pso_archive_policy_test.c` (pure) checks keep, skip and classify under the
+legacy and the exact-shape policies; `pso_archive_publish_test.c` (pure, a fake shard writer) checks
+the generation publisher: round trips, a failure injected at each of its 7 steps leaving the last good
+generation, corrupt shards, manifests and index, the writer lock, collection and session retention.
+`pso_archive_test.m` (metal, arm64 and x86_64) drives sessions through the bridge's unix entry points:
+`pso_archive_parity.zsh` runs each scripted session (Metal's real re-serialization failure, fake packer
+failures, a truncated archive, the cap, retention, the exit report) through the instance with the
+publisher off and through #55's file (`tests/gw2/fixtures/legacy_pso_archive.c`, unchanged), and
+compares reports, counters, files and `.keys` byte for byte; `pso_archive_generations.zsh` checks the
+publisher across processes (hits, exclusion, last good generation, lock, a `kill -9`, merging, and
+exclusion-only generations: a fresh store's sole failing pipeline, a failing sole delta after a publish,
+a failed exclusion-only publish retried).

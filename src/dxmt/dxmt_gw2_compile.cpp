@@ -138,8 +138,13 @@ constexpr uint32_t kKeepSessions = 4;
 constexpr uint32_t kMaxPipelines = 8192;
 constexpr auto kFlushPeriod = std::chrono::seconds(30); // gw2 (#52): was 120; a kill loses less
 
+// gw2 (#75): =1 (exactly; off by default), with DXMT_PSO_ARCHIVE=1: the generation publisher and the
+// exact-shape failure policy instead of one file per session. Read once, by psoArchiveInit.
+sw::Switch<bool> kPsoGenerations{"DXMT_PSO_GENERATIONS", false, sw::legacy::exactlyOne};
+
 struct ArchiveState {
   std::atomic<bool> on = false;
+  std::atomic<uint64_t> mode = 0; // gw2 (#75): WMTPSOArchiveStats::mode once the archives are on
   std::atomic<uint64_t> built = 0;
   dxmt::mutex mutex;
   dxmt::condition_variable cond;
@@ -202,9 +207,29 @@ archiveSection() {
       d(s.miss_new, a.last.miss_new), d(s.miss_known, a.last.miss_known), d(s.added, a.last.added), s.queued,
       s.unflushed, s.add_failed, s.capped, s.skipped, s.rebuilds
   );
+  if (s.mode) // gw2 (#75): generations only
+    text += std::format(
+        " gen={} published={} excluded={} missexcl={}", s.generation, s.published, s.excluded,
+        d(s.miss_excluded, a.last.miss_excluded)
+    );
   a.last = s;
   return text;
 }
+
+// gw2 (#75): the startup line's DXMT_PSO_GENERATIONS: 1 in use, lookup (another process writes the
+// store), unused (asked for, but the archives are off or failed), 0 not asked for
+sw::Effective kPsoGenerationsLine{"DXMT_PSO_GENERATIONS", [] {
+  if (!kPsoGenerations())
+    return std::string("0");
+  switch (archive().mode.load(std::memory_order_acquire)) {
+  case 1:
+    return std::string("1");
+  case 2:
+    return std::string("lookup");
+  default:
+    return std::string("unused");
+  }
+}};
 
 // The window's waits, drained once per cause (#46): `wait=` is their sum, so it always equals the
 // `waitcause=` breakdown, whatever window a wait finishing during the drain lands in.
@@ -483,11 +508,15 @@ psoArchiveInit(uint64_t mtl_device) {
     config.base_dir.set(dir.empty() ? nullptr : dir.c_str());
     config.keep_sessions = kKeepSessions;
     config.max_pipelines = kMaxPipelines;
+    config.generations = kPsoGenerations() ? 1 : 0; // gw2 (#75)
     std::string report(8192, '\0');
     bool on = WMTPSOArchiveInit(mtl_device, &config, report.data(), report.size());
     logReport(report.c_str());
     if (!on)
       return;
+    WMTPSOArchiveStats s = {}; // gw2 (#75): which mode the unix side runs
+    WMTPSOArchiveQuery(&s);
+    a.mode.store(s.mode, std::memory_order_release);
     a.on.store(true, std::memory_order_release);
     Logger::info(str::format(
         "PSO archive: flushing every ", settings.flush_every, " new pipelines, every ",
