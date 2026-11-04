@@ -76,6 +76,25 @@ struct pso_record {
 };
 static struct pso_record *g_rec;
 static uint64_t g_rec_count, g_rec_cap;
+/* g_current's pipelines in its own order (what Metal's "pipeline no. N" counts): record indices */
+static uint64_t *g_map;
+static uint64_t g_map_count, g_map_cap;
+/* g_current still holds a pipeline marked skipped: the next flush rebuilds before writing */
+static bool g_current_dirty;
+
+static bool
+pso_map_push(uint64_t **map, uint64_t *count, uint64_t *cap, uint64_t rec) {
+  if (*count == *cap) {
+    uint64_t ncap = *cap ? *cap * 2 : 256;
+    uint64_t *grown = realloc(*map, ncap * sizeof(uint64_t));
+    if (!grown)
+      return false;
+    *map = grown;
+    *cap = ncap;
+  }
+  (*map)[(*count)++] = rec;
+  return true;
+}
 static uint64_t *g_known;  /* open addressing, 0 = empty (a key of 0 is stored as 1) */
 static uint64_t g_known_mask;
 static _Atomic uint64_t g_miss_known, g_miss_new, g_skipped, g_rebuilds;
@@ -99,6 +118,16 @@ fnv_str(uint64_t h, NSString *s) {
   return fnv(h, u, strlen(u) + 1);
 }
 
+/* a function's identity: its name, or the label the bridge gives a function made with constant
+   values ("<name>#c<hash of the values>", _MTLLibrary_newFunctionWithConstants) */
+static NSString *
+pso_fn_id(id<MTLFunction> fn) {
+  if (!fn)
+    return nil;
+  NSString *label = fn.label;
+  return label.length ? label : fn.name;
+}
+
 /* the stable key of a pipeline descriptor (render or compute), and optionally its shape */
 static uint64_t
 pso_key(id desc, bool compute, char *shape, size_t shape_size) {
@@ -106,18 +135,23 @@ pso_key(id desc, bool compute, char *shape, size_t shape_size) {
   if (compute) {
     MTLComputePipelineDescriptor *d = desc;
     h = fnv(h, "C", 1);
-    h = fnv_str(h, d.computeFunction.name);
+    h = fnv_str(h, pso_fn_id(d.computeFunction));
     FNV_U(h, d.threadGroupSizeIsMultipleOfThreadExecutionWidth);
     FNV_U(h, d.supportIndirectCommandBuffers);
     for (unsigned i = 0; i < 31; i++)
       FNV_U(h, d.buffers[i].mutability);
     if (shape)
-      snprintf(shape, shape_size, "compute cs=%s", d.computeFunction.name.UTF8String ?: "-");
+      snprintf(shape, shape_size, "compute cs=%s", pso_fn_id(d.computeFunction).UTF8String ?: "-");
   } else {
     MTLRenderPipelineDescriptor *d = desc;
     h = fnv(h, "R", 1);
-    h = fnv_str(h, d.vertexFunction.name);
-    h = fnv_str(h, d.fragmentFunction.name);
+    h = fnv_str(h, pso_fn_id(d.vertexFunction));
+    h = fnv_str(h, pso_fn_id(d.fragmentFunction));
+    /* logic operation: only through private selectors; included when the descriptor has them */
+    if ([d respondsToSelector:@selector(logicOperationEnabled)] && [d respondsToSelector:@selector(logicOperation)]) {
+      FNV_U(h, [[(id)d valueForKey:@"logicOperationEnabled"] unsignedLongLongValue]);
+      FNV_U(h, [[(id)d valueForKey:@"logicOperation"] unsignedLongLongValue]);
+    }
     char colors[96] = "";
     size_t cl = 0;
     for (unsigned i = 0; i < 8; i++) {
@@ -151,7 +185,7 @@ pso_key(id desc, bool compute, char *shape, size_t shape_size) {
     }
     if (shape)
       snprintf(shape, shape_size, "render vs=%s fs=%s colors=[%s] depth=%lu stencil=%lu samples=%lu raster=%d topology=%lu",
-               d.vertexFunction.name.UTF8String ?: "-", d.fragmentFunction.name.UTF8String ?: "none", colors,
+               pso_fn_id(d.vertexFunction).UTF8String ?: "-", pso_fn_id(d.fragmentFunction).UTF8String ?: "none", colors,
                (unsigned long)d.depthAttachmentPixelFormat, (unsigned long)d.stencilAttachmentPixelFormat,
                (unsigned long)d.rasterSampleCount, (int)d.rasterizationEnabled, (unsigned long)d.inputPrimitiveTopology);
   }
@@ -369,26 +403,49 @@ pso_failed_index(const char *why) {
   return p ? strtol(p + 14, NULL, 10) : -1;
 }
 
-/* gw2 (#52): a fresh archive with every recorded pipeline that isn't skipped; nil if it can't be
- * made. Adding recompiles each pipeline's backend code, served mostly by Metal's shader cache. */
+/* gw2 (#52): a fresh archive with every recorded pipeline that isn't skipped, and its order (`map`,
+ * record indices). nil if it can't be made or if any re-add fails: a partial archive must never
+ * replace the current one, whose keys and counts claim every recorded pipeline. Adding recompiles
+ * each pipeline's backend code, served mostly by Metal's shader cache. */
 static id<MTLBinaryArchive>
-pso_rebuild(id<MTLDevice> device, uint64_t *readded) {
+pso_rebuild(id<MTLDevice> device, uint64_t **map, uint64_t *map_count, uint64_t *map_cap, const char **why) {
   NSError *err = nil;
   MTLBinaryArchiveDescriptor *cd = [[MTLBinaryArchiveDescriptor alloc] init];
   id<MTLBinaryArchive> fresh = [device newBinaryArchiveWithDescriptor:cd error:&err];
   [cd release];
-  if (!fresh)
+  *map_count = 0;
+  if (!fresh) {
+    *why = "cannot create an archive";
     return nil;
-  uint64_t n = 0;
+  }
   for (uint64_t i = 0; i < g_rec_count; i++) {
     if (g_rec[i].skipped)
       continue;
     BOOL ok = g_rec[i].compute ? [fresh addComputePipelineFunctionsWithDescriptor:g_rec[i].desc error:&err]
                                : [fresh addRenderPipelineFunctionsWithDescriptor:g_rec[i].desc error:&err];
-    n += ok;
+    if (!ok || !pso_map_push(map, map_count, map_cap, i)) {
+      *why = ok ? "out of memory" : "a pipeline could not be added again";
+      [fresh release];
+      return nil;
+    }
   }
-  *readded = n;
   return fresh;
+}
+
+/* gw2 (#52): marks the record behind position `idx` of an archive's order (`map`) as skipped; its
+ * shape into `shape`; false if `idx` isn't a recorded pipeline */
+static bool
+pso_skip_named(long idx, const uint64_t *map, uint64_t map_count, char *shape, size_t shape_size) {
+  if (idx < 0 || (uint64_t)idx >= map_count)
+    return false;
+  struct pso_record *rec = &g_rec[map[idx]];
+  pso_key(rec->desc, rec->compute, shape, shape_size);
+  if (!rec->skipped) {
+    rec->skipped = true;
+    atomic_fetch_add(&g_skipped, 1);
+  }
+  g_current_dirty = true;
+  return true;
 }
 
 static id<MTLDevice> g_device;
@@ -408,38 +465,52 @@ pso_flush_locked(struct report *r) {
   uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
   uint64_t size = 0;
   char why[1024];
-  const char *failed = pso_write_archive(g_current, &size, why, sizeof(why));
+  /* an earlier failed retry left skipped pipelines in g_current: don't publish them, rebuild */
+  const char *failed = g_current_dirty ? "the current archive still holds pipelines left out after an earlier failure"
+                                       : pso_write_archive(g_current, &size, why, sizeof(why));
   const char *retried = "";
   char retry_note[2048] = "";
   if (failed) {
-    /* gw2 (#52): say which pipeline Metal named, then rebuild without it and try once more */
-    long idx = pso_failed_index(failed);
+    /* gw2 (#52): say which pipeline Metal named (in g_current's own order), then rebuild without it
+     * and try once more. A failing retry's named pipeline is skipped too, for the next flush. */
+    bool dirty = g_current_dirty;
+    long idx = dirty ? -1 : pso_failed_index(failed);
     char shape[512] = "not a recorded pipeline";
-    if (idx >= 0 && (uint64_t)idx < g_rec_count && !g_rec[idx].skipped) {
-      pso_key(g_rec[idx].desc, g_rec[idx].compute, shape, sizeof(shape));
-      g_rec[idx].skipped = true;
-      atomic_fetch_add(&g_skipped, 1);
-    }
-    report_line(r, "PSO archive: flush of %s failed: %s", g_path.lastPathComponent.UTF8String, failed);
+    pso_skip_named(idx, g_map, g_map_count, shape, sizeof(shape));
+    if (dirty)
+      report_line(r, "PSO archive: rebuilding %s without the pipelines left out after an earlier failure",
+                  g_path.lastPathComponent.UTF8String);
+    else
+      report_line(r, "PSO archive: flush of %s failed: %s", g_path.lastPathComponent.UTF8String, failed);
     if (idx >= 0)
-      report_line(r, "PSO archive: Metal names pipeline no. %ld; this session's pipeline no. %ld is: %s (left out "
-                  "of the archive from now on)",
-                  idx, idx, shape);
-    uint64_t readded = 0;
-    id<MTLBinaryArchive> fresh = g_device ? pso_rebuild(g_device, &readded) : nil;
+      report_line(r, "PSO archive: Metal names pipeline no. %ld: %s (left out of the archive from now on)", idx, shape);
+    uint64_t *fmap = NULL, fcount = 0, fcap = 0;
+    const char *rebuild_why = "no device";
+    id<MTLBinaryArchive> fresh = g_device ? pso_rebuild(g_device, &fmap, &fcount, &fcap, &rebuild_why) : nil;
     char why2[1024];
-    const char *failed2 = fresh ? pso_write_archive(fresh, &size, why2, sizeof(why2)) : "cannot create an archive";
+    const char *failed2 = fresh ? pso_write_archive(fresh, &size, why2, sizeof(why2)) : rebuild_why;
     if (!failed2) {
       [g_current release];
       g_current = fresh;
+      g_current_dirty = false;
+      free(g_map);
+      g_map = fmap;
+      g_map_count = fcount;
+      g_map_cap = fcap;
       atomic_fetch_add(&g_rebuilds, 1);
       snprintf(retry_note, sizeof(retry_note), " (rebuilt with %llu pipelines after a failed flush)",
-               (unsigned long long)readded);
+               (unsigned long long)fcount);
       retried = retry_note;
       failed = NULL;
     } else {
+      long idx2 = fresh ? pso_failed_index(failed2) : -1;
+      char shape2[512] = "";
+      if (fresh && pso_skip_named(idx2, fmap, fcount, shape2, sizeof(shape2)))
+        report_line(r, "PSO archive: the rebuilt archive's pipeline no. %ld failed too: %s (left out from the next flush)",
+                    idx2, shape2);
       [fresh release];
-      snprintf(retry_note, sizeof(retry_note), "%s; the rebuilt archive failed too: %s", failed, failed2);
+      free(fmap);
+      snprintf(retry_note, sizeof(retry_note), "%s; the rebuild failed too: %s", failed, failed2);
       failed = retry_note;
     }
   }
@@ -509,6 +580,7 @@ pso_queue_add(id desc, bool compute, uint64_t key) {
           g_rec[g_rec_count].desc = [desc retain];
           g_rec[g_rec_count].compute = compute;
           g_rec[g_rec_count].skipped = false;
+          pso_map_push(&g_map, &g_map_count, &g_map_cap, g_rec_count);
           g_rec_count++;
         }
       } else {
