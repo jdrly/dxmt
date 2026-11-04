@@ -168,7 +168,7 @@ CommandQueue::CommandQueue(WMT::Device device) :
   event = device.newSharedEvent();
   // gw2 (#29): the device's residency set on this queue (DXMT_RESIDENCY_SET); logs once per queue
   gw2::residencyAttachQueue(device, commandQueue);
-  // gw2 (#32): DXMT_METAL4, decided once per process; with it unset or 0 this does nothing
+  // gw2 (#32): DXMT_METAL4 (on by default), decided once per process; with it =0 this does nothing
   gw2::metal4AttachQueue(device);
   if (gw2::metal4Active()) {
     auto mtl4 = std::make_unique<gw2::Mtl4Queue>(device, chunk_count_);
@@ -179,7 +179,7 @@ CommandQueue::CommandQueue(WMT::Device device) :
     else {
       mtl4_ = std::move(mtl4);
       Logger::info(str::format(
-          "Metal 4: on (DXMT_METAL4=1): this device's chunks go to an MTL4CommandQueue, with ", chunk_count_,
+          "Metal 4: on (DXMT_METAL4=1, the default): this device's chunks go to an MTL4CommandQueue, with ", chunk_count_,
           " command allocators (one per chunk slot) and commit feedback"
       ));
     }
