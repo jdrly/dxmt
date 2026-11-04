@@ -5,6 +5,8 @@ winemetal_unix_src = files(
   'winemetal_unix.c',
   'cache.c',
   'pso_archive.c',
+  'pso_archive_policy.c', # gw2 (#75)
+  'pso_archive_publish.c', # gw2 (#75)
   'mtl4.c', # gw2 (#32)
   'mtl4fx.c', # gw2 (#56)
 )
