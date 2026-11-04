@@ -1,3 +1,6 @@
+// gw2-test: pure
+// gw2-build: clang++ -std=c++20 -Isrc/util/log tests/gw2/log_split_test.cpp -o $OUT
+//
 // gw2 (#43): host-side test of the logger's split for Wine's debug output (splitLogLine,
 // forEachLogLine, writeWineLine). The fake below copies ntdll's __wine_dbg_output and append_output
 // (dlls/ntdll/thread.c, CX 26.3): a 1020-byte per-thread buffer that raises STATUS_BUFFER_OVERFLOW

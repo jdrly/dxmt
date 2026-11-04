@@ -1,3 +1,7 @@
+// gw2-test: metal
+// gw2-build: for arch in x86_64 arm64; do clang -x objective-c -std=gnu17 -fblocks -fno-objc-arc -O1 -arch $arch -mmacosx-version-min=26.0 -Isrc/winemetal -Isrc/winemetal/unix -Isrc/airconv src/winemetal/unix/mtl4fx.c tests/gw2/mtl4fx_test.m -framework Metal -framework MetalFX -framework Foundation -o ${OUT}_$arch; done
+// gw2-run: ${OUT}_x86_64 && MTL_DEBUG_LAYER=1 ${OUT}_arm64
+//
 // gw2 (#56): native test of the Subsample MetalFX bridge (src/winemetal/unix/mtl4fx.c, slots 190-192).
 // It calls the bridge's unix entry points directly, as winemetal.so does for the PE side: no Wine, no
 // game, no window. Not part of the build; run it on the Mac:

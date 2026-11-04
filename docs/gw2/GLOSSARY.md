@@ -26,3 +26,34 @@ _Avoid_: hot reload
 
 **Control file**:
 The file named by `DXMT_CONTROL` that carries live overrides.
+
+### Compile service
+
+**Compile job**:
+The one build of a shader variant or pipeline for a key; queued, running, parked, building, complete
+or failed. Its record (state, what it is parked on, and with `DXMT_STATS` its timeline) belongs to the
+compile service.
+_Avoid_: task, ThreadpoolWork, work item
+
+**Demand**:
+A thread blocking on a compile job because it needs the result now (`compile::demand`).
+_Avoid_: stall, wait (alone)
+
+**Wait cause**:
+What a demanded job was doing when the demand began (`waitcause` in COMPILE).
+_Avoid_: wait reason
+
+**Warming**:
+Preparing variants and pipelines before they are demanded; its jobs are **speculative**.
+_Avoid_: prewarm, preload
+
+**Pipeline recipe**:
+The complete, explicit inputs a pipeline is built from (W1 records them).
+_Avoid_: PSO desc, descriptor (that is Metal's object)
+
+**Stable key**:
+A key computed from content, the same in every process.
+_Avoid_: hash (alone), persisted key
+
+**Variant**:
+One translation of a shader for one set of translation inputs.

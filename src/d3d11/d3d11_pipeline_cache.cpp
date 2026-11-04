@@ -6,7 +6,7 @@
 #include "dxmt_gw2_compile.hpp"
 #include "dxmt_gw2_recipe.hpp"
 #include "dxmt_shader_cache.hpp"
-#include "dxmt_tasks.hpp"
+#include "dxmt_compile_service.hpp"
 #include "log/log.hpp"
 #include "dxmt_gw2_subsample.hpp" // gw2 (#56)
 #include "sha1/sha1_util.hpp"
@@ -178,20 +178,12 @@ private:
   MTLD3D10InputLayout d3d10;
 };
 
-template <> struct task_trait<ThreadpoolWork *> {
-  ThreadpoolWork *run_task(ThreadpoolWork *task) {
-    gw2::compileTraceRun(task->compile_trace); // gw2 (#46)
-    auto next = task->RunThreadpoolWork();
-    if (next != task)
-      gw2::compileTraceParked(task->compile_trace, &next->compile_trace); // gw2 (#46)
-    return next;
-  }
-  bool get_done(ThreadpoolWork *task) { return task->GetIsDone(); }
-  void set_done(ThreadpoolWork *task) {
-    gw2::compileTraceDone(task->compile_trace); // gw2 (#46): before the waiter wakes
-    task->SetIsDone(true);
-  }
-  void on_submit(ThreadpoolWork *task) { gw2::compileTraceSubmit(task->compile_trace); } // gw2 (#46)
+// gw2 (C1): how the compile service drives DXMT's compile jobs (the service stamps their records)
+template <> struct compile::JobTraits<ThreadpoolWork *> {
+  ThreadpoolWork *run(ThreadpoolWork *job) { return job->RunThreadpoolWork(); }
+  bool done(ThreadpoolWork *job) { return job->GetIsDone(); }
+  void setDone(ThreadpoolWork *job) { job->SetIsDone(true); }
+  compile::JobRecord &record(ThreadpoolWork *job) { return job->compile_job; }
 };
 
 class PipelineCache : public MTLD3D11PipelineCacheBase {
@@ -320,7 +312,7 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
 
   ShaderCache& scache_;
 
-  task_scheduler<ThreadpoolWork *> scheduler_;
+  compile::Service<ThreadpoolWork *> scheduler_; // gw2 (C1): the compile service, legacy policy
 
   MTLD3D11Device *device;
   StateObjectCache<D3D11_BLEND_DESC1, IMTLD3D11BlendState> blend_states;

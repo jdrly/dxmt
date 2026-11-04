@@ -360,7 +360,10 @@ longest wait's pipeline task, ms, `-` where not known:
 
 The stamps (#46) cost one clock read per task submission, start, park, build and completion, and
 only with `DXMT_STATS`; a wait also reads the archive's counters once (a unix call) when the
-archives are on.
+archives are on. Since C1 the compile service (`src/dxmt/dxmt_compile_service.hpp`) owns the tasks'
+records: their state (queued, running, parked, building, complete, and what a task is parked on) is
+kept with `DXMT_STATS` off too, a few atomic stores per task; the timestamps and the classification
+above are unchanged and still need `DXMT_STATS` from the task's submission.
 
 **PSO archives** (`DXMT_PSO_ARCHIVE=1`, off by default). Metal binary archives
 (`MTLBinaryArchive`), managed on the unix side of the bridge (`src/winemetal/unix/pso_archive.c`,
@@ -918,3 +921,21 @@ At `Draw`, `DrawIndexed`, and `DrawInstanced`/`DrawIndexedInstanced` with one in
 | `SUBSAMPLE: MetalFX refused format F WxH -> WxH (…); not upscaled`, `SUBSAMPLE: MetalFX spatial scaling isn't supported on this device (…); not upscaled` | Once per shape (errors); that shape is then rejected as `metalfx` |
 | `SUBSAMPLE: 64 candidate shapes logged; no more candidate lines` | Once |
 
+## Native tests
+
+`tests/gw2/run.zsh [pure|metal|all] [--meson <build dir>]` (X1) builds and runs every registered test
+under `tests/gw2/`, on the Mac, with no Wine and no game. A test registers in its header:
+`// gw2-test: pure` (no Metal device) or `metal`, one or more `// gw2-build:` lines (zsh, from the
+checkout's root, writing `$OUT`) and optional `// gw2-run:` lines (default `"$OUT"`). A failed build or
+a nonzero exit fails the run; exit 77 is *skipped*, never counted as passed; a test without the lines
+is listed as unregistered. `--meson <build>/x64` adds the meson tests of the `gw2` suite (B1's
+`bridge-native-smoke`). Native tests take their threads from `tests/gw2/shim/thread.hpp` (X2):
+`dxmt::thread`, `mutex` and `condition_variable` are `std::`'s and priorities are no-ops, so a test
+checks coordination, not Wine's scheduling.
+
+`compile_service_test.cpp` (C1) holds the compile service's legacy parity fixture: scripted job graphs
+(GW2-shaped bursts of pipelines sharing variants, parking, failures, the spurious-dependency rerun,
+growth to 2 × CPUs) run against the service and against the scheduler it replaced
+(`tests/gw2/fixtures/legacy_task_scheduler.hpp`, unchanged), with every worker's job held at a gate
+and released one at a time; the traces (which jobs run, what they return, the worker count) must be
+identical.
