@@ -26,7 +26,7 @@
 //   pipeline's constructor already holds); a job with unfinished dependencies waits, unqueued, and
 //   becomes runnable when the last completes, so no worker runs it just to park it. A dependency the
 //   service doesn't know (never submitted) isn't waited for: the job runs and parks on it as before;
-// - lanes: a demand queue first, then released parked jobs (the legacy continuations), then normal
+// - lanes: a demand queue first, then released parked jobs (as legacy's continuations), then normal
 //   FIFO, then speculative jobs (warming, W2/W3): at most one speculative job runs at a time, and none
 //   starts while a demand is pending;
 // - a demand promotes the job and its unfinished dependency closure, once each: a queued job moves to
@@ -208,7 +208,8 @@ private:
   std::unordered_map<const JobRecord *, Job> by_record_; // the same jobs, by record (demand)
   // demanded dependencies not submitted yet (by record): promoted when they are
   std::unordered_set<const JobRecord *> promote_on_submit_;
-  std::deque<Job> demand_q_, normal_q_, speculative_q_;
+  // released_q_: normal jobs a completion released from a park (legacy's continuations, searchable)
+  std::deque<Job> demand_q_, released_q_, normal_q_, speculative_q_;
   uint64_t demands_ = 0;           // demands waiting now
   uint32_t speculative_running_ = 0;
 
@@ -401,7 +402,7 @@ Service<Job, Traits>::promote(Job job) {
   gw2::compilePromoted(); // gw2 (C2)
   if (node.runnable) {
     // queued: move it to the demand queue (running: it finishes as it is)
-    for (auto *q : {&normal_q_, &speculative_q_}) {
+    for (auto *q : {&released_q_, &normal_q_, &speculative_q_}) {
       if (auto pos = std::find(q->begin(), q->end(), job); pos != q->end()) {
         q->erase(pos);
         demand_q_.push_back(job);
@@ -433,7 +434,7 @@ Service<Job, Traits>::promoteRecord(const JobRecord *record) {
 
 // A parked job its dependency released: back by its lane (worker_mutex_ held). A promoted job goes
 // to the demand queue, a speculative one through speculative admission again, a normal one to the
-// continuations (taken before the normal FIFO, as legacy does).
+// released queue (taken before the normal FIFO, as legacy's continuations are).
 template <typename Job, typename Traits>
 void
 Service<Job, Traits>::release(Job job) {
@@ -443,7 +444,7 @@ Service<Job, Traits>::release(Job job) {
   else if (it != nodes_.end() && it->second.lane == Lane::Speculative)
     speculative_q_.push_back(job);
   else
-    continuations_.push(job);
+    released_q_.push_back(job);
 }
 
 template <typename Job, typename Traits>
@@ -472,7 +473,7 @@ Service<Job, Traits>::endDemand() {
 template <typename Job, typename Traits>
 bool
 Service<Job, Traits>::takeable() const {
-  return !demand_q_.empty() || !continuations_.empty() || !normal_q_.empty() ||
+  return !demand_q_.empty() || !released_q_.empty() || !normal_q_.empty() ||
          (!speculative_q_.empty() && demands_ == 0 && speculative_running_ == 0);
 }
 
@@ -492,9 +493,9 @@ Service<Job, Traits>::workerLoopDeclared() {
       if (!demand_q_.empty()) {
         job = demand_q_.front();
         demand_q_.pop_front();
-      } else if (!continuations_.empty()) {
-        job = continuations_.front();
-        continuations_.pop();
+      } else if (!released_q_.empty()) {
+        job = released_q_.front();
+        released_q_.pop_front();
       } else if (!normal_q_.empty()) {
         job = normal_q_.front();
         normal_q_.pop_front();

@@ -27,6 +27,7 @@ bool compileTiming() { return false; }
 int64_t compileNowNs() { return 0; }
 CompileWaitScope::CompileWaitScope(const compile::JobRecord *) {}
 CompileWaitScope::~CompileWaitScope() {}
+void compilePromoted() {} // C2
 } // namespace dxmt::gw2
 
 struct Job {
@@ -38,6 +39,7 @@ template <> struct dxmt::compile::JobTraits<Job *> {
   bool done(Job *) { return true; }
   void setDone(Job *) {}
   compile::JobRecord &record(Job *job) { return job->record; }
+  void deps(Job *, std::vector<Job *> &) {} // C2: none
 };
 
 int

@@ -876,12 +876,10 @@ declaredLateSpeculativeDependency() {
   sched.submit(p);
   gatedNow(gate, 2);
   auto a = releaseJob(gate, 1); // P parks on the unknown D
+  gw2::g_promoted_count = 0;
   std::thread demander([&] { compile::demand(p->record, p->ready); });
-  while (true) {
-    std::lock_guard<std::mutex> l(g_waits_mutex);
-    if (!g_waits.empty() && g_waits.back().state == compile::JobState::Parked)
-      break;
-  }
+  while (gw2::g_promoted_count.load() < 1) // the demand has promoted P (and registered D)
+    std::this_thread::yield();
   sched.submit(d, compile::Lane::Speculative);
   auto g = gatedNow(gate, 2);
   CHECK_OR_EXIT(g == std::set<int>({0}), "late dependency: the demand reaches the speculative dependency (gated %s)",
@@ -962,6 +960,72 @@ declaredSpeculativeResume() {
               failures ? "?   " : "ok  ");
 }
 
+// #74 re-review, High: a normal job released from a park, queued behind another released job, is
+// promoted ahead of it when demanded. One worker: three jobs park on U; U completes and releases
+// them; the first runs (gated); a demand on the last queued one must run it before the middle one.
+static std::vector<std::string>
+releasedOrder(int demand_rank) {
+  Scenario sc;
+  sc.add(); // 0: U, submitted after its dependents
+  for (int i = 0; i < 3; i++)
+    sc.add({0}); // 1-3: normal jobs that park on U
+  Gate gate;
+  for (auto &j : sc.jobs)
+    j->gate = &gate;
+  std::vector<std::string> order;
+  compile::Service<FakeJob *> sched(declared(1, 1));
+  for (int i = 1; i <= 3; i++) {
+    sched.submit(sc.jobs[i].get());
+    gatedNow(gate, 1);
+    releaseJob(gate, i); // parks on U
+  }
+  sched.submit(sc.jobs[0].get());
+  gatedNow(gate, 1);
+  order.push_back(releaseJob(gate, 0)); // U done: 1-3 released
+  auto first = gatedNow(gate, 1);       // the first released job runs (gated)
+  std::thread demander;
+  std::vector<int> rest;
+  for (int i = 1; i <= 3; i++)
+    if (!first.count(i))
+      rest.push_back(i);
+  if (demand_rank >= 0) {
+    auto *target = sc.jobs[demand_rank].get();
+    gw2::g_promoted_count = 0;
+    demander = std::thread([target] { compile::demand(target->record, target->ready); });
+    while (gw2::g_promoted_count.load() < 1)
+      std::this_thread::yield();
+  }
+  for (int step = 0; step < 3; step++) {
+    auto g = gatedNow(gate, 1);
+    if (g.empty())
+      break;
+    order.push_back(releaseJob(gate, *g.begin()));
+  }
+  if (demander.joinable())
+    demander.join();
+  return order;
+}
+
+static void
+declaredPromoteReleased() {
+  auto plain = releasedOrder(-1); // U, then the released jobs in their queue order
+  CHECK(plain.size() == 4, "released: %zu outcomes", plain.size());
+  if (plain.size() != 4)
+    return;
+  int last = std::stoi(plain[3]); // the job queued last ("N->done")
+  int middle = std::stoi(plain[2]);
+  auto demanded = releasedOrder(last);
+  std::string want = plain[0] + " " + plain[1] + " " + plain[3] + " " + plain[2];
+  std::string got;
+  for (auto &o : demanded)
+    got += (got.empty() ? "" : " ") + o;
+  bool ok = got == want;
+  CHECK(ok, "released: demanding job %d queued behind %d runs it first: want %s, got %s", last, middle, want.c_str(),
+        got.c_str());
+  std::printf("%s declared, a demanded released job is promoted past the other released ones: %s\n", ok ? "ok  " : "FAIL",
+              got.c_str());
+}
+
 int
 main() {
   parity("chain", chain);
@@ -984,6 +1048,7 @@ main() {
   declaredUnknownDependency();
   declaredLateSpeculativeDependency();
   declaredSpeculativeResume();
+  declaredPromoteReleased();
   declaredStress();
   std::printf(failures ? "%d FAILED\n" : "all passed\n", failures);
   return failures ? 1 : 0;
