@@ -67,9 +67,9 @@ main(void) {
   CHECK(WMTCall_MTL4CommandEncoder_barrier == 178);
   CHECK(WMTReserved_179 == 179 && WMTReserved_189 == 189);
   CHECK(WMTCall_MTLDevice_supportsMetal4FX == 190);
-  CHECK(WMTReserved_193 == 193 && WMTReserved_199 == 199); // lane C (#64)
+  CHECK(WMTCall_CacheEnumerate == 193 && WMTReserved_194 == 194 && WMTReserved_199 == 199); // lane C (#64; 193: W2/W3)
   CHECK(WMTCall_Count == 200);
-  CHECK(calls == 181 && reserved == 19 && wow64 == 9);
+  CHECK(calls == 182 && reserved == 18 && wow64 == 9);
 
 #ifdef DXMT_NATIVE
   // Through the real table: a handler at every call number, NULL at every reserved one
@@ -98,7 +98,7 @@ main(void) {
   // ... and holes: an error, where Wine's dispatcher would jump to NULL (each says so on stderr)
   CHECK(wmt_native_dispatch(WMTReserved_83, NULL) != 0);
   CHECK(wmt_native_dispatch(WMTReserved_179, NULL) != 0);
-  CHECK(wmt_native_dispatch(WMTReserved_193, NULL) != 0);
+  CHECK(wmt_native_dispatch(WMTReserved_194, NULL) != 0);
   CHECK(wmt_native_dispatch(WMTCall_Count, NULL) != 0);
   printf("real table: dispatched 5 calls by name, 4 holes refused\n");
 #endif

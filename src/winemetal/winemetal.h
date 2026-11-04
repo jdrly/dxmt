@@ -2031,6 +2031,14 @@ WINEMETAL_API obj_handle_t CacheWriter_alloc_init(const char *path, uint64_t ver
 
 WINEMETAL_API bool CacheWriter_set(obj_handle_t writer, const void *key, uint64_t key_length, obj_handle_t value);
 
+// gw2 (W2/W3): rows of a cache database (path and version as CacheReader_alloc_init's) whose key
+// starts with `prefix` (256: any), after `after_rowid`, packed into `buffer` as u32 key length, key,
+// u32 value length, value (little-endian). Returns the rows written; `last_rowid` is the next call's
+// after_rowid; `more` says rows remain. 0 rows and `more` false when the database or table is missing.
+WINEMETAL_API uint32_t CacheEnumerate(const char *path, uint64_t version, uint32_t prefix, uint64_t after_rowid,
+                                      void *buffer, uint64_t capacity, uint64_t *used, uint64_t *last_rowid,
+                                      bool *more);
+
 // gw2 (#57): the database file's size in bytes (page_count * page_size); 0 if unknown
 WINEMETAL_API uint64_t CacheWriter_byteSize(obj_handle_t writer);
 

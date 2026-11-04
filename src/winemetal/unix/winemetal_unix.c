@@ -3364,6 +3364,7 @@ NTSTATUS _CacheReader_alloc_init(void *obj);
 NTSTATUS _CacheReader_get(void *obj);
 NTSTATUS _CacheWriter_alloc_init(void *obj);
 NTSTATUS _CacheWriter_set(void *obj);
+NTSTATUS _CacheEnumerate(void *obj); /* gw2 (W2/W3) */
 NTSTATUS _WMTSetMetalShaderCachePath(void *obj);
 NTSTATUS _WMTGetMetalShaderCachePath(void *obj); /* gw2 (#46) */
 

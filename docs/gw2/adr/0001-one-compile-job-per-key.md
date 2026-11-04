@@ -18,7 +18,9 @@ kept by convention. The pointer-keyed front-end lookup stays as the fast path in
   demand waits). Owning jobs moved on to C4, with the stable keys that need them.
 - C3 adds the pipeline recipe (`compile::PipelineRecipe`, one canonical serializer shared with
   #57's recorder) and the builder port (`compile::PipelineBuilder`; the Metal 3 adapter builds every
-  plain graphics pipeline, a recording fake serves tests). Stable keys and shared results come with C4; warming (W2/W3) acquires speculative jobs through the
+  plain graphics pipeline, a recording fake serves tests). C4 adds the shared results (one owner per stable key; live jobs consult them first and park on a
+  warm owner) and W2/W3 the warm jobs, behind `DXMT_WARM` (off); owning jobs stay with the variant and
+  pipeline maps and the pipeline cache's warm list; warming (W2/W3) acquires speculative jobs through the
   service and keeps no queue or key table of its own.
 
 Source: GW2 on Mac `council/2026-11-04-arch-grill/final.md` §1 (ADR draft 0001).

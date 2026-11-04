@@ -7,6 +7,11 @@
 #include "dxmt_gw2_recipe.hpp"
 #include "dxmt_shader_cache.hpp"
 #include "dxmt_compile_service.hpp"
+#include <chrono>
+#include "winemetal.h"
+#include "util_string.hpp"
+#include "dxmt_compile_recipe.hpp"
+#include "dxmt_gw2_warm.hpp"
 #include "log/log.hpp"
 #include "dxmt_gw2_subsample.hpp" // gw2 (#56)
 #include "sha1/sha1_util.hpp"
@@ -190,6 +195,10 @@ template <> struct compile::JobTraits<ThreadpoolWork *> {
 class PipelineCache : public MTLD3D11PipelineCacheBase {
 
   class CachedSM50Shader final : public Shader {
+  public:
+    SharedResults *shared_results() final { return cache->shared_.get(); } // gw2 (C4)
+
+  private:
     PipelineCache *cache;
     sm50_shader_t shader = nullptr;
     Sha1Digest sha1_;
@@ -243,7 +252,9 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
             },
             variant);
         gw2::compileVariantNew(); // gw2 (#5)
-        cache->scheduler_.submit(c.first->second.get());
+        // gw2 (#88): a function already in the shared results needs no job
+        if (!cache->shared_ || !c.first->second->CompleteFromShared(cache->shared_.get()))
+          cache->scheduler_.submit(c.first->second.get());
       }
       return c.first->second.get();
     }
@@ -312,6 +323,193 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
   };
 
   ShaderCache& scache_;
+
+  // gw2 (C4, W2/W3): the shared results and the warm jobs; declared before the compile service, so
+  // they outlive its workers
+  std::unique_ptr<SharedResults> shared_;
+  std::vector<std::unique_ptr<ThreadpoolWork>> warm_jobs_; // the warm thread's, until destruction
+  std::atomic<bool> warm_stop_{false};
+  dxmt::thread warm_thread_;
+
+  // W2: a variant's function, from the AIR in the shader cache (never a translation)
+  class WarmVariantJob final : public ThreadpoolWork {
+  public:
+    WarmVariantJob(PipelineCache *cache, const gw2::WarmVariant &v)
+        : cache_(cache), id_{v.shader, v.variant}, name_(gw2::warmFunctionName(v)) {}
+    ThreadpoolWork *RunThreadpoolWork() final {
+      auto &table = cache_->shared_->variants;
+      WMT::Reference<WMT::Function> function;
+      ThreadpoolWork *owner = nullptr;
+      if (table.claim(id_, this, &function, &owner) != decltype(cache_->shared_->variants)::Claim::Mine) {
+        gw2::warmCount(gw2::WarmCounter::Skipped); // done or being built (by a live job)
+        return this;
+      }
+      auto pool = WMT::MakeAutoreleasePool();
+      WMT::Reference<WMT::DispatchData> data;
+      {
+        auto reader = cache_->scache_.getReader();
+        if (reader)
+          data = reader->get(std::make_pair(id_.shader, id_.variant));
+      }
+      if (data == nullptr) {
+        table.abandon(id_, this);
+        gw2::warmCount(gw2::WarmCounter::AirMiss);
+        return this;
+      }
+      WMT::Reference<WMT::Error> err;
+      auto library = cache_->device->GetMTLDevice().newLibrary(data, err);
+      if (library != nullptr && !err)
+        function = library.newFunction(name_.c_str());
+      if (function == nullptr) {
+        table.abandon(id_, this);
+        gw2::warmCount(gw2::WarmCounter::Failed);
+        return this;
+      }
+      table.publish(id_, this, function);
+      gw2::warmCount(gw2::WarmCounter::Functions);
+      return this;
+    }
+    bool GetIsDone() final { return ready_; }
+    void SetIsDone(bool state) final {
+      ready_.store(state);
+      ready_.notify_all();
+    }
+
+  private:
+    PipelineCache *cache_;
+    VariantId id_;
+    std::string name_;
+    std::atomic_bool ready_{false};
+  };
+
+  // W3: a recipe's pipeline, from its warm functions, through the pipeline builder (C3)
+  class WarmPipelineJob final : public ThreadpoolWork {
+  public:
+    WarmPipelineJob(PipelineCache *cache, const compile::PipelineRecipe &recipe, WarmVariantJob *vs,
+                    WarmVariantJob *ps)
+        : cache_(cache), recipe_(recipe), vs_job_(vs), ps_job_(ps) {}
+    void GetDependencies(std::vector<ThreadpoolWork *> &deps) final {
+      deps.push_back(vs_job_);
+      if (ps_job_)
+        deps.push_back(ps_job_);
+    }
+    ThreadpoolWork *RunThreadpoolWork() final {
+      auto &variants = cache_->shared_->variants;
+      using VClaim = decltype(cache_->shared_->variants)::Claim;
+      WMT::Reference<WMT::Function> vs, ps;
+      ThreadpoolWork *owner = nullptr;
+      switch (variants.find({recipe_.vs->shader, recipe_.vs->variant}, &vs, &owner)) {
+      case VClaim::Busy:
+        return owner; // a live job is making it
+      case VClaim::Mine:
+        gw2::warmCount(gw2::WarmCounter::NoFunctions);
+        return this;
+      case VClaim::Done:
+        break;
+      }
+      if (recipe_.ps) {
+        switch (variants.find({recipe_.ps->shader, recipe_.ps->variant}, &ps, &owner)) {
+        case VClaim::Busy:
+          return owner;
+        case VClaim::Mine:
+          gw2::warmCount(gw2::WarmCounter::NoFunctions);
+          return this;
+        case VClaim::Done:
+          break;
+        }
+      }
+      auto key = compile::recipeKey(recipe_);
+      auto &pipelines = cache_->shared_->pipelines;
+      WMT::Reference<WMT::RenderPipelineState> state;
+      if (pipelines.claim(key, this, &state, &owner) != decltype(cache_->shared_->pipelines)::Claim::Mine) {
+        gw2::warmCount(gw2::WarmCounter::Skipped);
+        return this;
+      }
+      auto pool = WMT::MakeAutoreleasePool();
+      WMT::Reference<WMT::Error> err;
+      state = compile::Metal3PipelineBuilder(cache_->device->GetMTLDevice())
+                  .build(recipe_, vs, recipe_.ps ? WMT::Function(ps) : WMT::Function{}, err);
+      if (state == nullptr) {
+        pipelines.abandon(key, this);
+        gw2::warmCount(gw2::WarmCounter::Failed);
+        return this;
+      }
+      pipelines.publish(key, this, state);
+      gw2::warmCount(gw2::WarmCounter::Pipelines);
+      return this;
+    }
+    bool GetIsDone() final { return ready_; }
+    void SetIsDone(bool state) final {
+      ready_.store(state);
+      ready_.notify_all();
+    }
+
+  private:
+    PipelineCache *cache_;
+    compile::PipelineRecipe recipe_;
+    WarmVariantJob *vs_job_, *ps_job_;
+    std::atomic_bool ready_{false};
+  };
+
+  // The warm thread: reads the recipes (first-use order, call 193), plans and submits speculative
+  // jobs. It never calls the logger (the WARM section reports it).
+  void warmThread() {
+    env::setThreadName("dxmt-warm");
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
+    auto t0 = std::chrono::steady_clock::now();
+    auto mode = gw2::warmMode();
+    auto max = gw2::warmMax();
+    uint32_t metal_version = uint32_t(device->GetDXMTDevice().metalVersion());
+    auto path = str::format("dxmt/", env::getExeName(), "/recipes_", gw2::kRecipeSchema, ".db");
+    gw2::WarmPlan plan;
+    std::vector<uint8_t> buffer(1 << 20);
+    uint64_t after = 0;
+    bool more = true;
+    while (more && !warm_stop_.load() && plan.recipes < max) {
+      uint64_t used = 0, last = after;
+      uint32_t n = CacheEnumerate(path.c_str(), gw2::kRecipeSchema, 'R', after, buffer.data(), buffer.size(), &used,
+                                  &last, &more);
+      for (uint64_t p = 0, i = 0; i < n && p + 8 <= used; i++) {
+        auto u32 = [&](uint64_t at) {
+          return uint32_t(buffer[at]) | uint32_t(buffer[at + 1]) << 8 | uint32_t(buffer[at + 2]) << 16 |
+                 uint32_t(buffer[at + 3]) << 24;
+        };
+        uint32_t key_length = u32(p);
+        uint32_t value_length = u32(p + 4 + key_length);
+        gw2::warmPlanAdd(plan, buffer.data() + p + 8 + key_length, value_length, metal_version, mode, max);
+        p += 8ull + key_length + value_length;
+      }
+      if (n == 0)
+        break;
+      after = last;
+    }
+    double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    gw2::warmPlanned(plan, ms);
+    std::vector<WarmVariantJob *> variant_jobs;
+    variant_jobs.reserve(plan.variants.size());
+    for (auto &v : plan.variants) {
+      auto job = std::make_unique<WarmVariantJob>(this, v);
+      variant_jobs.push_back(job.get());
+      warm_jobs_.push_back(std::move(job));
+    }
+    // in first-use order: each recipe's functions, then its pipeline (W3)
+    size_t next_variant = 0;
+    auto submitVariantsUpTo = [&](int index) {
+      for (; !warm_stop_.load() && next_variant <= size_t(index) && next_variant < variant_jobs.size();
+           next_variant++)
+        scheduler_.submit(variant_jobs[next_variant], compile::Lane::Speculative);
+    };
+    for (size_t i = 0; i < plan.pipelines.size() && !warm_stop_.load(); i++) {
+      auto [vs, ps] = plan.pipeline_variants[i];
+      submitVariantsUpTo(std::max(vs, ps));
+      auto job = std::make_unique<WarmPipelineJob>(this, plan.pipelines[i], variant_jobs[vs],
+                                                   ps >= 0 ? variant_jobs[ps] : nullptr);
+      auto *raw = job.get();
+      warm_jobs_.push_back(std::move(job));
+      scheduler_.submit(raw, compile::Lane::Speculative);
+    }
+    submitVariantsUpTo(int(variant_jobs.size()) - 1);
+  }
 
   // gw2 (C1): the compile service; C2: the declared policy with DXMT_COMPILE_DEMAND=1
   compile::Service<ThreadpoolWork *> scheduler_;
@@ -532,7 +730,9 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
     if (!inserted) {
       D3D11_ASSERT(0 && "duplicated graphics pipeline");
     } else {
-      scheduler_.submit(iter->second.get());
+      // gw2 (#88): a pipeline already in the shared results needs no job
+      if (!iter->second->CompleteFromShared())
+        scheduler_.submit(iter->second.get());
       gw2::psoCount(gw2::PsoCounter::New);
     }
     *ppPipeline = iter->second.get();
@@ -606,7 +806,10 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
 public:
   PipelineCache(MTLD3D11Device *pDevice) :
       scache_(ShaderCache::getInstance(pDevice->GetDXMTDevice().metalVersion())),
-      scheduler_(compile::Options{.policy = gw2::compileDemand() ? compile::Policy::Declared : compile::Policy::Legacy}),
+      // gw2 (C2): the declared policy with DXMT_COMPILE_DEMAND=1, and with warming (it needs the speculative lane)
+      scheduler_(compile::Options{.policy = gw2::compileDemand() || gw2::warmMode() != gw2::WarmMode::Off
+                                                ? compile::Policy::Declared
+                                                : compile::Policy::Legacy}),
       device(pDevice),
       blend_states(pDevice),
       so_layouts(pDevice) {
@@ -620,9 +823,22 @@ public:
 
     // gw2 (#5): DXMT_PSO_ARCHIVE=1 loads earlier sessions' pipeline archives (once per process)
     gw2::psoArchiveInit(pDevice->GetMTLDevice().handle);
+
+    // gw2 (W2/W3): DXMT_WARM: the shared results, and the warm thread that fills them
+    if (gw2::warmMode() != gw2::WarmMode::Off) {
+      shared_ = std::make_unique<SharedResults>();
+      warm_thread_ = dxmt::thread([this]() { warmThread(); });
+    }
   };
 
   ~PipelineCache() {
+    // gw2 (W2/W3): the warm thread stops submitting; its jobs go with the compile service
+    warm_stop_.store(true);
+    if (warm_thread_.joinable())
+      warm_thread_.join();
+    // gw2 (#88): then the compile workers, before any job owner goes (the shader and pipeline maps are
+    // destroyed before the service); jobs that never ran are settled, so no demand waits forever
+    scheduler_.stop();
     gw2::psoArchiveRequestFlush(); // gw2 (#5): non-blocking
   }
 };

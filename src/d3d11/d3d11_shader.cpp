@@ -5,6 +5,7 @@
 #include "d3d11_input_layout.hpp"
 #include "dxmt_gw2_compile.hpp"
 #include "dxmt_gw2_recipe.hpp"
+#include "dxmt_gw2_warm.hpp"
 #include "sha1/sha1_util.hpp"
 #include <mutex>
 
@@ -50,6 +51,34 @@ public:
 
   ThreadpoolWork *
   RunThreadpoolWork() {
+    // gw2 (C4): while warming is on, the shared results first: one build per stable key
+    auto *results = shader_->shared_results();
+    if (!results)
+      return Build();
+    VariantId id{shader_->sha1(), variant_digest_};
+    WMT::Reference<WMT::Function> function;
+    ThreadpoolWork *owner = nullptr;
+    switch (results->variants.claim(id, this, &function, &owner)) {
+    case decltype(results->variants)::Claim::Done:
+      function_ = function;
+      gw2::warmCount(gw2::WarmCounter::LiveVariantHit);
+      return this;
+    case decltype(results->variants)::Claim::Busy:
+      gw2::warmCount(gw2::WarmCounter::LiveJoin);
+      return owner; // a warm job builds it: park on it (a demand promotes it)
+    case decltype(results->variants)::Claim::Mine:
+      break;
+    }
+    Build();
+    if (function_ != nullptr)
+      results->variants.publish(id, this, function_);
+    else
+      results->variants.abandon(id, this);
+    return this;
+  }
+
+  ThreadpoolWork *
+  Build() {
     auto pool = WMT::MakeAutoreleasePool();
     auto t0 = gw2::compileClock(); // gw2 (#5): AIR cache hit/miss and build time for COMPILE
     WMT::Reference<WMT::Error> err;
@@ -107,6 +136,27 @@ public:
 
     gw2::compileShaderBuilt(t0);
     return this;
+  }
+
+  bool CompleteFromShared(SharedResults *results) final {
+    // gw2 (#88): a function already done (warm, or another job's) is taken now
+    WMT::Reference<WMT::Function> function;
+    ThreadpoolWork *owner = nullptr;
+    if (results->variants.find(VariantId{shader_->sha1(), variant_digest_}, &function, &owner) !=
+        decltype(results->variants)::Claim::Done)
+      return false;
+    function_ = function;
+    compile::completedWithoutRun(compile_job);
+    gw2::warmCount(gw2::WarmCounter::LiveVariantHit);
+    SetIsDone(true);
+    return true;
+  }
+
+  bool GetStableKey(Sha1Digest *pShader, Sha1Digest *pVariant) final {
+    // gw2 (C4): the AIR cache's key, always
+    *pShader = shader_->sha1();
+    *pVariant = variant_digest_;
+    return true;
   }
 
   bool GetIdentity(Sha1Digest *pShader, Sha1Digest *pVariant) final {

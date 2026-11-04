@@ -37,6 +37,7 @@ dxmt_src = [
   'dxmt_gw2_residency.cpp',
   'dxmt_gw2_lifetime.cpp',
   'dxmt_gw2_recipe.cpp',
+  'dxmt_gw2_warm.cpp',
   'dxmt_gw2_metal4.cpp',
   'dxmt_gw2_mtl4_queue.cpp',
   'dxmt_gw2_submission.cpp', # gw2 (#78)

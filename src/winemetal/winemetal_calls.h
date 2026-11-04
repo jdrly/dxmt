@@ -234,7 +234,7 @@ WMT_CALL(190, MTLDevice_supportsMetal4FX, _MTLDevice_supportsMetal4FX)
 WMT_CALL(191, MTLDevice_newGW2SpatialScaler, _MTLDevice_newGW2SpatialScaler)
 WMT_CALL(192, MTL4CommandBuffer_encodeSpatialScale, _MTL4CommandBuffer_encodeSpatialScale)
 /* reserved for lane C: shader warming and the compile service (jdrly/dxmt #64) */
-WMT_RESERVED(193, "lane C, jdrly/dxmt #64")
+WMT_CALL(193, CacheEnumerate, _CacheEnumerate) /* gw2 (W2/W3): the recipes, in batches */
 WMT_RESERVED(194, "lane C, jdrly/dxmt #64")
 WMT_RESERVED(195, "lane C, jdrly/dxmt #64")
 WMT_RESERVED(196, "lane C, jdrly/dxmt #64")

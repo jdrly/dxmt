@@ -1087,6 +1087,28 @@ CacheWriter_set(
   return params.ret_success != 0;
 }
 
+WINEMETAL_API uint32_t
+CacheEnumerate(const char *path, uint64_t version, uint32_t prefix, uint64_t after_rowid, void *buffer,
+               uint64_t capacity, uint64_t *used, uint64_t *last_rowid, bool *more) {
+  struct unixcall_cache_enumerate params;
+  WMT_MEMPTR_SET(params.path, path);
+  params.version = version;
+  params.after_rowid = after_rowid;
+  WMT_MEMPTR_SET(params.buffer, buffer);
+  params.capacity = capacity;
+  params.prefix = prefix;
+  params.ret_count = 0;
+  params.ret_used = 0;
+  params.ret_last_rowid = after_rowid;
+  params.ret_more = 0;
+  params.ret_status = 1;
+  UNIX_CALL(CacheEnumerate, &params);
+  *used = params.ret_used;
+  *last_rowid = params.ret_last_rowid;
+  *more = params.ret_more != 0;
+  return params.ret_count;
+}
+
 WINEMETAL_API uint64_t
 CacheWriter_byteSize(obj_handle_t writer) {
   struct unixcall_cache_set params;

@@ -1,4 +1,5 @@
 #include "dxmt_compile_recipe.hpp"
+#include <cstring>
 
 // gw2 (C3): see dxmt_compile_recipe.hpp. Pure code (no Metal calls): tests/gw2/pipeline_recipe_test.cpp
 // builds it natively.
@@ -87,6 +88,84 @@ serialize(const PipelineRecipe &r, gw2::RecipeBytes &b) {
   b.u32(r.tessellation_output_winding_order);
   b.u32(r.tessellation_factor_step);
   b.u8(r.support_indirect_command_buffers);
+}
+
+namespace {
+struct Reader {
+  const uint8_t *p, *end;
+  bool ok = true;
+  uint32_t
+  u32() {
+    if (end - p < 4) {
+      ok = false;
+      return 0;
+    }
+    uint32_t v = uint32_t(p[0]) | uint32_t(p[1]) << 8 | uint32_t(p[2]) << 16 | uint32_t(p[3]) << 24;
+    p += 4;
+    return v;
+  }
+  uint8_t
+  u8() {
+    if (end - p < 1) {
+      ok = false;
+      return 0;
+    }
+    return *p++;
+  }
+  Sha1Digest
+  digest() {
+    Sha1Digest d{};
+    if (end - p < long(sizeof(d.data))) {
+      ok = false;
+      return d;
+    }
+    std::memcpy(d.data, p, sizeof(d.data));
+    p += sizeof(d.data);
+    return d;
+  }
+};
+} // namespace
+
+bool
+deserialize(const uint8_t *data, size_t length, PipelineRecipe &r) {
+  Reader in{data, data + length};
+  if (in.u32() != gw2::kRecipeSchema)
+    return false;
+  r = PipelineRecipe{};
+  r.metal_version = in.u32();
+  VariantKey vs{in.digest(), in.digest()};
+  r.vs = vs;
+  if (in.u8()) {
+    VariantKey ps{in.digest(), in.digest()};
+    r.ps = ps;
+  }
+  for (auto &c : r.colors) {
+    c.pixel_format = WMTPixelFormat(in.u32());
+    c.rgb_blend_operation = WMTBlendOperation(in.u32());
+    c.alpha_blend_operation = WMTBlendOperation(in.u32());
+    c.src_rgb_blend_factor = WMTBlendFactor(in.u32());
+    c.dst_rgb_blend_factor = WMTBlendFactor(in.u32());
+    c.src_alpha_blend_factor = WMTBlendFactor(in.u32());
+    c.dst_alpha_blend_factor = WMTBlendFactor(in.u32());
+    c.write_mask = in.u8();
+    c.blending_enabled = in.u8();
+  }
+  r.alpha_to_coverage_enabled = in.u8();
+  r.logic_operation_enabled = in.u8();
+  r.logic_operation = WMTLogicOperation(in.u32());
+  r.rasterization_enabled = in.u8();
+  r.raster_sample_count = in.u8();
+  r.depth_pixel_format = WMTPixelFormat(in.u32());
+  r.stencil_pixel_format = WMTPixelFormat(in.u32());
+  r.immutable_vertex_buffers = in.u32();
+  r.immutable_fragment_buffers = in.u32();
+  r.input_primitive_topology = WMTPrimitiveTopologyClass(in.u32());
+  r.tessellation_partition_mode = WMTTessellationPartitionMode(in.u32());
+  r.max_tessellation_factor = in.u8();
+  r.tessellation_output_winding_order = WMTWinding(in.u32());
+  r.tessellation_factor_step = WMTTessellationFactorStepFunction(in.u32());
+  r.support_indirect_command_buffers = in.u8();
+  return in.ok && in.p == in.end;
 }
 
 Sha1Digest

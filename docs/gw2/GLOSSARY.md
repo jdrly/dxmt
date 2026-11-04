@@ -65,6 +65,13 @@ Where a compile job queues under the declared policy: demand (taken first), norm
 **Promotion**:
 A demand moving its job and the job's unfinished dependencies to the demand lane, once each.
 
+**Shared results**:
+The compile service's results by stable key (variants by shader SHA-1 and variant digest, plain
+graphics pipelines by recipe key), with one owner per key: the job that builds it.
+
+**Warm job**:
+A speculative compile job made from a recorded recipe (W2: a variant's function, W3: a pipeline).
+
 ### Chunks and retirement
 
 **Chunk**:
