@@ -1,8 +1,11 @@
+// gw2-test: pure
+// gw2-build: clang++ -std=c++20 -Itests/gw2/shim -Isrc/dxmt tests/gw2/subsample_dxbc_test.cpp src/dxmt/dxmt_gw2_subsample.cpp src/dxmt/dxmt_gw2_stats.cpp src/dxmt/dxmt_gw2_switches.cpp -o $OUT
+//
 // gw2 (#56): host-side test of the Subsample detector's DXBC scan (gw2::scanDxbc). Not part of the
 // DLL build; run it on the Mac:
 //
 //   clang++ -std=c++20 -Itests/gw2/shim -Isrc/dxmt tests/gw2/subsample_dxbc_test.cpp \
-//     src/dxmt/dxmt_gw2_subsample.cpp src/dxmt/dxmt_gw2_stats.cpp -o /tmp/subsample_dxbc_test \
+//     src/dxmt/dxmt_gw2_subsample.cpp src/dxmt/dxmt_gw2_stats.cpp src/dxmt/dxmt_gw2_switches.cpp -o /tmp/subsample_dxbc_test \
 //     && /tmp/subsample_dxbc_test [<dir of .dxbc files>]
 //
 // 1. Hand-built containers: a copy shader (one sample), a texel-load shader (ld), a customdata block

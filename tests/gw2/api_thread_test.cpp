@@ -1,8 +1,11 @@
+// gw2-test: pure
+// gw2-build: clang++ -std=c++20 -Itests/gw2/shim -Isrc/dxmt tests/gw2/api_thread_test.cpp src/dxmt/dxmt_gw2_stats.cpp src/dxmt/dxmt_gw2_switches.cpp -o $OUT
+//
 // gw2 (#28): host-side test of the PACE scope's per-thread blocks (ApiThread, ApiThreadCache) with
 // simulated Win32 threads (shim/windows.h). Not part of the DLL build; run it on the Mac:
 //
 //   clang++ -std=c++20 -Itests/gw2/shim -Isrc/dxmt tests/gw2/api_thread_test.cpp \
-//     src/dxmt/dxmt_gw2_stats.cpp -o /tmp/api_thread_test && /tmp/api_thread_test
+//     src/dxmt/dxmt_gw2_stats.cpp src/dxmt/dxmt_gw2_switches.cpp -o /tmp/api_thread_test && /tmp/api_thread_test
 
 #include "dxmt_gw2_stats.hpp"
 #include <windows.h>

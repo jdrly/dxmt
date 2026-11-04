@@ -1,0 +1,599 @@
+// gw2-test: pure
+// gw2-build: clang++ -std=c++20 -O1 -Itests/gw2/shim -Isrc/dxmt -Isrc/util tests/gw2/compile_service_test.cpp -o $OUT
+//
+// gw2 (C1, architecture council §1): native test of the compile service (src/dxmt/dxmt_compile_service.hpp)
+// with fake jobs and std:: threads (shim/thread.hpp). No Metal, no Wine.
+//
+// The legacy parity fixture runs scripted job graphs against the service and against the scheduler it
+// replaces (tests/gw2/fixtures/legacy_task_scheduler.hpp, 02532d0's dxmt_tasks.hpp unchanged) and
+// requires the same trace from both. A gate holds every job a worker runs. At each step the test waits
+// until the system is quiescent (every worker gated or idle) and records:
+// - the set of gated jobs (which jobs the queues hand out, continuations first);
+// - the worker count (the growth trigger);
+// - then it releases the lowest-numbered gated job and records what it returned (done, failed, or
+//   parked on a dependency, including the spurious-dependency rerun).
+// Wakeups show as the released jobs in the following steps' gated sets. The scenarios include
+// GW2-shaped bursts: pipelines that share shader variants, arriving faster than the workers.
+//
+// Also: exactly one completion per job, the compile queue's +1/-1 balance, the job records' states
+// with STATS off (no timestamps), and demands classified by the job's state when they begin.
+//
+// Run: tests/gw2/run.zsh pure, or the command above with $OUT set.
+
+#include "dxmt_compile_service.hpp"
+#include "fixtures/legacy_task_scheduler.hpp"
+#include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <functional>
+#include <map>
+#include <memory>
+#include <set>
+#include <sstream>
+#include <string>
+#include <thread>
+#include <vector>
+
+using namespace dxmt;
+using Clock = std::chrono::steady_clock;
+
+// --- the telemetry the service calls (production: dxmt_gw2_compile.cpp)
+namespace {
+std::atomic<bool> g_timing{false};
+std::atomic<int64_t> g_queue{0};
+std::atomic<int64_t> g_now{1};
+std::mutex g_threads_mutex;
+std::vector<uint64_t> g_threads; // every compileThreads value, in order
+struct WaitRecord {
+  bool timed;
+  compile::JobState state;
+};
+std::mutex g_waits_mutex;
+std::vector<WaitRecord> g_waits;
+} // namespace
+
+namespace dxmt::gw2 {
+void
+compileQueue(int64_t delta) {
+  g_queue += delta;
+}
+void
+compileThreads(uint64_t threads) {
+  std::lock_guard<std::mutex> l(g_threads_mutex);
+  g_threads.push_back(threads);
+}
+bool
+compileTiming() {
+  return g_timing.load();
+}
+int64_t
+compileNowNs() {
+  return g_now.fetch_add(1);
+}
+CompileWaitScope::CompileWaitScope(const compile::JobRecord *job) {
+  std::lock_guard<std::mutex> l(g_waits_mutex);
+  g_waits.push_back({job && job->timed.load(), job ? job->state.load() : compile::JobState::Absent});
+}
+CompileWaitScope::~CompileWaitScope() {}
+} // namespace dxmt::gw2
+
+static int failures = 0;
+#define CHECK(cond, ...)                                                                                          \
+  do {                                                                                                            \
+    if (!(cond)) {                                                                                                \
+      failures++;                                                                                                 \
+      std::printf("FAIL %s:%d: %s: ", __FILE__, __LINE__, #cond);                                                 \
+      std::printf(__VA_ARGS__);                                                                                   \
+      std::printf("\n");                                                                                          \
+    }                                                                                                             \
+  } while (0)
+
+// --- fake jobs and the gate
+
+struct Gate;
+
+struct FakeJob {
+  int id;
+  std::vector<FakeJob *> deps; // probed in this order, as the pipeline jobs probe their shaders
+  bool fail_early = false;     // geometry/tessellation: a done but failed dependency fails the job at once
+  bool fails = false;          // its own build fails (done, with no result)
+  int lie_once = -1;           // returns deps[lie_once] once although it is done (spurious dependency)
+  Gate *gate = nullptr;
+  std::atomic_bool ready{false};
+  std::atomic<int> done_count{0};
+  bool failed = false;
+  compile::JobRecord record;
+
+  FakeJob *run();
+  bool GetIsDone() { return ready.load(); }
+  void SetIsDone(bool v) {
+    done_count++;
+    ready.store(v);
+    ready.notify_all();
+  }
+};
+
+struct Gate {
+  std::mutex m;
+  std::condition_variable cv;
+  std::set<int> gated;
+  std::set<int> released;
+  uint64_t events = 0; // bumps on every enter and return
+  std::vector<std::string> outcomes;
+
+  void
+  enter(int id) {
+    std::unique_lock<std::mutex> l(m);
+    gated.insert(id);
+    events++;
+    cv.notify_all();
+    cv.wait(l, [&] { return released.count(id) > 0; });
+    released.erase(id);
+    gated.erase(id);
+  }
+  void
+  returned(std::string what) {
+    std::lock_guard<std::mutex> l(m);
+    outcomes.push_back(std::move(what));
+    events++;
+    cv.notify_all();
+  }
+};
+
+FakeJob *
+FakeJob::run() {
+  gate->enter(id);
+  for (size_t i = 0; i < deps.size(); i++) {
+    auto *d = deps[i];
+    if (int(i) == lie_once) {
+      lie_once = -1;
+      gate->returned(std::to_string(id) + "->park" + std::to_string(d->id) + "(spurious)");
+      return d;
+    }
+    if (!d->GetIsDone()) {
+      gate->returned(std::to_string(id) + "->park" + std::to_string(d->id));
+      return d;
+    }
+    if (fail_early && d->failed) {
+      failed = true;
+      gate->returned(std::to_string(id) + "->failed(dep" + std::to_string(d->id) + ")");
+      return this;
+    }
+  }
+  failed = fails;
+  gate->returned(std::to_string(id) + (fails ? "->failed" : "->done"));
+  return this;
+}
+
+// the legacy scheduler's trait and the service's
+namespace dxmt {
+template <> struct task_trait<FakeJob *> {
+  FakeJob *run_task(FakeJob *job) { return job->run(); }
+  bool get_done(FakeJob *job) { return job->GetIsDone(); }
+  void set_done(FakeJob *job) { job->SetIsDone(true); }
+  void on_submit(FakeJob *) {}
+};
+template <> struct compile::JobTraits<FakeJob *> {
+  FakeJob *run(FakeJob *job) { return job->run(); }
+  bool done(FakeJob *job) { return job->GetIsDone(); }
+  void setDone(FakeJob *job) { job->SetIsDone(true); }
+  compile::JobRecord &record(FakeJob *job) { return job->record; }
+};
+} // namespace dxmt
+
+// --- scenarios: jobs and when they are submitted
+
+struct Scenario {
+  std::string name;
+  std::vector<std::unique_ptr<FakeJob>> jobs;
+  std::map<int, std::vector<int>> submit_at; // step -> job ids submitted before it (in this order)
+
+  FakeJob *
+  add(std::vector<int> deps = {}) {
+    auto j = std::make_unique<FakeJob>();
+    j->id = int(jobs.size());
+    for (int d : deps)
+      j->deps.push_back(jobs[d].get());
+    jobs.push_back(std::move(j));
+    return jobs.back().get();
+  }
+};
+
+using ScenarioFn = std::function<void(Scenario &)>;
+
+struct Trace {
+  std::vector<std::string> steps;
+  std::vector<uint64_t> threads;
+  int64_t queue_balance = 0;
+  bool exactly_once = true;
+  bool stuck = false;
+};
+
+// Quiescent: every worker is gated, or nothing has changed for `settle`.
+static bool
+waitQuiescent(Gate &g, size_t workers, std::chrono::milliseconds settle, std::chrono::seconds limit) {
+  auto end = Clock::now() + limit;
+  uint64_t last = ~0ull;
+  auto stable_since = Clock::now();
+  while (Clock::now() < end) {
+    {
+      std::lock_guard<std::mutex> l(g.m);
+      if (g.gated.size() >= workers)
+        return true;
+      if (g.events != last) {
+        last = g.events;
+        stable_since = Clock::now();
+      }
+    }
+    if (Clock::now() - stable_since >= settle)
+      return true;
+    std::this_thread::sleep_for(std::chrono::microseconds(200));
+  }
+  return false;
+}
+
+static size_t
+currentWorkers() {
+  std::lock_guard<std::mutex> l(g_threads_mutex);
+  return g_threads.empty() ? 0 : g_threads.back();
+}
+
+template <typename Scheduler>
+static Trace
+runScenario(const ScenarioFn &build) {
+  Scenario sc;
+  build(sc);
+  Gate gate;
+  for (auto &j : sc.jobs)
+    j->gate = &gate;
+  {
+    std::lock_guard<std::mutex> l(g_threads_mutex);
+    g_threads.clear();
+  }
+  g_queue = 0;
+  Trace t;
+  {
+    Scheduler sched;
+    auto settle = std::chrono::milliseconds(8);
+    size_t total = sc.jobs.size();
+    for (int step = 0; step < 10000; step++) {
+      // one submit at a time, each settled: the growth trigger reads the running count, which a
+      // worker raises after it pops, so submits racing the pops would make growth timing-dependent
+      // (in both schedulers alike)
+      if (auto it = sc.submit_at.find(step); it != sc.submit_at.end())
+        for (int id : it->second) {
+          sched.submit(sc.jobs[id].get());
+          if (!waitQuiescent(gate, currentWorkers(), settle, std::chrono::seconds(10)))
+            t.stuck = true;
+        }
+      if (!waitQuiescent(gate, currentWorkers(), settle, std::chrono::seconds(10))) {
+        t.stuck = true;
+        break;
+      }
+      std::set<int> gated;
+      {
+        std::lock_guard<std::mutex> l(gate.m);
+        gated = gate.gated;
+      }
+      bool all_done = std::all_of(sc.jobs.begin(), sc.jobs.end(), [](auto &j) { return j->GetIsDone(); });
+      bool more_submits = sc.submit_at.upper_bound(step) != sc.submit_at.end();
+      if (gated.empty()) {
+        if (all_done && !more_submits)
+          break;
+        if (!more_submits) {
+          t.stuck = true; // nothing runs, nothing to submit, jobs not done
+          break;
+        }
+        t.steps.push_back("idle");
+        continue;
+      }
+      std::ostringstream s;
+      s << "gated{";
+      for (int id : gated)
+        s << id << ",";
+      s << "} workers=" << currentWorkers();
+      int pick = *gated.begin();
+      size_t before;
+      {
+        std::lock_guard<std::mutex> l(gate.m);
+        before = gate.outcomes.size();
+        gate.released.insert(pick);
+        gate.cv.notify_all();
+      }
+      // wait for its outcome
+      auto end = Clock::now() + std::chrono::seconds(10);
+      std::string outcome;
+      while (Clock::now() < end) {
+        std::lock_guard<std::mutex> l(gate.m);
+        if (gate.outcomes.size() > before) {
+          outcome = gate.outcomes[before];
+          break;
+        }
+      }
+      s << " run " << pick << " => " << outcome;
+      t.steps.push_back(s.str());
+      (void)total;
+    }
+    // let the last completion settle before stopping
+    waitQuiescent(gate, currentWorkers(), settle, std::chrono::seconds(10));
+  }
+  {
+    std::lock_guard<std::mutex> l(g_threads_mutex);
+    t.threads = g_threads;
+  }
+  t.queue_balance = g_queue.load();
+  for (auto &j : sc.jobs)
+    if (j->done_count.load() != 1)
+      t.exactly_once = false;
+  return t;
+}
+
+static void
+parity(const std::string &name, const ScenarioFn &build) {
+  auto legacy = runScenario<task_scheduler<FakeJob *>>(build);
+  auto service = runScenario<compile::Service<FakeJob *>>(build);
+  CHECK(!legacy.stuck, "%s: the legacy run got stuck", name.c_str());
+  CHECK(!service.stuck, "%s: the service run got stuck", name.c_str());
+  CHECK(legacy.exactly_once && service.exactly_once, "%s: every job completes exactly once", name.c_str());
+  CHECK(legacy.queue_balance == 0 && service.queue_balance == 0, "%s: queue balance %lld/%lld", name.c_str(),
+        (long long)legacy.queue_balance, (long long)service.queue_balance);
+  CHECK(legacy.threads == service.threads, "%s: worker growth differs (%zu vs %zu changes)", name.c_str(),
+        legacy.threads.size(), service.threads.size());
+  bool same = legacy.steps == service.steps;
+  CHECK(same, "%s: traces differ", name.c_str());
+  if (!same) {
+    size_t n = std::max(legacy.steps.size(), service.steps.size());
+    for (size_t i = 0; i < n; i++) {
+      auto a = i < legacy.steps.size() ? legacy.steps[i] : "-";
+      auto b = i < service.steps.size() ? service.steps[i] : "-";
+      if (a != b) {
+        std::printf("  step %zu\n    legacy:  %s\n    service: %s\n", i, a.c_str(), b.c_str());
+        break;
+      }
+    }
+  }
+  std::printf("%s %s: %zu steps, workers %llu\n", same && !legacy.stuck ? "ok  " : "FAIL", name.c_str(),
+              service.steps.size(), (unsigned long long)(service.threads.empty() ? 0 : service.threads.back()));
+}
+
+// --- scenarios
+
+// A pipeline's creation, as GW2 does it: get_shader submits each new variant, then the pipeline.
+static void
+pipeline(Scenario &sc, int step, std::vector<int> new_variants, std::vector<int> deps, bool fail_early = false) {
+  auto *p = sc.add(deps);
+  p->fail_early = fail_early;
+  for (int v : new_variants)
+    sc.submit_at[step].push_back(v);
+  sc.submit_at[step].push_back(p->id);
+}
+
+static void
+chain(Scenario &sc) {
+  sc.add(); // 0: VS
+  sc.add(); // 1: PS
+  pipeline(sc, 0, {0, 1}, {0, 1});
+}
+
+static void
+sharedVariants(Scenario &sc) {
+  for (int i = 0; i < 4; i++)
+    sc.add(); // 0-3: two VS, two PS
+  pipeline(sc, 0, {0, 2}, {0, 2});
+  pipeline(sc, 0, {1}, {1, 2});
+  pipeline(sc, 0, {3}, {0, 3});
+  pipeline(sc, 0, {}, {1, 3});
+}
+
+static void
+continuationsFirst(Scenario &sc) {
+  sc.add(); // 0: a variant
+  pipeline(sc, 0, {0}, {0});
+  pipeline(sc, 0, {}, {0});
+  for (int i = 0; i < 4; i++) {
+    auto *x = sc.add(); // independent jobs queued behind
+    sc.submit_at[0].push_back(x->id);
+  }
+}
+
+// Parked jobs released while independent jobs wait in the FIFO: the released ones run first. Queues
+// build only when every worker is busy at the limit (2 x CPUs), so fillers saturate the workers first;
+// the pipelines are submitted before their variant, so they park on it.
+static void
+parkedBeforeFifo(Scenario &sc) {
+  sc.add();              // 0: a variant
+  auto *a = sc.add({0}); // 1, 2: pipelines on it
+  auto *b = sc.add({0});
+  int limit = int(std::thread::hardware_concurrency()) * 2;
+  for (int i = 0; i < limit; i++)
+    sc.submit_at[0].push_back(sc.add()->id); // fillers: every worker busy
+  for (int id : {a->id, b->id, 0})
+    sc.submit_at[0].push_back(id);
+  for (int i = 0; i < 6; i++)
+    sc.submit_at[0].push_back(sc.add()->id); // independent jobs queued behind them
+}
+
+static void
+failures_(Scenario &sc) {
+  auto *v = sc.add();
+  v->fails = true; // 0: a variant whose translation fails
+  sc.add();        // 1: a geometry shader variant
+  sc.add();        // 2: PS
+  pipeline(sc, 0, {0, 1, 2}, {0, 1, 2}, true); // geometry pipeline: fails at once on 0
+  pipeline(sc, 0, {}, {0, 2});                 // plain pipeline: probes on, builds (with a null function)
+}
+
+static void
+spurious(Scenario &sc) {
+  sc.add();
+  sc.add();
+  sc.submit_at[0] = {0, 1};
+  auto *p = sc.add({0, 1});
+  p->lie_once = 0; // probes 0 as not done although it is
+  sc.submit_at[3].push_back(p->id);
+}
+
+static void
+lateSubmits(Scenario &sc) {
+  for (int i = 0; i < 3; i++)
+    sc.add();
+  pipeline(sc, 0, {0, 1}, {0, 1});
+  pipeline(sc, 2, {2}, {2, 0});
+  pipeline(sc, 4, {}, {1, 2});
+  pipeline(sc, 9, {}, {0, 1});
+}
+
+// GW2 at a map load: bursts of pipelines faster than the workers. 12 VS and 20 PS variants, 60
+// pipelines combining them, in three bursts; later pipelines mostly reuse variants.
+static void
+burst(Scenario &sc) {
+  std::vector<int> vs, ps;
+  std::set<int> submitted;
+  for (int i = 0; i < 12; i++)
+    vs.push_back(sc.add()->id);
+  for (int i = 0; i < 20; i++)
+    ps.push_back(sc.add()->id);
+  int k = 0;
+  for (int b = 0; b < 3; b++) {
+    int step = b * 25;
+    for (int i = 0; i < 20; i++, k++) {
+      int v = vs[(k * 7) % vs.size()], p = ps[(k * 11 + b) % ps.size()];
+      std::vector<int> fresh;
+      for (int x : {v, p})
+        if (submitted.insert(x).second)
+          fresh.push_back(x);
+      pipeline(sc, step, fresh, {v, p});
+    }
+  }
+}
+
+// Wide: many jobs submitted at once (workers grow only while every worker is running).
+static void
+wide(Scenario &sc) {
+  int n = int(std::thread::hardware_concurrency()) * 2 + 6;
+  for (int i = 0; i < n; i++)
+    sc.submit_at[0].push_back(sc.add()->id);
+  pipeline(sc, 1, {}, {0, 1});
+}
+
+// Growth: two jobs a step while every worker is busy, past 2 x CPUs, so the trigger fires on most
+// submits and the worker count reaches its limit.
+static void
+growth(Scenario &sc) {
+  int limit = int(std::thread::hardware_concurrency()) * 2;
+  for (int step = 0; step < limit + 4; step++)
+    for (int i = 0; i < 2; i++)
+      sc.submit_at[step].push_back(sc.add()->id);
+}
+
+// --- record states and demands (the service alone)
+
+static void
+recordsAndDemands() {
+  g_timing = false;
+  Scenario sc;
+  sc.add();
+  sc.add({0});
+  Gate gate;
+  for (auto &j : sc.jobs)
+    j->gate = &gate;
+  auto *v = sc.jobs[0].get(), *p = sc.jobs[1].get();
+  {
+    // one worker: the pipeline runs first and parks on its variant, as when its variant is new
+    compile::Service<FakeJob *> sched(compile::Options{1, 1});
+    sched.submit(p);
+    sched.submit(v);
+    auto quiet = [&] { waitQuiescent(gate, 1, std::chrono::milliseconds(8), std::chrono::seconds(5)); };
+    auto release = [&](int id) { // and wait for what it returns
+      size_t before;
+      {
+        std::lock_guard<std::mutex> l(gate.m);
+        before = gate.outcomes.size();
+        gate.released.insert(id);
+        gate.cv.notify_all();
+      }
+      while (true) {
+        std::lock_guard<std::mutex> l(gate.m);
+        if (gate.outcomes.size() > before)
+          break;
+      }
+    };
+    auto waits = [] {
+      std::lock_guard<std::mutex> l(g_waits_mutex);
+      return g_waits.size();
+    };
+    quiet();
+    CHECK(p->record.state.load() == compile::JobState::Running, "the pipeline runs (STATS off)");
+    CHECK(v->record.state.load() == compile::JobState::Queued, "the variant is queued (STATS off)");
+    CHECK(!v->record.timed.load() && v->record.submit_ns.load() == 0, "no timeline with STATS off");
+    std::thread demand_v([&] { compile::demand(v->record, v->ready); });
+    while (waits() < 1)
+      std::this_thread::yield();
+    release(p->id); // it parks on the variant; the worker takes the variant
+    quiet();
+    CHECK(p->record.state.load() == compile::JobState::Parked && p->record.parked_on.load() == &v->record,
+          "the pipeline is parked on its variant");
+    CHECK(v->record.state.load() == compile::JobState::Running, "the variant runs");
+    std::thread demand_p([&] { compile::demand(p->record, p->ready); });
+    while (waits() < 2)
+      std::this_thread::yield();
+    release(v->id); // done: the pipeline is a continuation
+    quiet();
+    release(p->id);
+    demand_v.join();
+    demand_p.join();
+    quiet();
+    {
+      std::lock_guard<std::mutex> l(g_waits_mutex);
+      CHECK(g_waits.size() == 2 && g_waits[0].state == compile::JobState::Queued &&
+                g_waits[1].state == compile::JobState::Parked,
+            "the demands saw the job's state when they began (queued, parked)");
+    }
+    CHECK(p->record.state.load() == compile::JobState::Complete && v->record.state.load() == compile::JobState::Complete,
+          "both complete");
+    compile::demand(p->record, p->ready); // done: no wait
+    CHECK(waits() == 2, "no wait recorded for a done job");
+  }
+  // with STATS on: timestamps in order
+  g_timing = true;
+  Scenario sc2;
+  sc2.add();
+  Gate gate2;
+  sc2.jobs[0]->gate = &gate2;
+  {
+    compile::Service<FakeJob *> sched(compile::Options{1, 1});
+    sched.submit(sc2.jobs[0].get());
+    waitQuiescent(gate2, 1, std::chrono::milliseconds(8), std::chrono::seconds(5));
+    {
+      std::lock_guard<std::mutex> l(gate2.m);
+      gate2.released.insert(0);
+      gate2.cv.notify_all();
+    }
+    sc2.jobs[0]->ready.wait(false);
+  }
+  auto &r = sc2.jobs[0]->record;
+  CHECK(r.timed.load() && r.submit_ns.load() && r.submit_ns.load() < r.start_ns.load() &&
+            r.start_ns.load() < r.done_ns.load(),
+        "STATS on: submit < start < done");
+  g_timing = false;
+}
+
+int
+main() {
+  parity("chain", chain);
+  parity("shared variants", sharedVariants);
+  parity("continuations first", continuationsFirst);
+  parity("parked before FIFO", parkedBeforeFifo);
+  parity("failures", failures_);
+  parity("spurious dependency", spurious);
+  parity("late submits", lateSubmits);
+  parity("GW2 burst", burst);
+  parity("wide", wide);
+  parity("growth to the limit", growth);
+  g_timing = true;
+  parity("GW2 burst, STATS on", burst);
+  g_timing = false;
+  recordsAndDemands();
+  std::printf(failures ? "%d FAILED\n" : "all passed\n", failures);
+  return failures ? 1 : 0;
+}

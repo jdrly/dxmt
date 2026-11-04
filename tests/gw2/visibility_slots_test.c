@@ -1,3 +1,6 @@
+// gw2-test: pure
+// gw2-build: clang -std=c11 -O2 -Isrc/winemetal/unix tests/gw2/visibility_slots_test.c -o $OUT
+//
 // gw2 (#20): host-side test of the visibility slots behind MetalView_visibility (bridge call 147,
 // src/winemetal/unix/visibility_slots.h). A serial dispatch queue stands in for the main thread.
 // Not part of the build; run it on the Mac:

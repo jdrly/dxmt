@@ -1,3 +1,11 @@
+// gw2-test: metal
+// gw2-build: for arch in x86_64 arm64; do
+// gw2-build:   clang -c -std=gnu17 -arch $arch -mmacosx-version-min=26.0 -Isrc/winemetal -Itests/gw2/mtl4_shim src/winemetal/winemetal_thunks.c -o $T/thunks_$arch.o
+// gw2-build:   clang -c -x objective-c -std=gnu17 -fblocks -fno-objc-arc -arch $arch -mmacosx-version-min=26.0 -Isrc/winemetal -Isrc/winemetal/unix -Isrc/airconv src/winemetal/unix/mtl4.c -o $T/mtl4_$arch.o
+// gw2-build:   clang++ -std=c++20 -fobjc-arc -arch $arch -mmacosx-version-min=26.0 -Itests/gw2/shim -Itests/gw2/mtl4_shim -Isrc/winemetal -Isrc/winemetal/unix -Isrc/dxmt tests/gw2/mtl4_queue_test.mm src/dxmt/dxmt_gw2_mtl4_queue.cpp $T/thunks_$arch.o $T/mtl4_$arch.o -framework Metal -framework QuartzCore -framework Foundation -o ${OUT}_$arch
+// gw2-build: done
+// gw2-run: ${OUT}_x86_64 && MTL_DEBUG_LAYER=1 ${OUT}_arm64
+//
 // gw2 (#32): native test of DXMT's Metal 4 submission (src/dxmt/dxmt_gw2_mtl4_queue.cpp, jdrly/dxmt
 // #32 part 2) through the real bridge: the PE side (winemetal_thunks.c, Metal.hpp) compiled natively,
 // its unix calls dispatched straight to the unix side (src/winemetal/unix/mtl4.c, and a few Metal 3

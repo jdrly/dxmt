@@ -1,3 +1,6 @@
+// gw2 (C1): the compile scheduler as it was before the compile service (src/dxmt/dxmt_tasks.hpp at
+// 02532d0, unchanged below this header), for compile_service_test.cpp's legacy parity fixture.
+
 #pragma once
 
 #include "dxmt_gw2_compile.hpp"
