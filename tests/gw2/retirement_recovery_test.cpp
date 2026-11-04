@@ -184,7 +184,8 @@ run(uint32_t n, uint64_t total, Inject inject, uint64_t at, bool recover) {
         token = l.issuer.token(seq - 1); // the injected bug: the previous chunk's token again
       if (recover) {
         auto outcome = l.retireOrRecover(token);
-        r.refused_retirements += !outcome.retired && !outcome.follows;
+        dxmt::gw2::RetireStep step{.seq = seq, .ledger_refused = !outcome.retired, .ledger = outcome};
+        r.refused_retirements += dxmt::gw2::retireDiagnostic(step).line == dxmt::gw2::RetireLine::Error;
         CHECK(outcome.after == l.retired());
       } else {
         r.refused_retirements += !l.retire(token);
@@ -403,7 +404,8 @@ testThreads() {
         if (seq >= stall_from && seq < stall_to)
           auto taken = std::move(token); // the injected bug: 3 rings of empty tokens
         auto outcome = l.retireOrRecover(token);
-        error_lines += !outcome.retired && !outcome.follows;
+        dxmt::gw2::RetireStep step{.seq = seq, .ledger_refused = !outcome.retired, .ledger = outcome};
+        error_lines += dxmt::gw2::retireDiagnostic(step).line == dxmt::gw2::RetireLine::Error;
         finished.store(seq, std::memory_order_release); // chunk_ongoing
       }
       encode.join();
@@ -418,6 +420,48 @@ testThreads() {
   }
 }
 
+// RetireChunk's line decision (gw2::retireDiagnostic, the review of #116): one line per step, naming both
+// refusals of an empty token; an error for a new failure, info for one that follows it; two failures in a
+// row, each recovered, are two errors
+static void
+testDiagnostic() {
+  using dxmt::gw2::RetireLine;
+  using dxmt::gw2::RetireStep;
+  auto line = [](const RetireStep &s) { return dxmt::gw2::retireDiagnostic(s); };
+  CHECK(line(RetireStep{.seq = 5}).line == RetireLine::None);
+  RetireStep empty{.seq = 5, .ledger_refused = true, .submission_refused = true, .submission_recovered = true};
+  auto d = line(empty);
+  CHECK(d.line == RetireLine::Error && d.ledger_part && d.submission_part);
+  empty.ledger.follows = true;
+  CHECK(line(empty).line == RetireLine::Info);
+  auto sub = line(RetireStep{.seq = 5, .submission_refused = true});
+  CHECK(sub.line == RetireLine::Error && !sub.ledger_part && sub.submission_part);
+  // empty tokens at chunks 3 and 5 of a ledger: 3 errors (one line), 4 catches up (info), 5 errors again
+  g_completed = 0;
+  g_live.clear();
+  Ledger l(8);
+  int errors = 0, infos = 0;
+  for (uint64_t seq = 1; seq <= 7; seq++) {
+    g_completed = seq;
+    auto token = l.issuer.token(seq);
+    if (seq == 3 || seq == 5)
+      auto taken = std::move(token);
+    auto outcome = l.retireOrRecover(token);
+    // the submission refuses the same empty token (and recovers with retireWaited)
+    bool refused = seq == 3 || seq == 5;
+    auto diag = line(RetireStep{.seq = seq,
+                                .ledger_refused = !outcome.retired,
+                                .ledger = outcome,
+                                .submission_refused = refused,
+                                .submission_recovered = refused});
+    errors += diag.line == RetireLine::Error;
+    infos += diag.line == RetireLine::Info;
+    CHECK(diag.line == (refused ? RetireLine::Error : seq == 4 || seq == 6 ? RetireLine::Info : RetireLine::None));
+  }
+  CHECK(errors == 2 && infos == 2 && l.retired() == 7);
+  CHECK(l.drain(l.issuer.drainedToken()));
+}
+
 int
 main() {
   testOneRefusal();
@@ -425,6 +469,7 @@ main() {
   testLateHold();
   testNormalPath();
   testUnauthorized();
+  testDiagnostic();
   testThreads();
   if (failures) {
     std::printf("retirement_recovery_test: %d of %d checks failed\n", failures, checks);

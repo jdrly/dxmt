@@ -76,7 +76,8 @@ struct RetentionPolicy {
 struct RetireOutcome {
   bool retired = false;     // retire() took the token: the normal path
   bool recovered = false;   // retire() refused it, and the ledger recovered with the completion it proves
-  bool follows = false;     // the previous call was refused too: the same failure (logged with that one)
+  bool follows = false;     // refused while an earlier refusal left the ledger behind: the same failure
+                            // (logged with that one)
   uint64_t before = 0;      // the last sequence retired before the call
   uint64_t after = 0;       // ... and after it
   uint32_t chunks = 0;      // recovery: the chunks (with holds) retired by sequence, before + 1 .. after
@@ -210,8 +211,10 @@ public:
   //   next chunk's token recovers).
   // - Either way (retired or recovered, never before drain() or after it): the refused holds whose last
   //   chunk is at or before `seq` are released (refuse() below). Never early: only completion releases.
-  // A refusal right after a refused call `follows` it (the next token catching up after an empty one, a
-  // stall's later chunks): the queue logs one error line per failure, not per chunk.
+  // A refusal while an earlier one still left the ledger behind (not recovered, or recovered without
+  // moving) `follows` it (the next token catching up after an empty one, a stall's later chunks): the
+  // queue logs one error line per failure, not per chunk. A recovery that moves the ledger ends the
+  // failure; the next refusal is a new one.
   template <class Record>
   [[nodiscard]] Outcome
   retireOrRecover(const BasicCompletedChunk<Record> &chunk) {
@@ -219,10 +222,10 @@ public:
     out.before = retired_.load(std::memory_order_relaxed);
     out.retired = retire(chunk);
     out.follows = !out.retired && after_refusal_;
-    after_refusal_ = !out.retired;
     if (!out.retired) {
       if (!chunk || chunk.issuer() != issuer_ || out.before == kDrained) {
         out.after = out.before;
+        after_refusal_ = true; // not recovered: the ledger stays behind
         return out;
       }
       out.recovered = true;
@@ -230,6 +233,7 @@ public:
         out.chunks = retireThrough(out.before, chunk.seq());
     }
     out.after = retired();
+    after_refusal_ = !out.retired && !(out.recovered && out.after > out.before);
     if (refused_holds_.load(std::memory_order_relaxed))
       out.refused_holds = releaseRefusedThrough(chunk.seq());
     return out;
@@ -426,7 +430,7 @@ private:
   std::vector<RingSlot> refused_;
   std::mutex refused_mutex_;
   std::atomic<size_t> refused_holds_{0};
-  bool after_refusal_ = false; // gw2 (#113): finish thread: retireOrRecover's last call was refused
+  bool after_refusal_ = false; // gw2 (#113): finish thread: a refusal left the ledger behind (not moved yet)
   const uint32_t ring_slots_;
   RetentionPolicy policy_;
   const CompletionIssuer *issuer_ = nullptr; // gw2 (#91)
@@ -446,6 +450,27 @@ struct RetireStep {
   bool submission_refused = false;   // the submission refused the token
   bool submission_recovered = false; // ... and retireWaited(seq) retired the chunk
 };
+
+// gw2 (#113): the one line RetireChunk writes for a step with DXMT_RETIRE_RECOVERY: an error for a new
+// failure (the ledger's refusal that doesn't follow an earlier one, or the submission's alone), an info
+// line for a refusal that follows one, nothing on the normal path. The line names each refusal of the
+// step: the ledger's part and the submission's part (an empty token is refused by both: one line).
+// DXMT_RETIRE_RECOVERY=0 keeps the separate lines of before.
+enum class RetireLine : uint8_t { None, Error, Info };
+struct RetireDiagnostic {
+  RetireLine line = RetireLine::None;
+  bool ledger_part = false;     // the ledger's refusal and recovery
+  bool submission_part = false; // the submission's refusal and recovery
+};
+inline RetireDiagnostic
+retireDiagnostic(const RetireStep &step) {
+  RetireDiagnostic d{.ledger_part = step.ledger_refused, .submission_part = step.submission_refused};
+  if (step.ledger_refused)
+    d.line = step.ledger.follows ? RetireLine::Info : RetireLine::Error;
+  else if (step.submission_refused)
+    d.line = RetireLine::Error;
+  return d;
+}
 
 template <class Ledger, class Submission, class Token>
 RetireStep

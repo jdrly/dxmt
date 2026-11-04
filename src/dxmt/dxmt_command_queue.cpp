@@ -436,21 +436,21 @@ CommandQueue::RetireChunk(CommandChunk &chunk, uint64_t seq, CompletedChunk &&co
   // sequence (one error line), refused holds go once their last chunk completed, and a refused submission
   // retirement retires the chunk the submission last waited for
   auto step = gw2::retireStep(ledger_, *submission_, seq, std::move(completed), retire_recovery_);
-  if (step.ledger_refused) {
-    if (retire_recovery_)
-      LedgerRecovered(seq, step.ledger);
-    else
+  if (!retire_recovery_) {
+    if (step.ledger_refused)
       LedgerRefused("retirement", seq);
-  } else if (step.ledger.refused_holds && !refused_holds_logged_) {
-    refused_holds_logged_ = true;
-    Logger::info(str::format("RetirementLedger: released ", step.ledger.refused_holds, " refused holds once chunk ",
-                             seq, " completed (DXMT_RETIRE_RECOVERY; logged once per queue)"));
+    if (step.submission_refused)
+      RetirementRefused("ChunkSubmission", "retirement", seq);
+  } else {
+    auto diagnostic = gw2::retireDiagnostic(step);
+    if (diagnostic.line != gw2::RetireLine::None)
+      RetireRecovered(seq, step, diagnostic);
+    if (step.ledger.refused_holds && !step.ledger_refused && !refused_holds_logged_) {
+      refused_holds_logged_ = true;
+      Logger::info(str::format("RetirementLedger: released ", step.ledger.refused_holds, " refused holds once chunk ",
+                               seq, " completed (DXMT_RETIRE_RECOVERY; logged once per queue)"));
+    }
   }
-  if (step.submission_refused)
-    RetirementRefused("ChunkSubmission", "retirement", seq,
-                      !retire_recovery_            ? ""
-                      : step.submission_recovered ? "; recovered: retired the chunk it last waited for (DXMT_RETIRE_RECOVERY)"
-                                                  : "; not recovered: it didn't last wait for this chunk, or retired it already");
   // gw2 (#113): the bookkeeping retires step.seq, the finish loop's sequence (WaitCommittedRetired waits
   // for it), whatever the token said
   cpu_coherent.signal(step.seq);
@@ -494,41 +494,52 @@ CommandQueue::LedgerRefused(const char *what, uint64_t seq) {
 // gw2 (#91): the ledger's refusals and the submission's (a token it didn't issue or didn't last give),
 // the first 8 per queue
 void
-CommandQueue::RetirementRefused(const char *who, const char *what, uint64_t seq, const char *recovery) {
+CommandQueue::RetirementRefused(const char *who, const char *what, uint64_t seq) {
   auto n = ledger_refusals_.fetch_add(1, std::memory_order_relaxed) + 1;
   if (n > 8)
     return;
   ERR(who, ": refused a ", what, " for chunk ", seq, " (ring slot ", seq % chunk_count_, ", retired up to ",
-      ledger_.retired(), ", refusal ", n, "; only the first 8 are logged)", recovery);
+      ledger_.retired(), ", refusal ", n, "; only the first 8 are logged)");
 }
 
-// gw2 (#113): a refused ledger retirement and its recovery, as one error line (the first 8 per queue,
-// with the hold and submission refusals)
+// gw2 (#113): a refused retirement and what DXMT_RETIRE_RECOVERY did, as one line (gw2::retireDiagnostic:
+// an error for a new failure, info for one that follows it), naming the ledger's and the submission's
+// refusal; the first 8 per queue, counted with the hold and drain refusals
 void
-CommandQueue::LedgerRecovered(uint64_t seq, const RetirementLedger::Outcome &outcome) {
+CommandQueue::RetireRecovered(uint64_t seq, const gw2::RetireStep &step, const gw2::RetireDiagnostic &diagnostic) {
   auto n = ledger_refusals_.fetch_add(1, std::memory_order_relaxed) + 1;
   if (n > 8)
     return;
-  if (outcome.follows) {
-    Logger::info(str::format("RetirementLedger: chunk ", seq, " follows the refused retirement before it (retired up to ",
-                             outcome.before, "); ",
-                             outcome.recovered ? "recovered: retired up to " : "not recovered yet: retired up to ",
-                             outcome.after, " by sequence (", outcome.chunks, " chunks with holds released), ",
-                             outcome.refused_holds, " refused holds released, ", ledger_.refusedHolds(),
-                             " still refused (DXMT_RETIRE_RECOVERY)"));
-    return;
+  const auto &o = step.ledger;
+  std::string text;
+  if (diagnostic.ledger_part) {
+    if (o.follows)
+      text = str::format("RetirementLedger: chunk ", seq, " follows the refused retirement before it (retired up to ",
+                         o.before, "); ");
+    else
+      text = str::format("RetirementLedger: refused a retirement for chunk ", seq, " (ring slot ", seq % chunk_count_,
+                         ", retired up to ", o.before, ", refusal ", n, "; only the first 8 are logged); ");
+    if (o.recovered)
+      text += str::format("recovered: retired up to ", o.after, " by sequence (", o.chunks,
+                          " chunks with holds released), ", o.refused_holds, " refused holds released, ",
+                          ledger_.refusedHolds(), " still refused");
+    else
+      text += "not recovered: its token proves no completion (empty or another queue's); the next chunk's recovers";
   }
-  if (!outcome.recovered) {
-    ERR("RetirementLedger: refused a retirement for chunk ", seq, " (ring slot ", seq % chunk_count_,
-        ", retired up to ", outcome.before, ", refusal ", n,
-        "; only the first 8 are logged); not recovered: its token proves no completion (empty or another "
-        "queue's); the next chunk's recovers");
-    return;
+  if (diagnostic.submission_part) {
+    if (!text.empty())
+      text += "; ChunkSubmission: refused it too, ";
+    else
+      text = str::format("ChunkSubmission: refused a retirement for chunk ", seq, " (ring slot ", seq % chunk_count_,
+                         ", retired up to ", ledger_.retired(), ", refusal ", n, "; only the first 8 are logged); ");
+    text += step.submission_recovered ? "recovered: retired the chunk it last waited for"
+                                      : "not recovered: it didn't last wait for this chunk, or retired it already";
   }
-  ERR("RetirementLedger: refused a retirement for chunk ", seq, " (ring slot ", seq % chunk_count_,
-      ", retired up to ", outcome.before, ", refusal ", n, "; only the first 8 are logged); recovered: retired up to ",
-      outcome.after, " by sequence (", outcome.chunks, " chunks with holds released), ", outcome.refused_holds,
-      " refused holds released, ", ledger_.refusedHolds(), " still refused (DXMT_RETIRE_RECOVERY)");
+  text += " (DXMT_RETIRE_RECOVERY)";
+  if (diagnostic.line == gw2::RetireLine::Error)
+    ERR(text);
+  else
+    Logger::info(text);
 }
 
 // gw2 (#77): what both finish paths report of a completed chunk, from its records: device errors (the

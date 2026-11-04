@@ -219,11 +219,11 @@ private:
   void DrainChunks();
   // gw2 (#66): a refused hold or retirement (a bug): the first 8 per queue are logged
   void LedgerRefused(const char *what, uint64_t seq);
-  // gw2 (#91): the same for `who` (the ledger, or the submission refusing a token); gw2 (#113): with
-  // what recovery did, on the same line
-  void RetirementRefused(const char *who, const char *what, uint64_t seq, const char *recovery = "");
-  // gw2 (#113): a refused ledger retirement and what DXMT_RETIRE_RECOVERY did, one line
-  void LedgerRecovered(uint64_t seq, const RetirementLedger::Outcome &outcome);
+  // gw2 (#91): the same for `who` (the ledger, or the submission refusing a token)
+  void RetirementRefused(const char *who, const char *what, uint64_t seq);
+  // gw2 (#113): a refused retirement (the ledger's, the submission's, or both) and what
+  // DXMT_RETIRE_RECOVERY did, one line
+  void RetireRecovered(uint64_t seq, const gw2::RetireStep &step, const gw2::RetireDiagnostic &diagnostic);
   std::atomic_uint64_t ledger_refusals_ = 0; // encode thread (holds) and finish thread (retirements)
   bool refused_holds_logged_ = false;        // gw2 (#113): finish thread
   // gw2 (#10, #32, #77): finish thread: the split buffers' error lines (the first 8, then one a second)

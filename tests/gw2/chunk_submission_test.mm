@@ -707,11 +707,16 @@ scriptedRetireStep() {
           (unsigned long long)seq);
   }
   uint64_t committed = 4;
+  int error_lines = 0, info_lines = 0;
   for (uint64_t internal_seq = 1; internal_seq <= committed; internal_seq++) {
     auto completed = sub.wait(internal_seq, 0, false);
     if (internal_seq == 2 || internal_seq == 4)
       auto taken = std::move(completed); // the injected bug: the token is gone before the retirement
     auto step = gw2::retireStep(ledger, sub, internal_seq, std::move(completed), true);
+    // RetireChunk's one line (the review of #116): an empty token is one error naming both refusals
+    auto diag = gw2::retireDiagnostic(step);
+    error_lines += diag.line == gw2::RetireLine::Error;
+    info_lines += diag.line == gw2::RetireLine::Info;
     CHECK(step.seq == internal_seq, "retireStep: chunk %llu retired as %llu", (unsigned long long)internal_seq,
           (unsigned long long)step.seq);
     coherent = step.seq; // RetireChunk: cpu_coherent.signal(step.seq)
@@ -726,6 +731,9 @@ scriptedRetireStep() {
     CHECK(ledger.retired() == want, "retireStep: after chunk %llu the ledger retired up to %llu, want %llu",
           (unsigned long long)internal_seq, (unsigned long long)ledger.retired(), (unsigned long long)want);
   }
+  // chunk 2: one error (ledger and submission); chunk 3 catching up: info; chunk 4: one error
+  CHECK(error_lines == 2 && info_lines == 1, "retireStep: %d error and %d info lines, want 2 and 1", error_lines,
+        info_lines);
   // WaitCommittedRetired: cpu_coherent.wait(committed) returns once the fence reached it
   CHECK(coherent == committed, "retireStep: the fence reached %llu of %llu committed",
         (unsigned long long)coherent, (unsigned long long)committed);
