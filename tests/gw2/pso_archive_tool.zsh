@@ -79,7 +79,7 @@ cp $AIR $W/air.db || exit 2
 
 $G $W/air.db $W/recipes_1.db 8 >$W/gen.out 2>&1
 rc=$?
-(( rc == 77 )) && { cat $W/gen.out; exit 77 }
+(( rc == 77 )) && { cat $W/gen.out; (( fails )) && { print "pso_archive_tool: $fails failures before the skip"; exit 1 }; exit 77 }
 (( rc == 0 )) || { cat $W/gen.out; print "FAIL the generator exited $rc"; exit 1 }
 N=$(sed -n 's/^RECIPES \([0-9]*\).*/\1/p' $W/gen.out)
 print -- "$(grep '^RECIPES' $W/gen.out)"
