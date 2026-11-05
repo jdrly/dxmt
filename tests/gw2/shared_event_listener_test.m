@@ -5,7 +5,9 @@
 // gw2-build:   san=(); [[ $arch == arm64 ]] && san=(-fsanitize=address)
 // gw2-build:   clang -x objective-c -std=gnu17 -fblocks -fno-objc-arc -O1 -g -Wall -Wno-unused-function $san -arch $arch -mmacosx-version-min=26.0 -Isrc/winemetal -DLISTENER_SRC="\"$T/shared_event_listener.inc\"" tests/gw2/shared_event_listener_test.m -framework Metal -framework Foundation -framework CoreFoundation -o ${OUT}_$arch
 // gw2-build: done
-// gw2-run: ${OUT}_x86_64 && ${OUT}_arm64
+// gw2-run: ${OUT}_x86_64
+// gw2-run: ${OUT}_arm64
+// gw2-run: rc=0; LISTENER_TEST_NO_DEVICE=1 ${OUT}_x86_64 || rc=$?; (( rc == 77 )) || { echo "FAIL no device: exit $rc, not 77"; exit 1 }
 //
 // gw2 (#127, port of athei/dxmt 0cd8b76e9a): native test of the shared-event listener's lifetime
 // (winemetal_unix.c: _SharedEventListener_create/start/destroy and _MTLSharedEvent_setWin32EventAtValue,
@@ -28,8 +30,10 @@
 // 4. a notification signalled before start is delivered once start runs.
 // 5. a notification still pending at destroy fires after it: it is dropped, NtSetEvent is not
 //    called, and nothing reads freed memory (before the fix, ASan: heap-use-after-free).
-// Parts 3-5 need a Metal device; without one they are skipped and the test exits 77 only if parts
-// 1-2 could not run either (they never need one).
+// Parts 3-5 need a Metal device; parts 1-2 never do. Without a device the test still runs parts 1-2
+// (a failure there exits 1), then exits 77, so the runner reports it as skipped, never as passed
+// (#131: it used to exit 0 with parts 3-5 not run). LISTENER_TEST_NO_DEVICE=1 takes that path on a
+// Mac with a device; the run lines check its 77.
 
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
@@ -179,11 +183,12 @@ main(void) {
   printf("ok part 2: destroy racing start, 3000 joins returned\n");
 
   @autoreleasepool {
-    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+    id<MTLDevice> device = getenv("LISTENER_TEST_NO_DEVICE") ? nil : MTLCreateSystemDefaultDevice();
     if (!device) {
-      printf("skip parts 3-5: no Metal device\n");
+      // gw2 (#131): parts 3-5 didn't run, so this is no pass: 77 (skipped) unless parts 1-2 failed
       alarm(0);
-      return failures ? 1 : 0;
+      printf("skip parts 3-5: no Metal device; %s\n", failures ? "FAILED" : "SKIPPED (exit 77)");
+      return failures ? 1 : 77;
     }
 
     // 3. delivery on the listener thread

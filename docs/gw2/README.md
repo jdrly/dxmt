@@ -1145,7 +1145,8 @@ stand-in `NtSetEvent`) as the PE side drives them: start on a thread of its own,
 then a join under a watchdog. Destroy before start, destroy racing start (3,000 times, 0–200 µs apart),
 delivery on the listener thread, a notification before start, and notifications still pending at
 destroy (dropped); the arm64 binary runs under AddressSanitizer. Before the port of athei/dxmt
-`0cd8b76e9a`, the joins hung.
+`0cd8b76e9a`, the joins hung. The last three need a Metal device: without one it runs the first two and
+exits 77, skipped, not passed (#131); a third run with `LISTENER_TEST_NO_DEVICE=1` checks that path.
 
 `clock_bench.cpp` (#28) is not a native test: it is a Windows .exe that measures the clocks PE code
 can read (ns per call, step size, backward steps), and `tests/gw2/clock_bench.zsh <engine> <scratch dir>`
