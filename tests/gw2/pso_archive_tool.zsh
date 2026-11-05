@@ -15,20 +15,17 @@
 # the store as it was; a second run publishes a newer generation that still hits everything; an
 # injected crash at one recipe is bisected in probe processes, that recipe left out and the rest
 # published and hit; six named packer failures (faked, more than one flush's three attempts) exclude
-# six shapes over several flushes and publish the rest (#112 review).
+# six shapes over several flushes and publish the rest (#112 review). Before all that, and without
+# AIR or Metal (#136): an empty or relative DXMT_CACHE_DIR is warned about and the defaults stay under
+# the user cache dir, an absolute one is the base, and an overlong one (no base) exits 1 when a default
+# needs it instead of using paths relative to the working directory. Those runs of `status` only stat
+# a recipes file of an exe name no game has.
 
 emulate -L zsh
 setopt pipefail
 G=$1 TX=$2 TA=$3 TT=$4 W=$5
 [[ -x $G && -x $TX && -x $TA && -x $TT && -n $W ]] ||
   { print -u2 "usage: $0 <generator> <tool x86_64> <tool arm64> <tool testing> <dir>"; exit 2 }
-AIR=${GW2_AIR_DB:-$HOME/Development/personal/gw2-on-mac/work/dxmt-squeeze/native/w0/sample.db}
-if [[ ! -f $AIR ]]; then
-  print "SKIP: no isolated AIR copy at $AIR (set GW2_AIR_DB)"
-  exit 77
-fi
-rm -rf $W && mkdir -p $W || exit 2
-cp $AIR $W/air.db || exit 2
 fails=0
 fail() { print "FAIL $*"; fails=$((fails + 1)) }
 # expect <file> <extended regex>...: each must match a line of the file
@@ -39,6 +36,46 @@ expect() {
     grep -Eq -- "$e" $f || fail "${f:t}: no $e"
   done
 }
+
+# 0. DXMT_CACHE_DIR (#136), in a scratch dir of its own (the work dir is recreated below)
+B=$W.base
+rm -rf $B && mkdir -p $B || exit 2
+X=pso-archive-tool-test.exe
+U=$(getconf DARWIN_USER_CACHE_DIR)
+[[ $U == /* ]] || { print "FAIL no user cache dir"; exit 1 }
+warned='DXMT_CACHE_DIR="(rel/cache)?" isn.t an absolute unix path; ignored'
+for v in rel/cache ''; do
+  DXMT_CACHE_DIR=$v $TX status --archive-dir $B/store --exe $X >$B/rel.out 2>$B/rel.err ||
+    fail "status with DXMT_CACHE_DIR=\"$v\" exited $?"
+  expect $B/rel.err "^pso_archive_tool: Caches: $warned"
+  [[ $(grep -c 'DXMT_CACHE_DIR' $B/rel.err) == 1 ]] || fail "DXMT_CACHE_DIR=\"$v\": not one warning"
+  grep -Fxq "recipes: ${U}dxmt/$X/recipes_1.db (missing)" $B/rel.out ||
+    fail "DXMT_CACHE_DIR=\"$v\": the recipes aren't under the user cache dir: $(grep '^recipes' $B/rel.out)"
+done
+DXMT_CACHE_DIR=$B/abs $TX status --exe $X >$B/abs.out 2>$B/abs.err || fail "status with an absolute DXMT_CACHE_DIR exited $?"
+grep -q 'DXMT_CACHE_DIR' $B/abs.err && fail "an absolute DXMT_CACHE_DIR was warned about"
+grep -Fxq "store base: $B/abs/dxmt/pso" $B/abs.out || fail "the store base isn't under DXMT_CACHE_DIR"
+grep -Fxq "recipes: $B/abs/dxmt/$X/recipes_1.db (missing)" $B/abs.out || fail "the recipes aren't under DXMT_CACHE_DIR"
+long=/${(l:1100::x:)}
+for cmd in status run; do
+  DXMT_CACHE_DIR=$long $TX $cmd --exe $X >$B/long.out 2>$B/long.err
+  rc=$?
+  (( rc == 1 )) || fail "$cmd with an overlong DXMT_CACHE_DIR exited $rc, not 1"
+  expect $B/long.err "DXMT_CACHE_DIR is longer than PATH_MAX"
+  grep -q '^store base: dxmt/' $B/long.out && fail "$cmd with an overlong DXMT_CACHE_DIR used a relative store base"
+done
+DXMT_CACHE_DIR=$long $TX status --archive-dir $B/store --recipes $B/r.db >$B/long_ok.out 2>&1 ||
+  fail "status with an overlong DXMT_CACHE_DIR and every path given exited $?"
+rm -rf $B
+
+AIR=${GW2_AIR_DB:-$HOME/Development/personal/gw2-on-mac/work/dxmt-squeeze/native/w0/sample.db}
+if [[ ! -f $AIR ]]; then
+  print "SKIP: no isolated AIR copy at $AIR (set GW2_AIR_DB)"
+  (( fails )) && { print "pso_archive_tool: $fails failures before the skip"; exit 1 }
+  exit 77
+fi
+rm -rf $W && mkdir -p $W || exit 2
+cp $AIR $W/air.db || exit 2
 
 $G $W/air.db $W/recipes_1.db 8 >$W/gen.out 2>&1
 rc=$?

@@ -34,6 +34,7 @@
 #include "Metal.hpp"
 #include "airconv_public.h"
 #include "dxmt_compile_recipe.hpp"
+#include "dxmt_gw2_cache_dir.hpp"
 #include "dxmt_gw2_recipe.hpp"
 #include "dxmt_gw2_warm.hpp"
 #include "dxmt_gw2_warm_bridge.hpp"
@@ -83,6 +84,7 @@ struct Options {
   bool publish = false;
   bool quiet = false;
   std::string self; // argv[0], for the children
+  std::string base; // gw2 (#136): <base> of the defaults, ending in '/' (resolveBase); empty: not needed
 };
 
 void
@@ -190,19 +192,51 @@ parseArgs(int argc, char **argv, Options &o) {
   return true;
 }
 
-std::string
-userCacheDir() {
+// gw2 (#136): whether a default path needs <base>: --archive-dir unset, or a cache file without its
+// own option (status reads only the recipes; build, verify and run the AIR too)
+bool
+needsBase(const Options &o) {
+  if (o.archive_dir.empty())
+    return true;
+  if (!o.cache_dir.empty())
+    return false;
+  return o.recipes.empty() || (o.command != "status" && o.air.empty());
+}
+
+// gw2 (#134, #136): <base>, as the DLLs resolve it (dxmt_cache_base): DXMT_CACHE_DIR if it's absolute,
+// else the user cache dir. An empty or relative DXMT_CACHE_DIR is warned about once, worded like the
+// DLL's line (not again in `run`'s children, which inherit the environment). A base that can't be
+// resolved (a DXMT_CACHE_DIR longer than PATH_MAX, or no user cache dir) fails when a default needs
+// it, instead of turning the defaults into paths relative to the working directory.
+bool
+resolveBase(Options &o) {
+  const char *raw = getenv("DXMT_CACHE_DIR");
+  if (gw2::parseCacheDir(raw).state == gw2::CacheDir::State::Ignored && o.command != "build")
+    fprintf(stderr,
+            "pso_archive_tool: Caches: DXMT_CACHE_DIR=\"%s\" isn't an absolute unix path; ignored, the "
+            "caches stay under $(getconf DARWIN_USER_CACHE_DIR)dxmt/\n",
+            raw);
+  if (!needsBase(o))
+    return true;
   char buf[PATH_MAX];
-  size_t n = dxmt_cache_base(buf, sizeof(buf)); // gw2 (#134): DXMT_CACHE_DIR, if set, as the DLL
-  std::string s = n ? std::string(buf) : std::string();
-  if (!s.empty() && s.back() != '/')
-    s += '/';
-  return s;
+  if (!dxmt_cache_base(buf, sizeof(buf)) || !buf[0]) {
+    if (raw && raw[0] == '/')
+      fprintf(stderr, "pso_archive_tool: DXMT_CACHE_DIR is longer than PATH_MAX (%zu bytes); pass --cache-dir "
+                      "and --archive-dir, or a shorter DXMT_CACHE_DIR\n", strlen(raw));
+    else
+      fprintf(stderr, "pso_archive_tool: $(getconf DARWIN_USER_CACHE_DIR) can't be resolved; pass --cache-dir "
+                      "and --archive-dir, or DXMT_CACHE_DIR\n");
+    return false;
+  }
+  o.base = buf;
+  if (o.base.back() != '/')
+    o.base += '/';
+  return true;
 }
 
 std::string
 storeBase(const Options &o) {
-  return o.archive_dir.empty() ? userCacheDir() + "dxmt/pso" : o.archive_dir;
+  return o.archive_dir.empty() ? o.base + "dxmt/pso" : o.archive_dir;
 }
 
 // The device the game gets on this Mac (the first, as DXGI's first adapter) and DXMT's translation
@@ -228,7 +262,7 @@ std::string
 recipesPath(const Options &o) {
   if (!o.recipes.empty())
     return o.recipes;
-  return (o.cache_dir.empty() ? userCacheDir() + "dxmt/" + o.exe : o.cache_dir) + "/recipes_" +
+  return (o.cache_dir.empty() ? o.base + "dxmt/" + o.exe : o.cache_dir) + "/recipes_" +
          std::to_string(gw2::kRecipeSchema) + ".db";
 }
 
@@ -236,7 +270,7 @@ std::string
 airPath(const Options &o, uint32_t metal_version) {
   if (!o.air.empty())
     return o.air;
-  return (o.cache_dir.empty() ? userCacheDir() + "dxmt/" + o.exe : o.cache_dir) + "/shaders_" +
+  return (o.cache_dir.empty() ? o.base + "dxmt/" + o.exe : o.cache_dir) + "/shaders_" +
          std::to_string(metal_version) + ".db";
 }
 
@@ -752,6 +786,16 @@ main(int argc, char **argv) {
     usage(stderr);
     return kUsage;
   }
+  if (o.command == "-h" || o.command == "--help" || o.command == "help") {
+    usage(stdout);
+    return kOk;
+  }
+  if (o.command != "run" && o.command != "build" && o.command != "verify" && o.command != "status") {
+    usage(stderr);
+    return kUsage;
+  }
+  if (!resolveBase(o))
+    return kUsage;
   if (o.command == "run")
     return commandRun(o);
   if (o.command == "build")
@@ -761,12 +805,5 @@ main(int argc, char **argv) {
     v.publish = false;
     return commandBuild(v, true);
   }
-  if (o.command == "status")
-    return commandStatus(o);
-  if (o.command == "-h" || o.command == "--help" || o.command == "help") {
-    usage(stdout);
-    return kOk;
-  }
-  usage(stderr);
-  return kUsage;
+  return commandStatus(o);
 }
