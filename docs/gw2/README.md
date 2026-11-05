@@ -1166,7 +1166,10 @@ processes on both architectures hit every one, `status`, the refusal under a hel
 store unchanged), a second run's newer generation, an injected crash at one recipe isolated by
 the bisection, the rest published and hit, and six faked named packer failures (a third build with
 `PSO_ARCHIVE_TESTING`) excluded over several flushes, the rest published and the six classified as
-excluded misses.
+excluded misses. First, without AIR or Metal (so even when the rest is skipped), `DXMT_CACHE_DIR`
+(#136): empty or relative, `status` warns once and its defaults stay under the user cache dir;
+absolute, they are under it; longer than `PATH_MAX`, `status` and `run` exit 1 unless every path is
+given.
 
 `cache_dir_test.mm` (pure, #134) checks `DXMT_CACHE_DIR` through the bridge's unix side: absolute, a
 cache open (`CacheWriter`, `CacheReader`) creates `<dir>/dxmt/<exe>/<file>` and nothing in the user cache
@@ -1196,7 +1199,7 @@ retries and the last good generation). Build it with `tools/gw2/build-pso-archiv
 | `verify` | A fresh process builds the recipes against the published generation and reports hits and misses; it captures and publishes nothing |
 | `status` | Each store's current generation (shards, pipeline keys, size, excluded shapes), whether its writer lock is held, and the recipe file. Opens nothing for writing; probes the lock for an instant |
 
-Options: `--cache-dir` (DXMT's per-exe cache, default `<base>dxmt/<exe>`, where `<base>` is `DXMT_CACHE_DIR` if it's absolute (#134), else `$(getconf DARWIN_USER_CACHE_DIR)`; the archive's default store is `<base>dxmt/pso`),
+Options: `--cache-dir` (DXMT's per-exe cache, default `<base>dxmt/<exe>`, where `<base>` is `DXMT_CACHE_DIR` if it's absolute (#134), else `$(getconf DARWIN_USER_CACHE_DIR)`; the archive's default store is `<base>dxmt/pso`. An empty or relative `DXMT_CACHE_DIR` is ignored with one stderr warning worded like the DLL's, `pso_archive_tool: Caches: DXMT_CACHE_DIR="<value>" isn't an absolute unix path; ignored, …` (#136). A `<base>` that can't be resolved, a `DXMT_CACHE_DIR` longer than `PATH_MAX`, is exit 1 when a default needs it, never a path relative to the working directory),
 `--recipes`, `--air` (default `<cache-dir>/shaders_<target>.db`), `--archive-dir` (as
 `DXMT_PSO_ARCHIVE_DIR`; another directory is a store no game reads), `--exe` (default `Gw2-64.exe`),
 `--keep` (sessions a generation keeps, default 4 as the DLL), `--limit`, `--metal-version` (default as
@@ -1211,7 +1214,7 @@ their shape; `mode` `writer` or `lookup`), `ISOLATED
 <index> exit=<code>` per recipe the bisection left out, `VERIFY …` (the verifying process's result) and
 `LEFTOUT <n>`. The archive's own report lines go to stderr.
 
-Exit codes: 0 done; 1 usage or input error (no recipes or AIR file, no device); 3 the store is busy:
+Exit codes: 0 done; 1 usage or input error (no recipes or AIR file, no device, no `<base>` for a default path); 3 the store is busy:
 another process (a running game with generations on) holds its writer lock, and nothing was written;
 4 publishing failed; 5 a failure the bisection couldn't isolate; 6 published, but the verifying process
 failed (`VERIFY failed exit=<n>`; the generation stays). A failed run leaves the last good
