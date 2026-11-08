@@ -14,7 +14,7 @@ Closes #
 
 ## How to verify
 
-<!-- Steps for Jan: what to start, where to go in GW2, what to look at, which log line shows it. -->
+<!-- Steps for me: what to start, where to go in GW2, what to look at, which log line shows it. -->
 
 ## Definition of Done
 

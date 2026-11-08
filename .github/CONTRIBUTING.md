@@ -32,7 +32,7 @@ If two sources conflict, report the conflict instead of silently choosing one.
   parentheses (`Present deadline: … (Lion's Arch 39 → 47 fps)`).
 - The area is a label, never a title prefix ([triage labels](../docs/agents/triage-labels.md)).
 - *Affected areas* lists only paths you have verified in the repository.
-- *Verification (UAT)* is a scenario Jan plays through in GW2: each step is an action in the
+- *Verification (UAT)* is a scenario I play through in GW2: each step is an action in the
   game and, after the arrow, the expected result.
 - An issue that a council or review produced links it.
 
@@ -66,7 +66,7 @@ If two sources conflict, report the conflict instead of silently choosing one.
 - **Review and merge.** Every PR gets an **independent agent review** (preferably
   GPT-6.1-Sol) by an agent that didn't write the change; its verdict goes into the PR. The PR is
   **squash-merged**, with the PR title as the commit subject and the description as its body,
-  once that verdict has no open `Blocker` or `High`. The maintainer doesn't review code by hand.
+  once that verdict has no open `Blocker` or `High`. I don't review code by hand.
 
 ## Code review
 
@@ -114,6 +114,6 @@ If two sources conflict, report the conflict instead of silently choosing one.
 
 - Open anything in 3Shain/dxmt from this fork.
 - Push directly to `gw2-on-mac` or `main`.
-- Start Wine, Steam or GW2 while Jan may be playing, or without his go.
+- Start Wine, Steam or GW2 while I may be playing, or without my go.
 - Merge a change that renders differently without the issue asking for it.
 - Commit logs, captures or traces with account data.

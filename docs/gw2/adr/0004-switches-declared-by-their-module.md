@@ -9,9 +9,9 @@ unification is deliberately not part of this. It would change accepted values.
 ## Consequences
 
 - The startup line keeps today's fields in today's order. A switch declared later and not named by
-  `LogStartup` follows them, sorted by name, before the process facts `cpus` and `refresh`. (The
-  council's draft sorted the whole line; Jan's rule for R1 was an identical line, so the existing
-  order stays.)
+  `LogStartup` follows them, sorted by name, before the process facts `cpus` and `refresh`. The
+  council's draft sorted the whole line. My rule for R1 was an identical line, so the existing
+  order stays.
 - Each switch keeps its own grammar (`!= "0"`, `== "1"`, `strtoul` without a full-consumption
   check, …). A grammar change is a behaviour change of its own, with its own PR.
 - A read parses the environment when it happens; the switch keeps no cache. Callers keep the cache

@@ -10,8 +10,8 @@ the `gh` CLI for every GitHub operation, and follow the issue templates in
 
 - **Create an issue**: `gh issue create --repo jdrly/dxmt --title "Context: Actionable result"
   --body-file <file> --label ...`, with a body that follows the matching template (`task.yml`
-  for work, `bug_report.yml` for a bug). This repository is public: create issues only when Jan
-  asks for them, or after he approves the draft.
+  for work, `bug_report.yml` for a bug). This repository is public: create issues only when I
+  ask for them, or after I approve the draft.
 - **Read an issue**: `gh issue view <number> --repo jdrly/dxmt --comments`, including its labels.
 - **List issues**: `gh issue list --repo jdrly/dxmt --state open --json number,title,labels`
   with `--label` and `--state` filters as needed.
