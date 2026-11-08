@@ -3,7 +3,7 @@
 Every bridge call's number is written once, in `src/winemetal/winemetal_calls.h`, and the enum
 (`WMTCall_<name>`), the 64-bit table and the wow64 table are generated from it. Numbers are append
 only, and a hole is `WMT_RESERVED` with the issue that reserved it. PE and unix always ship from one
-build, so compaction is allowed but never required. We chose this over a generator for params
+build, so compaction is allowed but never required. I chose this over a generator for params
 structs and thunks (too wide: the params layouts and wow64 conversions are hand-shaped, and the
 failure was numbering and drift, not layouts) and over removing the holes now (renumbering the
 calls of lanes in flight is risk for nothing). Native tests use the production table, because

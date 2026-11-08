@@ -332,7 +332,7 @@ FenceLocalityCheck::collectAndSimplifyWaits(FenceSet strong_fences, EncoderId id
 }
 
 // gw2 (#132, after GameSir 3170d0349a, which removes the weak window; this keeps a guarantee in its
-// place): the checkpoint chain. Our trackers stay bounded (they drop dependencies past a horizon, and
+// place): the checkpoint chain. My trackers stay bounded (they drop dependencies past a horizon, and
 // keep a bounded ring of readers), so without the window something must still cover what they drop.
 // (GameSir instead tracks every reader and writer as an explicit ID, relying on a Metal fence wait
 // covering every earlier update of its slot.)
