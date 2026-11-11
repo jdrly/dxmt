@@ -1379,3 +1379,4 @@ Com<IMTLDXGIDevice> CreateD3D11Device(std::unique_ptr<Device> &&device,
       std::move(device), adapter, feature_level, feature_flags));
 };
 } // namespace dxmt
+static_assert(false, "gw2 #162: a deliberate compile error for the CI check");
