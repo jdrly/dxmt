@@ -538,7 +538,7 @@ public:
       return;
     cmd.index_buffer_address = allocation->gpuAddress();
     cmd.index_buffer_length = allocation->pageLength();
-    reinterpret_cast<wmtcmd_base &>(cmd).flags |= WMT_CMD_RESIDENT;
+    WMT::setPacketFlags(cmd, WMT_CMD_RESIDENT); // 0 until here (encodeRenderCommand)
   }
 
   void clearState() {
@@ -677,7 +677,7 @@ public:
     encoder->cmd_tail->next.set(storage);
     encoder->cmd_tail = (wmtcmd_base *)storage;
     storage->next.set(nullptr);
-    encoder->cmd_tail->flags = 0; // gw2 (#153): WMT_CMD_RESIDENT only where the builder sets it
+    WMT::setPacketFlags(*storage, 0); // gw2 (#153): WMT_CMD_RESIDENT only where the builder sets it
     return *storage;
   }
 
@@ -710,7 +710,7 @@ public:
     cmd.type = WMTRenderCommandSetPSO;
     cmd.pso = pso;
     if (resident)
-      reinterpret_cast<wmtcmd_base &>(cmd).flags = WMT_CMD_RESIDENT;
+      WMT::setPacketFlags(cmd, WMT_CMD_RESIDENT);
     encoder->bound_pso = pso;
   }
 
@@ -751,7 +751,7 @@ public:
     encoder->cmd_tail->next.set(storage);
     encoder->cmd_tail = (wmtcmd_base *)storage;
     storage->next.set(nullptr);
-    encoder->cmd_tail->flags = 0; // gw2 (#153): WMT_CMD_RESIDENT only where the builder sets it
+    WMT::setPacketFlags(*storage, 0); // gw2 (#153): WMT_CMD_RESIDENT only where the builder sets it
     return *storage;
   }
 
@@ -766,7 +766,7 @@ public:
     encoder->cmd_tail->next.set(storage);
     encoder->cmd_tail = (wmtcmd_base *)storage;
     storage->next.set(nullptr);
-    encoder->cmd_tail->flags = 0; // gw2 (#153): WMT_CMD_RESIDENT only where the builder sets it
+    WMT::setPacketFlags(*storage, 0); // gw2 (#153): WMT_CMD_RESIDENT only where the builder sets it
     return *storage;
   }
 

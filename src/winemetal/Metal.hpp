@@ -8,6 +8,14 @@
 
 namespace WMT {
 
+// gw2 (#153): a typed packet's wmtcmd_base::flags (WMT_CMD_*), which is its own reserved[0]; set
+// through the packet's own type, not a wmtcmd_base reference (strict aliasing)
+template <typename Cmd>
+inline void
+setPacketFlags(Cmd &cmd, uint16_t flags) {
+  cmd.reserved[0] = flags;
+}
+
 class String;
 
 #ifdef DXMT_GW2_LIFETIME_CHECK
@@ -380,7 +388,7 @@ public:
   setVertexBuffer(Buffer buffer, uint64_t offset, uint8_t index, uint16_t flags = 0) {
     struct wmtcmd_render_setbuffer cmd;
     cmd.type = WMTRenderCommandSetVertexBuffer;
-    reinterpret_cast<wmtcmd_base &>(cmd).flags = flags;
+    setPacketFlags(cmd, flags);
     cmd.next.set(nullptr);
     cmd.buffer = buffer;
     cmd.offset = offset;
@@ -392,7 +400,7 @@ public:
   setFragmentBuffer(Buffer buffer, uint64_t offset, uint8_t index, uint16_t flags = 0) {
     struct wmtcmd_render_setbuffer cmd;
     cmd.type = WMTRenderCommandSetFragmentBuffer;
-    reinterpret_cast<wmtcmd_base &>(cmd).flags = flags;
+    setPacketFlags(cmd, flags);
     cmd.next.set(nullptr);
     cmd.buffer = buffer;
     cmd.offset = offset;
@@ -404,7 +412,7 @@ public:
   setMeshBuffer(Buffer buffer, uint64_t offset, uint8_t index, uint16_t flags = 0) {
     struct wmtcmd_render_setbuffer cmd;
     cmd.type = WMTRenderCommandSetMeshBuffer;
-    reinterpret_cast<wmtcmd_base &>(cmd).flags = flags;
+    setPacketFlags(cmd, flags);
     cmd.next.set(nullptr);
     cmd.buffer = buffer;
     cmd.offset = offset;
@@ -416,7 +424,7 @@ public:
   setObjectBuffer(Buffer buffer, uint64_t offset, uint8_t index, uint16_t flags = 0) {
     struct wmtcmd_render_setbuffer cmd;
     cmd.type = WMTRenderCommandSetObjectBuffer;
-    reinterpret_cast<wmtcmd_base &>(cmd).flags = flags;
+    setPacketFlags(cmd, flags);
     cmd.next.set(nullptr);
     cmd.buffer = buffer;
     cmd.offset = offset;
@@ -907,7 +915,7 @@ public:
   setRenderPipelineState(RenderPipelineState pso) {
     struct wmtcmd_render_setpso cmd;
     cmd.type = WMTRenderCommandSetPSO;
-    reinterpret_cast<wmtcmd_base &>(cmd).flags = 0; // gw2 (#153): not WMT_CMD_RESIDENT
+    setPacketFlags(cmd, 0); // gw2 (#153): not WMT_CMD_RESIDENT
     cmd.next.set(nullptr);
     cmd.pso = pso;
     submit(&cmd);
@@ -979,7 +987,7 @@ private:
   setBuffer(WMTRenderCommandType type, Buffer buffer, uint64_t offset, uint8_t index, uint16_t flags) {
     struct wmtcmd_render_setbuffer cmd;
     cmd.type = type;
-    reinterpret_cast<wmtcmd_base &>(cmd).flags = flags; // gw2 (#153)
+    setPacketFlags(cmd, flags); // gw2 (#153)
     cmd.next.set(nullptr);
     cmd.buffer = buffer;
     cmd.offset = offset;

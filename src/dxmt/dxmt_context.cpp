@@ -1404,7 +1404,7 @@ ArgumentEncodingContext::flushCommandsImpl(CommandBuffer &cmdbuf, uint64_t seqId
       struct wmtcmd_compute_setbuffer setcmd;
       setcmd.type = WMTComputeCommandSetBuffer;
       // gw2 (#153): set here, not left as the stack's
-      reinterpret_cast<wmtcmd_base &>(setcmd).flags = data->allocated_argbuf_resident ? WMT_CMD_RESIDENT : 0;
+      WMT::setPacketFlags(setcmd, data->allocated_argbuf_resident ? WMT_CMD_RESIDENT : 0);
       setcmd.next.set(nullptr);
       setcmd.buffer = data->allocated_argbuf;
       setcmd.offset = 0;

@@ -5537,7 +5537,7 @@ public:
       auto &cmd = enc.encodeComputeCommand<wmtcmd_compute_setpso>();
       cmd.type = WMTComputeCommandSetPSO;
       if (ComputePipeline.Resident) // gw2 (#153): the device's residency set holds it
-        reinterpret_cast<wmtcmd_base &>(cmd).flags = WMT_CMD_RESIDENT;
+        WMT::setPacketFlags(cmd, WMT_CMD_RESIDENT);
       cmd.pso = ComputePipeline.PipelineState;
       cmd.threadgroup_size = tg_size;
     });
