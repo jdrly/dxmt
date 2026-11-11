@@ -13,7 +13,9 @@
 //   that event instead of waitUntilCompleted.
 // - Each slot also has a residency set of its own (part 3): the replays put every allocation the
 //   chunk's packets name directly into it (Metal 4 makes nothing resident by itself); each commit
-//   commits it and the command buffer uses it; retire() empties it.
+//   commits it and the command buffer uses it; retire() empties it. gw2 (#153): only while it has
+//   allocations: what the device's set holds stays out of it, so in most chunks it stays empty
+//   (DXMT_MTL4_CHUNK_RESIDENCY=1: always, as before).
 // - Command buffers and records are recycled (an MTL4CommandBuffer is reusable after completion).
 //
 // Threads: begin/commit/waitForEvent/signalEvent on the encode thread, for the chunk being encoded;
@@ -112,7 +114,7 @@ public:
 
   // Ends and commits the open command buffer of chunk `seq`, with its feedback; before that, the
   // device set's and the slot set's pending changes are committed and the command buffer uses the
-  // slot's set.
+  // slot's set (gw2 #153: if it has allocations).
   void commit(uint64_t seq);
 
   // The residency set of chunk `seq`'s slot (WMTMtl4BindingState::residency_set)

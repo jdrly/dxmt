@@ -127,6 +127,11 @@ statsEnabled() {
 // the device set (#29) isn't in this test: the queue's own per-slot sets are
 void
 residencyBeforeCommit() {}
+// gw2 (#153): DXMT_MTL4_CHUNK_RESIDENCY unset
+bool
+mtl4ChunkResidency() {
+  return false;
+}
 } // namespace dxmt::gw2
 
 template <typename T>
@@ -1146,7 +1151,7 @@ main() {
         arena_calls++;
         if (current && current->in_rows)
           current->rows_refills++;
-        return std::pair<WMT::Buffer, uint64_t>{WMT::Buffer{H(b)}, 0};
+        return Mtl4Encoding::Bytes{WMT::Buffer{H(b)}, 0, false};
       };
       // the load chunk (ring slot 0): its residency set is emptied when it retires
       {

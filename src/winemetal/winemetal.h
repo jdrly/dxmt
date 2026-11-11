@@ -907,9 +907,17 @@ enum WMTBlitOption : uint16_t {
 
 struct wmtcmd_base {
   uint16_t type;
-  uint16_t reserved[3];
+  uint16_t flags; /* gw2 (#153): WMT_CMD_*; every packet's reserved[0] */
+  uint16_t reserved[2];
   struct WMTMemoryPointer next;
 };
+
+/* gw2 (#153): every allocation the packet names is in a residency set the queue has (the device's),
+   so Metal 4's replay adds none of them to the chunk's set (WMTMtl4BindingState::residency_set).
+   Only these packets read it: Set*PSO, Set*Buffer, DrawIndexed (with its index_buffer_address and
+   _length) and DrawIndexedIndirect. Metal 3's replay ignores it. A builder that doesn't know leaves
+   flags 0 (DXMT's packet allocator zeroes it). */
+#define WMT_CMD_RESIDENT 0x1u
 
 struct wmtcmd_blit_nop {
   enum WMTBlitCommandType type;
@@ -1389,6 +1397,9 @@ struct wmtcmd_render_draw_indexed {
   uint32_t instance_count;
   int32_t base_vertex;
   uint32_t base_instance;
+  /* gw2 (#153): with WMT_CMD_RESIDENT, index_buffer's gpuAddress and length; read only then */
+  uint64_t index_buffer_address;
+  uint64_t index_buffer_length;
 };
 
 struct wmtcmd_render_draw_indexed_indirect {
@@ -1401,6 +1412,9 @@ struct wmtcmd_render_draw_indexed_indirect {
   uint64_t index_buffer_offset;
   obj_handle_t indirect_args_buffer;
   uint64_t indirect_args_offset;
+  /* gw2 (#153): as wmtcmd_render_draw_indexed's */
+  uint64_t index_buffer_address;
+  uint64_t index_buffer_length;
 };
 
 struct wmtcmd_render_draw_meshthreadgroups {
@@ -2137,6 +2151,9 @@ WINEMETAL_API void MTLResidencySet_removeAllAllocations(obj_handle_t residency_s
 
 WINEMETAL_API void MTLResidencySet_commit(obj_handle_t residency_set);
 
+/* gw2 (#153): the set's allocationCount (its allocations, committed or not) */
+WINEMETAL_API uint64_t MTLResidencySet_allocationCount(obj_handle_t residency_set);
+
 WINEMETAL_API void MTLCommandQueue_addResidencySet(obj_handle_t queue, obj_handle_t residency_set);
 
 enum WMTHeapType : uint32_t {
@@ -2391,7 +2408,9 @@ struct WMTMtl4BindingState {
      creation the attachments and the visibility buffer (unless flags has
      WMT_MTL4_NO_ATTACHMENT_RESIDENCY: the present pass's drawable). Metal 4 makes nothing resident
      by itself. The caller commits the set before the commit that needs it and empties it once the
-     work retired. 0: no set; UseResource then counts in use_resource_dropped. */
+     work retired. 0: no set; UseResource then counts in use_resource_dropped. gw2 (#153): what a
+     set the queue has already holds stays out: a packet's WMT_CMD_RESIDENT, the attachments with
+     WMT_MTL4_NO_ATTACHMENT_RESIDENCY, the bytes buffer with WMT_MTL4_BYTES_RESIDENT. */
   obj_handle_t residency_set;
   /* gw2 (#32 part 3): a Set*Bytes that didn't fit between bytes_offset and bytes_end (with a bytes
      buffer set) stops the replay at that packet: resume is set to it and bytes_needed to what it
@@ -2411,7 +2430,11 @@ struct WMTMtl4BindingState {
   uint32_t residency_adds;       /* allocations added to residency_set (repeats within a call skipped) */
 };
 STATIC_ASSERT(sizeof(struct WMTMtl4BindingState) == 1120); /* the same on i386 and x86_64 */
+/* the attachments (colors, resolves, depth, stencil) stay out of residency_set: a set the queue has
+   holds them (the layer's for a drawable, gw2 #153: the device's); the visibility buffer doesn't */
 #define WMT_MTL4_NO_ATTACHMENT_RESIDENCY 0x1u
+/* gw2 (#153): bytes_buffer stays out of residency_set: the device's set holds it */
+#define WMT_MTL4_BYTES_RESIDENT 0x2u
 
 /* written by the commit's feedback handler (on a Metal thread) into the caller's memory: first the
    times and the error, then done = 1, then the event (if any) is set to event_value. So a waiter on

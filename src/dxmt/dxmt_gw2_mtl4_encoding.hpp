@@ -12,6 +12,8 @@
 //   blit: none), the chunk slot's residency set, and a bytes arena from the argument-buffer ring
 //   for Set*Bytes (at least 64 KB free before each encoder; a replay that fills it stops at the
 //   Set*Bytes that didn't fit and resumes with a new arena; the ring frees them after the chunk).
+//   gw2 (#153): an arena in the device's residency set stays out of the chunk's
+//   (WMT_MTL4_BYTES_RESIDENT).
 // - The binding state's counters go to the METAL4 section when the chunk is done.
 
 #include "Metal.hpp"
@@ -25,8 +27,13 @@ namespace dxmt::gw2 {
 
 class Mtl4Encoding {
 public:
-  // size bytes in a shared buffer that stays alive until the chunk retired: (buffer, offset)
-  using BytesAllocator = std::function<std::pair<WMT::Buffer, uint64_t>(uint64_t size)>;
+  // size bytes in a shared buffer that stays alive until the chunk retired
+  struct Bytes {
+    WMT::Buffer buffer;
+    uint64_t offset;
+    bool resident; // gw2 (#153): the device's residency set holds the buffer
+  };
+  using BytesAllocator = std::function<Bytes(uint64_t size)>;
 
   Mtl4Encoding(Mtl4Queue &queue, uint64_t seq, BytesAllocator bytes);
   ~Mtl4Encoding();
@@ -35,8 +42,9 @@ public:
   Mtl4Encoding &operator=(const Mtl4Encoding &) = delete;
 
   // --- as WMT::CommandBuffer's
-  // flags: WMTMtl4BindingState::flags for this encoder (WMT_MTL4_NO_ATTACHMENT_RESIDENCY: the present
-  // pass's drawable stays out of the chunk's set; the layer's own set covers it)
+  // flags: WMTMtl4BindingState::flags for this encoder (WMT_MTL4_NO_ATTACHMENT_RESIDENCY: the
+  // attachments stay out of the chunk's set; the present pass's drawable is in the layer's own set,
+  // gw2 #153: other attachments in the device's)
   WMT::MTL4RenderCommandEncoder renderCommandEncoder(WMTRenderPassInfo &info, uint32_t flags = 0);
   WMT::MTL4ComputeCommandEncoder computeCommandEncoder(bool concurrent);
   WMT::MTL4BlitCommandEncoder blitCommandEncoder();
@@ -100,6 +108,7 @@ private:
   uint64_t position_ = 0;
   std::vector<Segment> segments_;
   WMTMtl4BindingState state_{};
+  uint32_t bytes_flags_ = 0; // gw2 (#153): WMT_MTL4_BYTES_RESIDENT for the current arena
 };
 
 } // namespace dxmt::gw2

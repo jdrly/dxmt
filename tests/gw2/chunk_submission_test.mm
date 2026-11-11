@@ -108,6 +108,11 @@ residencyBeforeCommit() {
       g_mtl4_hooked_before++;
   }
 }
+// gw2 (#153): DXMT_MTL4_CHUNK_RESIDENCY unset
+bool
+mtl4ChunkResidency() {
+  return false;
+}
 } // namespace dxmt::gw2
 
 #define OBJ(h) ((__bridge id)(void *)(uintptr_t)(h))

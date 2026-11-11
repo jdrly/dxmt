@@ -30,6 +30,8 @@
 //   without an error, with GPU times, and the GPU wrote the value; retire() resets the slot's
 //   allocator before the slot is used again;
 // - a queue-level waitForEvent holds the next commit until the CPU signals the event;
+// - gw2 (#153): retire() leaves the slot's set empty; a chunk whose set stays empty (a command buffer
+//   that names nothing) commits without the set, completes without an error and leaves it empty;
 // - waitIdle() and the destructor with nothing pending.
 
 #import <Metal/Metal.h>
@@ -69,6 +71,11 @@ statsEnabled() {
 // the device set (#29) isn't in this test: the queue's own per-slot sets are
 void
 residencyBeforeCommit() {}
+// gw2 (#153): DXMT_MTL4_CHUNK_RESIDENCY unset
+bool
+mtl4ChunkResidency() {
+  return false;
+}
 } // namespace dxmt::gw2
 
 // one chunk's GPU work: fill its 4 bytes of `buffer` with seq
@@ -138,6 +145,8 @@ main() {
           CHECK(bytes[0] == uint8_t(seq) && bytes[3] == uint8_t(seq), "chunk %llu: the GPU wrote %u, want %u",
                 (unsigned long long)seq, bytes[0], unsigned(uint8_t(seq)));
           queue.retire(seq);
+          CHECK(queue.residency(seq).allocationCount() == 0, "chunk %llu: the slot's set isn't empty after retire()",
+                (unsigned long long)seq);
           retired.store(seq, std::memory_order_release);
         }
       });
@@ -168,6 +177,17 @@ main() {
         committed.store(seq, std::memory_order_release);
       }
       finish.join();
+      // gw2 (#153): a chunk whose packets named nothing for its set: committed without it
+      {
+        constexpr uint64_t seq = kChunks + 1;
+        queue.begin(seq);
+        queue.commit(seq);
+        auto &commits = queue.wait(seq);
+        CHECK(commits.size() == 1 && commits[0]->done() && !commits[0]->feedback.error,
+              "an empty chunk: %zu commits, or not done, or a GPU error", commits.size());
+        CHECK(queue.residency(seq).allocationCount() == 0, "an empty chunk's set has allocations");
+        queue.retire(seq);
+      }
       queue.waitIdle();
     }
     std::printf("Mtl4Queue: %llu chunks on %u slots, split commits, a queue-level event wait: %s\n",
