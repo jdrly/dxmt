@@ -93,6 +93,11 @@ public:
               "rename, pages that grow up to 64 KB, default-usage buffers renamed into suballocated CPU-visible "
               "pages, Map/Unmap API time sampled 1 in 16"
           );
+        if (gw2_update_one_call_) // gw2 (#145)
+          Logger::info(
+              "UpdateSubresource one call: on (DXMT_UPDATE_ONE_CALL): a buffer update on the map fast path "
+              "maps and copies under one lock, without the nested Map and Unmap; MAP and PACE count both"
+          );
       }
 
   gw2::TimestampMode timestamp_mode_ = gw2::timestampMode(); // gw2 (#24)
@@ -224,6 +229,44 @@ public:
     }
     }
     return S_OK;
+  }
+
+  // gw2 (#145): DXMT_UPDATE_ONE_CALL: UpdateSubresource's fast branch (the base's, for a discard or
+  // no-overwrite update of a buffer with a DynamicBuffer) runs here under one device lock:
+  // MapBufferFast, then the copy, without the virtual Map and Unmap, their scopes and locks, or a
+  // reference count on the DynamicBuffer. MAP and PACE still count one Map and one Unmap per update
+  // (gw2::UpdateScope), timed from after the lock to before the copy: what Map and Unmap timed.
+  void
+  STDMETHODCALLTYPE
+  UpdateSubresource1(ID3D11Resource *pDstResource, UINT DstSubresource, const D3D11_BOX *pDstBox,
+                     const void *pSrcData, UINT SrcRowPitch, UINT SrcDepthPitch, UINT CopyFlags) override {
+    D3D11ResourceCommon *common = gw2_update_one_call_ && pDstResource ? GetResourceCommon(pDstResource) : nullptr;
+    if (common && common->gw2_dynamic_) {
+      uint32_t buffer_len = common->gw2_byte_width_;
+      uint32_t copy_offset = 0;
+      uint32_t copy_len = buffer_len;
+      if (pDstBox) {
+        if (pDstBox->right <= pDstBox->left)
+          return;
+        copy_offset = pDstBox->left;
+        copy_len = pDstBox->right - copy_offset;
+      }
+      bool discard = (CopyFlags & D3D11_COPY_DISCARD) || (copy_len == buffer_len && copy_offset == 0);
+      if (discard || (CopyFlags & D3D11_COPY_NO_OVERWRITE)) {
+        std::lock_guard<d3d11_device_mutex> lock(mutex);
+        DynamicBuffer &dynamic = *common->gw2_dynamic_;
+        {
+          gw2::UpdateScope gw2_update(gw2_map_, gw2::MapKind(common->gw2_map_kind_),
+                                      discard ? gw2::MapOp::Discard : gw2::MapOp::NoOverwrite, gw2_api_thread_);
+          D3D11_MAPPED_SUBRESOURCE mapped;
+          MapBufferFast(dynamic, common, discard ? D3D11_MAP_WRITE_DISCARD : D3D11_MAP_WRITE_NO_OVERWRITE, &mapped);
+        }
+        dynamic.immediateNamePtr()->updateContents(copy_offset, pSrcData, copy_len, dynamic.immediateSuballocation());
+        return;
+      }
+    }
+    ImmediateContextBase::UpdateSubresource1(pDstResource, DstSubresource, pDstBox, pSrcData, SrcRowPitch,
+                                             SrcDepthPitch, CopyFlags);
   }
 
   // gw2 (#25): a rename's outcome, for the MAP section
@@ -1102,6 +1145,7 @@ private:
   bool ignore_map_flag_no_wait_;
   Com<MTLD3D11DeviceContextState, false> state_object_;
   gw2::MapCounters gw2_map_; // gw2 (#25): the MAP section, published at each commit
+  const bool gw2_update_one_call_ = gw2::updateOneCall(); // gw2 (#145): DXMT_UPDATE_ONE_CALL, cached
 };
 
 std::unique_ptr<MTLD3D11DeviceContextBase>
