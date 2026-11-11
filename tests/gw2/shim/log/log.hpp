@@ -18,3 +18,4 @@ format(const T &...args) {
 }
 } // namespace str
 } // namespace dxmt
+#define WARN(...) dxmt::Logger::warn(dxmt::str::format(__VA_ARGS__))

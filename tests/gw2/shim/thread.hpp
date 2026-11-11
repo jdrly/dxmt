@@ -11,6 +11,11 @@ namespace dxmt {
 using thread = std::thread;
 using mutex = std::mutex;
 using condition_variable = std::condition_variable;
+struct null_mutex { // as src/util/thread.hpp's
+  void lock() {}
+  void unlock() noexcept {}
+  bool try_lock() { return true; }
+};
 } // namespace dxmt
 
 #ifndef THREAD_PRIORITY_TIME_CRITICAL
