@@ -68,8 +68,9 @@ main(void) {
   CHECK(WMTReserved_179 == 179 && WMTReserved_189 == 189);
   CHECK(WMTCall_MTLDevice_supportsMetal4FX == 190);
   CHECK(WMTCall_CacheEnumerate == 193 && WMTReserved_194 == 194 && WMTReserved_199 == 199); // lane C (#64; 193: W2/W3)
-  CHECK(WMTCall_Count == 200);
-  CHECK(calls == 182 && reserved == 18 && wow64 == 9);
+  CHECK(WMTCall_WMTSetThreadBasePrioritySelf == 200); // #151
+  CHECK(WMTCall_Count == 201);
+  CHECK(calls == 183 && reserved == 18 && wow64 == 9);
 
 #ifdef DXMT_NATIVE
   // Through the real table: a handler at every call number, NULL at every reserved one

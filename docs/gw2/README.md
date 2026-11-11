@@ -24,6 +24,7 @@ because Wine raises `0x80000005` (`STATUS_BUFFER_OVERFLOW`) for a line over its 
 | `DXMT_BG_FPS` | 30 | Present sleeps to this rate while another process's window is in the foreground | `=0`: no throttle |
 | `DXMT_BG_FPS_MINIMIZED` | 10 | The same while GW2's window is minimized | `=0`: no throttle |
 | `DXMT_RENDER_THREAD_PRIORITY` | off | On the first Present of each thread that presents (GW2's render thread): `=1` sets the macOS QoS class user-interactive (`pthread_set_qos_class_self_np` through the bridge), `=2` calls `SetThreadPriority(THREAD_PRIORITY_HIGHEST)`, `=3` both; see [Render thread priority](#render-thread-priority) | unset or `=0`: the thread keeps the priority and QoS it had |
+| `DXMT_THREAD_PRIORITY` | `critical` | (#151) The priority DXMT's `dxmt-encode-thread` and `dxmt-finish-thread` set at their start. `critical`: `THREAD_PRIORITY_TIME_CRITICAL`, as upstream. `normal`: `THREAD_PRIORITY_NORMAL`, timeshare and below GW2's game thread. `utility`: `normal`, then Mach base priority 20 (bridge call `WMTSetThreadBasePrioritySelf`), which macOS keeps on the P cores. Read at each queue's creation; anything else is `critical`, with a warning. The startup line shows `utility:ok`, `utility:failed` (a thread didn't get base priority 20) or `utility:pending` (no thread has tried yet); see [Queue thread priority](#queue-thread-priority) | unset or `critical`: `THREAD_PRIORITY_TIME_CRITICAL` |
 | `DXMT_DEPTH_PFV` | off | `=1` keeps `PixelFormatView` (no lossless compression) on typeless single-plane depth targets (`R32_TYPELESS`, `R16_TYPELESS` bound as depth), the part `DXMT_STENCIL_PFV` doesn't cover (#2) | — |
 | `DXMT_BG_POLICY` | `focus` | What "in the background" means for `DXMT_BG_FPS`. `focus`: another process's window is in the foreground, or none is (pid 0, counted as another process). `occlusion`: GW2's window isn't visible on screen (`NSWindow.occlusionState` without `Visible`, read through the bridge at most 10 times a second) or is miniaturized (`DXMT_BG_FPS_MINIMIZED`), whoever has the focus, as d9mt does. A minimized window (`IsIconic`) throttles under both | `focus` |
 | `DXMT_PSO_BLEND_HASH` | on | The pipeline key's hash includes a fingerprint of the blend state (exactly what the key's equality compares: disabled fields left out, one render target without independent blend, else one per color attachment) and `RasterizationEnabled`; computed once per blend state object. The equality rejects keys whose fingerprints differ without reading both blend descriptions | `=0`: the upstream hash (no blend, no `RasterizationEnabled`) and equality |
@@ -129,6 +130,9 @@ Sections: a feature registers a function with `gw2::SectionRegistrar` (`src/dxmt
 | `RenderThreadPriority: thread T QoS OLD -> NEW (pthread_set_qos_class_self_np user-interactive: ok\|error E, left unchanged)` | `DXMT_RENDER_THREAD_PRIORITY` 1 or 3, once per presenting thread: its Win32 thread id, `qos_class_self()` before and after, and the call's result (an errno) |
 | `RenderThreadPriority: thread T priority OLD -> NEW (SetThreadPriority THREAD_PRIORITY_HIGHEST: ok\|error E, left unchanged)` | `DXMT_RENDER_THREAD_PRIORITY` 2 or 3, once per presenting thread: `GetThreadPriority` before and after, and `GetLastError` on failure |
 | `RenderThreadPriority: thread T: DXMT_RENDER_THREAD_PRIORITY=N isn't 1, 2 or 3, left unchanged` | Any other value |
+| `ThreadPriority: NAME normal (SetThreadPriority THREAD_PRIORITY_NORMAL: ok\|error E)` | `DXMT_THREAD_PRIORITY=normal`, once per queue thread at its start (`NAME` is `dxmt-encode-thread` or `dxmt-finish-thread`; `E` is `GetLastError`) |
+| `ThreadPriority: NAME utility, base priority OLD -> NEW (SetThreadPriority THREAD_PRIORITY_NORMAL: ok\|error E; thread_policy_set: ok\|error K)` | `DXMT_THREAD_PRIORITY=utility`, once per queue thread at its start: the thread's Mach base priority after `THREAD_PRIORITY_NORMAL` and after the precedence call (`-1`: unreadable). `K` is the `kern_return_t`, or `-1` if the task's priority couldn't be read and nothing was set |
+| `DXMT_THREAD_PRIORITY=… is not critical, normal or utility; using critical` | Warning, once per queue, for any other value |
 | `DXMT_DEPTH_PFV=1: keeping PixelFormatView on typeless single-plane depth targets (first: format F bind B WxH)` | Once, the first time `DXMT_DEPTH_PFV` keeps the flag (the `PixelFormatView` line above then follows per format and bind flags) |
 | `DEPTHVIEW base=… view=… swizzle=… type=… size=… usage=… pfv=… aspect=… nil=…` | Once per distinct view of a depth/stencil texture, and for any view that came back nil (a warning then); at most 64, then `DEPTHVIEW: more than 64 distinct views, the rest are suppressed`. Replaces the old stencil-only `TextureView` warning. Fields below |
 | `DEPTHSRV format=… size=… pfv=… readonly=… stage=… slot=… view=… swizzled=… aspect=…` | Once per texture (with `DXMT_STATS` on) that is a render pass's depth-stencil attachment and is read by a shader of the same pass as a shader resource; at most 64, then `DEPTHSRV: more than 64 textures, the rest are suppressed`. Fields below |
@@ -179,7 +183,7 @@ Sections: a feature registers a function with `gw2::SectionRegistrar` (`src/dxmt
 `DXMT_RENDER_THREAD_PRIORITY` (#9) is an experiment: in Lion's Arch GW2's render thread ran 22% of
 its time on Performance cores while the main thread and DXMT's encode thread stayed on Super cores.
 It acts on the first Present of each thread that presents, which in GW2 is the bgfx render thread,
-and never on DXMT's own threads (the encode thread keeps `THREAD_PRIORITY_TIME_CRITICAL`).
+and never on DXMT's own threads (those follow [`DXMT_THREAD_PRIORITY`](#queue-thread-priority)).
 
 - `=1`, **QoS class.** Bridge call 153 (`WMTSetThreadQoSClassSelf`) runs on the calling thread and
   calls `pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0)`. The QoS class is what
@@ -197,6 +201,35 @@ There is no restore: the render thread lives as long as the game, and only the t
 set its QoS class. Not verified in GW2 yet: whether macOS accepts the QoS class on a thread the
 wineserver has already given Mach policies (every Wine thread gets them at start; the log line
 shows the errno if not), and whether a later `SetThreadPriority` by the game undoes it.
+
+### Queue thread priority
+
+`DXMT_THREAD_PRIORITY` (#151) is for watts. Upstream starts DXMT's encode and finish threads at
+`THREAD_PRIORITY_TIME_CRITICAL`, which this engine's wineserver turns into timeshare off and Mach
+importance 32. That puts both above every GW2 thread (the game thread is `HIGHEST`, base priority 35
+in GW2's task, whose priority is 26), and they always get S cores. Neither is on the critical path:
+at 60 FPS on Metal 4 the encode thread uses 18 to 25% of a core and blocks 13 ms a frame in
+`nextDrawable`, and the finish thread is blocked 98% of the time.
+
+- `critical`, the default: as upstream.
+- `normal`: `THREAD_PRIORITY_NORMAL`, Mach importance 0 and timeshare on, so base priority 26 in
+  GW2's task, below the game thread and its workers.
+- `utility`: `normal` first, then bridge call `WMTSetThreadBasePrioritySelf(20)`. It sets the
+  thread's `THREAD_PRECEDENCE_POLICY` importance to 20 less the task's priority (`proc_pidinfo`
+  `pti_priority`), so the thread's base priority is 20, the utility band, which macOS keeps on the
+  P cores. This is how the heat `ntdll.so` places threads for `HEAT_QOS=1=utility`, except that it
+  reads the task's priority directly instead of from the thread's base priority less its
+  importance, which a waiter's QoS override would inflate. `pthread_set_qos_class_self_np` is no
+  use here: macOS refuses it once the wineserver has set Mach policies on a thread. The native test
+  `thread_priority_test` checks that the call leaves base priority 20 from the normal, highest and
+  time-critical states.
+
+What to read in a session: the two `ThreadPriority:` lines (base priority `26 -> 20` for `utility`),
+the startup line's `DXMT_THREAD_PRIORITY`, and, with the heat ntdll's `HEAT_COUNT=on`, the two
+threads' base priority. `STATS encode=` may rise (the P cores run slower); `RING stalls`,
+`STATS latency` and `commit` should stay 0, and `PACE` p50 and p99 shouldn't rise. A pipeline wait
+blocks the encode thread whatever its priority, so hitches shouldn't change. Below 60 FPS the
+queue runs empty, so a slower encode adds to `PRESENT presented`.
 
 ### DEPTHVIEW and DEPTHSRV (#2)
 
@@ -1225,6 +1258,14 @@ and shows the base) agrees with the unix side on each value.
 `Map` and `Unmap` scopes give for the same updates, an update inside another entry point's scope is
 left to that scope in `PACE`, and the 1 in 16 timing, scaled, lands near the true time, with `MAP` and
 `PACE` taking the same interval.
+
+`thread_priority_test.c` (#151, pure, arm64 and x86_64) calls `WMTSetThreadBasePrioritySelf(20)`
+through the PE thunk and the production table, linked with the whole unix side as the Metal 4 tests
+are. Each call runs on a thread first put into the state the wineserver leaves a Wine thread in for
+`THREAD_PRIORITY_NORMAL`, `HIGHEST` or `TIME_CRITICAL` (extended and precedence policies), and the
+thread's base priority, read with `proc_pidinfo`, must be 20 afterwards. The main thread waits by
+polling, not `pthread_join`, until the thread has measured, because a joiner's QoS override lifts the
+joined thread to base priority 31 while the join lasts.
 
 ## PSO archive tool
 

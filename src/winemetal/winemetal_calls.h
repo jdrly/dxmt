@@ -241,6 +241,8 @@ WMT_RESERVED(196, "lane C, jdrly/dxmt #64")
 WMT_RESERVED(197, "lane C, jdrly/dxmt #64")
 WMT_RESERVED(198, "lane C, jdrly/dxmt #64")
 WMT_RESERVED(199, "lane C, jdrly/dxmt #64")
+/* gw2 (#151): DXMT_THREAD_PRIORITY=utility */
+WMT_CALL(200, WMTSetThreadBasePrioritySelf, _WMTSetThreadBasePrioritySelf)
 
 /* clang-format on */
 

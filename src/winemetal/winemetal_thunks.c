@@ -1456,6 +1456,21 @@ WMTSetThreadQoSClassSelf(
   return params.ret;
 }
 
+WINEMETAL_API int
+WMTSetThreadBasePrioritySelf(int base_priority, int *old_base, int *new_base) {
+  struct unixcall_wmt_set_thread_base_priority params;
+  params.base_priority = base_priority;
+  params.ret_old_base = -1;
+  params.ret_new_base = -1;
+  params.ret = -1;
+  UNIX_CALL(WMTSetThreadBasePrioritySelf, &params);
+  if (old_base)
+    *old_base = params.ret_old_base;
+  if (new_base)
+    *new_base = params.ret_new_base;
+  return params.ret;
+}
+
 // gw2 (#5): PSO archives
 WINEMETAL_API bool
 WMTPSOArchiveInit(obj_handle_t device, const struct WMTPSOArchiveConfig *config, char *report, uint32_t report_size) {

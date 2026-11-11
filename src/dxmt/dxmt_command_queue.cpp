@@ -83,6 +83,65 @@ MaxLatencyOverrideFromEnv() {
   return 0;
 }
 
+// gw2 (#151): DXMT_THREAD_PRIORITY, the encode and finish threads' priority. critical (default,
+// upstream's): THREAD_PRIORITY_TIME_CRITICAL, which this engine's wineserver turns into timeshare off
+// and Mach importance 32, above every GW2 thread, so both threads always get S cores. normal:
+// THREAD_PRIORITY_NORMAL, timeshare below the game thread. utility: normal, then base priority 20
+// (bridge call WMTSetThreadBasePrioritySelf), which macOS keeps on the P cores. Anything else is
+// critical, with a warning. Read at each queue's creation.
+std::string
+ParseThreadPriority(const std::string &raw, const std::string &fallback) {
+  return raw == "critical" || raw == "normal" || raw == "utility" ? raw : fallback;
+}
+sw::Switch<std::string> kThreadPriority{"DXMT_THREAD_PRIORITY", "critical", ParseThreadPriority};
+
+// utility's outcome on the queue threads so far, for the startup line: bit 0 a thread got base
+// priority 20, bit 1 a thread didn't
+std::atomic<int> g_utility_outcome{0};
+
+sw::Effective kThreadPriorityLine{"DXMT_THREAD_PRIORITY", [] {
+  auto mode = kThreadPriority();
+  if (mode != "utility")
+    return mode;
+  int outcome = g_utility_outcome.load(std::memory_order_relaxed);
+  return std::string(outcome & 2 ? "utility:failed" : outcome & 1 ? "utility:ok" : "utility:pending");
+}};
+
+QueueThreadPriority
+ThreadPriorityFromEnv() {
+  auto v = kThreadPriority.requested();
+  auto mode = kThreadPriority.parse(v);
+  if (!v.empty() && mode != v)
+    WARN("DXMT_THREAD_PRIORITY=", v, " is not critical, normal or utility; using critical");
+  return mode == "normal" ? QueueThreadPriority::Normal : mode == "utility" ? QueueThreadPriority::Utility : QueueThreadPriority::Critical;
+}
+
+// On the thread `name` itself, at its start: the Win32 priority first, then for utility the base
+// priority, which must come after the wineserver's policies for THREAD_PRIORITY_NORMAL. A failure
+// leaves the thread where the step before put it. One line per thread unless critical.
+void
+SetQueueThreadPriority(QueueThreadPriority mode, const char *name) {
+  HANDLE self = GetCurrentThread();
+  if (mode == QueueThreadPriority::Critical) {
+    SetThreadPriority(self, THREAD_PRIORITY_TIME_CRITICAL);
+    return;
+  }
+  BOOL ok = SetThreadPriority(self, THREAD_PRIORITY_NORMAL);
+  std::string win32 = ok ? std::string("ok") : str::format("error ", GetLastError());
+  if (mode == QueueThreadPriority::Normal) {
+    Logger::info(str::format("ThreadPriority: ", name, " normal (SetThreadPriority THREAD_PRIORITY_NORMAL: ", win32, ")"));
+    return;
+  }
+  int old_base = -1, new_base = -1;
+  int err = WMTSetThreadBasePrioritySelf(20, &old_base, &new_base);
+  g_utility_outcome.fetch_or(!err && new_base == 20 ? 1 : 2, std::memory_order_relaxed);
+  Logger::info(str::format(
+      "ThreadPriority: ", name, " utility, base priority ", old_base, " -> ", new_base,
+      " (SetThreadPriority THREAD_PRIORITY_NORMAL: ", win32,
+      "; thread_policy_set: ", err ? str::format("error ", err) : std::string("ok"), ")"
+  ));
+}
+
 // gw2 (#8): the RING section. The render thread publishes each completed frame's totals (at the
 // next frame's first commit) under the mutex, and the 2 s window drains them under it, so a line
 // only ever holds whole frames and its averages divide by the frames it holds.
@@ -147,6 +206,7 @@ CommandQueue::CommandQueue(WMT::Device device) :
     unretained_(gw2::lifetime::unretained()),
     lifetime_id_(gw2::lifetime::attachQueue()), // gw2 (#31): logs the command buffer mode once per queue
     retire_recovery_(kRetireRecovery()),        // gw2 (#113)
+    thread_priority_(ThreadPriorityFromEnv()),  // gw2 (#151)
     // gw2 (#69): Metal 3's policy until the constructor knows whether the queue is on Metal 4
     ledger_(chunk_count_, {.unretained = unretained_, .lifetime_check = gw2::lifetime::check()}),
     encodeThread([this]() { this->EncodingThread(); }),
@@ -382,7 +442,7 @@ uint32_t
 CommandQueue::EncodingThread() {
 #if ASYNC_ENCODING
   env::setThreadName("dxmt-encode-thread");
-  SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+  SetQueueThreadPriority(thread_priority_, "dxmt-encode-thread"); // gw2 (#151)
   uint64_t internal_seq = 1;
   while (!stopped.load()) {
     ready_for_encode.wait(internal_seq, std::memory_order_acquire);
@@ -401,7 +461,7 @@ CommandQueue::EncodingThread() {
 uint32_t
 CommandQueue::WaitForFinishThread() {
   env::setThreadName("dxmt-finish-thread");
-  SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+  SetQueueThreadPriority(thread_priority_, "dxmt-finish-thread"); // gw2 (#151)
   uint64_t internal_seq = 1;
   while (!stopped.load()) {
     ready_for_commit.wait(internal_seq, std::memory_order_acquire);
