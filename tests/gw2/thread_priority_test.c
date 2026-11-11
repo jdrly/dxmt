@@ -17,9 +17,10 @@
 //
 // The main thread never pthread_joins a thread before that thread has measured: a joiner lends the
 // joined thread its QoS as an override, which raises its base priority to 31 while the join lasts.
-// Needs no Metal device, only the bridge's unix side linked in. Skips (77) in a task whose priority is
-// 20 or less: GitHub's macOS runner runs its jobs clamped to the utility band (task priority 20, as
-// `taskpolicy -c utility` does), where no thread can go above or below it.
+// Needs no Metal device, only the bridge's unix side linked in. Skips (77) when the thread's maximum
+// priority is 20 or less: GitHub's macOS runner runs its jobs clamped to the utility band (task and
+// maximum priority 20, as `taskpolicy -c utility` does), where no thread can go above or below 20.
+// A task that is only niced to 20 keeps maximum priority 63 and runs the test.
 
 #include <libproc.h>
 #include <mach/mach.h>
@@ -41,13 +42,16 @@ static int failures;
   } while (0)
 
 static int
-base_priority_self(void) {
+thread_info_self(struct proc_threadinfo *info) {
   uint64_t tid;
+  return !pthread_threadid_np(NULL, &tid) &&
+         proc_pidinfo(getpid(), PROC_PIDTHREADID64INFO, tid, info, sizeof(*info)) == sizeof(*info);
+}
+
+static int
+base_priority_self(void) {
   struct proc_threadinfo info;
-  if (pthread_threadid_np(NULL, &tid) ||
-      proc_pidinfo(getpid(), PROC_PIDTHREADID64INFO, tid, &info, sizeof(info)) != sizeof(info))
-    return -1;
-  return info.pth_priority;
+  return thread_info_self(&info) ? info.pth_priority : -1;
 }
 
 struct wine_state {
@@ -85,13 +89,15 @@ thread_main(void *unused) {
 int
 main(void) {
   struct proc_taskinfo task;
-  if (proc_pidinfo(getpid(), PROC_PIDTASKINFO, 0, &task, sizeof(task)) != sizeof(task)) {
-    printf("FAIL: can't read the task's priority\n");
+  struct proc_threadinfo self;
+  if (proc_pidinfo(getpid(), PROC_PIDTASKINFO, 0, &task, sizeof(task)) != sizeof(task) || !thread_info_self(&self)) {
+    printf("FAIL: can't read the task's priority or this thread's maximum priority\n");
     return 1;
   }
-  if (task.pti_priority <= 20) {
-    printf("skip: task priority %d; a task clamped to the utility band or below (a CI runner's) keeps every "
-           "thread at it, so base priority 20 can't be told apart\n", task.pti_priority);
+  if (self.pth_maxpriority <= 20) {
+    printf("skip: maximum priority %d (task priority %d); a task clamped to the utility band or below (a CI "
+           "runner's) keeps every thread at or under it, so base priority 20 can't be told apart\n",
+           self.pth_maxpriority, task.pti_priority);
     return 77;
   }
   const struct wine_state states[] = {
@@ -112,7 +118,7 @@ main(void) {
            task.pti_priority, r->wine_base, r->ret, r->old_base, r->new_base, r->read_base);
     CHECK(r->policy_ret == 0);
     int expected = task.pti_priority + states[i].importance;
-    CHECK(r->wine_base == (expected > 63 ? 63 : expected)); // MAXPRI_USER
+    CHECK(r->wine_base == (expected > self.pth_maxpriority ? self.pth_maxpriority : expected));
     CHECK(r->ret == 0);
     CHECK(r->old_base == r->wine_base);
     CHECK(r->new_base == 20);

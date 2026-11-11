@@ -1124,7 +1124,7 @@ so only the first run after a version change builds LLVM (about 25 minutes per a
   `shared_event_listener_test` pass. `chunk_submission_test` and `mtl4fx_test` run their Metal 3 half and
   skip, while `mtl4_bridge_test`, `mtl4_queue_test` and `paired_replay_test` skip outright (no Metal 4).
   `pso_archive_tool_test` skips without the AIR copy from my Mac (`GW2_AIR_DB`). `thread_priority_test` skips
-  because the runner's jobs run clamped to the utility band (task priority 20). A skip shows as `skip`
+  because the runner's jobs run clamped to the utility band (maximum priority 20). A skip shows as `skip`
   with the test's reason. It never counts as a pass. The Metal 4 paths are still tested only on my Mac.
 - **Lint**: actionlint on the workflow (`.github/actionlint.yaml` names the `xcode-27` label it doesn't
   know yet) and `zsh -n` on the zsh scripts.
@@ -1266,9 +1266,9 @@ are. Each call runs on a thread first put into the state the wineserver leaves a
 `THREAD_PRIORITY_NORMAL`, `HIGHEST` or `TIME_CRITICAL` (extended and precedence policies), and the
 thread's base priority, read with `proc_pidinfo`, must be 20 afterwards. The main thread waits by
 polling, not `pthread_join`, until the thread has measured, because a joiner's QoS override lifts the
-joined thread to base priority 31 while the join lasts. It skips in a task whose priority is 20 or
-less, such as the CI runner's (`taskpolicy -c utility` gives the same), where every thread stays at the
-task's priority whatever its importance.
+joined thread to base priority 31 while the join lasts. It skips when the thread's maximum priority
+is 20 or less, as in the CI runner's jobs (`taskpolicy -c utility` gives the same), where every thread
+stays at 20 whatever its importance. A task only niced down to 20 keeps maximum priority 63 and runs it.
 
 ## PSO archive tool
 
