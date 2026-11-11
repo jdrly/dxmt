@@ -3670,13 +3670,35 @@ public:
 
 
     auto &ShaderStage = state_.ShaderStages[Stage];
+    gw2_pso_.count(gw2::PsoCounter::SrvCall); // gw2 (#147)
+    gw2_pso_.add(gw2::PsoCounter::SrvSlot, NumViews);
     for (unsigned slot = StartSlot; slot < StartSlot + NumViews; slot++) {
       auto pView = static_cast<D3D11ShaderResourceView *>(ppShaderResourceViews[slot - StartSlot]);
+      // gw2 (#147): the view this slot already holds (its private reference keeps the address from
+      // being reused). With the switch on, a bound view that can be an output always has its hazard
+      // bit (below), and binding an output unbinds every SRV it overlaps through those bits
+      // (ResolveSRVHazard), so ValidateSRVHazard would pass it and bind() find it redundant: the
+      // state and the encode thread's slot stay as they are, without loading the view.
+      if (pView && ShaderStage.SRVs.test_bound(slot) && ShaderStage.SRVs.at(slot).RawPointer == pView) {
+        gw2_pso_.count(gw2::PsoCounter::SrvSame);
+        if (gw2_skip_same_srv_)
+          continue;
+      }
       if (pView && ValidateSRVHazard<Stage>(pView)) {
         bool replaced = false;
-        auto &entry = ShaderStage.SRVs.bind(slot, {pView}, replaced, !pView->hazardsFree());
+        bool hazard = !pView->hazardsFree();
+        // gw2 (#147): bind() keeps a bound slot's hazard bit when it replaces the view, so a view that
+        // can be an output, put in a slot that held one that can't, is missed by ResolveSRVHazard
+        bool missed = hazard && ShaderStage.SRVs.test_bound(slot) && !ShaderStage.SRVs.test_hazard(slot);
+        auto &entry = ShaderStage.SRVs.bind(slot, {pView}, replaced, hazard);
         if (!replaced)
           continue;
+        if (missed) {
+          gw2_pso_.count(gw2::PsoCounter::SrvHazardMissed);
+          if (gw2_skip_same_srv_)
+            ShaderStage.SRVs.set_hazard(slot);
+        }
+        gw2_pso_.count(gw2::PsoCounter::SrvSet);
         entry.SRV = pView;
         if (auto buffer = entry.SRV->buffer()) {
           EmitST([=, buffer = std::move(buffer), viewId = pView->viewId(),
@@ -3691,6 +3713,7 @@ public:
       } else {
         // BIND NULL
         if (ShaderStage.SRVs.unbind(slot)) {
+          gw2_pso_.count(gw2::PsoCounter::SrvSet); // gw2 (#147)
           EmitST([=](ArgumentEncodingContext& enc) {
             enc.bindBuffer<Stage>(slot, {}, 0, {});
           });
@@ -3723,6 +3746,8 @@ public:
     std::lock_guard<mutex_t> lock(mutex);
 
     auto &ShaderStage = state_.ShaderStages[Stage];
+    gw2_pso_.count(gw2::PsoCounter::SamplerCall); // gw2 (#147): counted only; bind() compares first
+    gw2_pso_.add(gw2::PsoCounter::SamplerSlot, NumSamplers);
     for (unsigned Slot = StartSlot; Slot < StartSlot + NumSamplers; Slot++) {
       auto pSampler = static_cast<D3D11SamplerState *>(ppSamplers[Slot - StartSlot]);
       if (pSampler) {
@@ -3730,6 +3755,7 @@ public:
         auto &entry = ShaderStage.Samplers.bind(Slot, {pSampler}, replaced);
         if (!replaced)
           continue;
+        gw2_pso_.count(gw2::PsoCounter::SamplerSet); // gw2 (#147)
         entry.Sampler = pSampler;
         EmitST([=, sampler = pSampler->sampler()](ArgumentEncodingContext &enc) mutable {
           enc.bindSampler<Stage>(Slot, forward_rc(sampler));
@@ -3737,6 +3763,7 @@ public:
       } else {
         // BIND NULL
         if (ShaderStage.Samplers.unbind(Slot)) {
+          gw2_pso_.count(gw2::PsoCounter::SamplerSet); // gw2 (#147)
           EmitST([=](ArgumentEncodingContext& enc) {
             enc.bindSampler<Stage>(Slot, {});
           });
@@ -5653,6 +5680,7 @@ protected:
   bool pso_mru_enabled_ = gw2::psoSettings().mru;
   bool pso_topology_keep_ = gw2::psoSettings().topology_keep;
   const bool gw2_skip_same_state_ = gw2::skipSameState(); // gw2 (#146): DXMT_SKIP_SAME_STATE, cached
+  const bool gw2_skip_same_srv_ = gw2::skipSameSrv();     // gw2 (#147): DXMT_SKIP_SAME_SRV, cached
 
 public:
   enum class DirtyState {
