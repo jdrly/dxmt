@@ -7,7 +7,12 @@
 #   list fails it. Wine's import libraries, winebuild and winemac.so come from 3Shain's Wine
 #   $WINE_VERSION, as in upstream's CI, since the CrossOver engine I build against locally isn't
 #   downloadable.
-# arm64ec: build only, with llvm-mingw, as upstream's CI does it.
+# arm64 (#182): the build for GW2 on Mac 0.2's engine, Mach9 $MACH9_VERSION, the way Mach9 builds its
+#   DXMT: one ARM64X tree (build-arm64ec.txt, so the arm64 winemetal.so too) and one i386 tree, with
+#   llvm-mingw $LLVM_MINGW_VERSION (Mach9's pin), linked against the engine's own Wine files from its
+#   release tarball. Then .github/gw2/check-mach9.zsh compares the result with the engine's DXMT
+#   without running anything. Artifact dxmt-mach9-<commit>: aarch64-windows, i386-windows,
+#   aarch64-unix, VERSION, kept 7 days.
 # tests: zsh -n for the zsh scripts and warnings.zsh's self-check, then tests/gw2/run.zsh pure,
 #   and metal on the runner's Metal device.
 # lint: actionlint for the workflows.
@@ -42,10 +47,15 @@ env:
   LLVM_BUILD: 1
   WINE_VERSION: v8.16-3shain
   WINE_SHA256: 289c7f19e270a3d3d0a6fdb07691b176c70a0795f6811e5255cba82425de4f10
+  # The arm64 job takes only winebuild from it (--builtin marks a DLL the same way in any version):
+  # nothing of Mach9's engine is ever run
   WINE_ARM64EC_VERSION: wine-11.2
   WINE_ARM64EC_SHA256: 834ec0d4f1dff94de187f29891dc9938306ea2602d0fff603b407225c916d881
-  LLVM_MINGW_VERSION: "20260908"
-  LLVM_MINGW_SHA256: d1dc5d1ecf3a3ced5ed5544c72f1acd0c8e84eb3024d520ecc6b143eec62a149
+  # Mach9's pins/redist.env (athei/mach9) at the engine's release
+  LLVM_MINGW_VERSION: "20261104"
+  LLVM_MINGW_SHA256: 66cbd5178c4a71b0d473e68ede172f8eb7d15d023e67f39201d0a69e21f6bf3c
+  MACH9_VERSION: v0.3.1
+  MACH9_SHA256: 90aff9a897ed0ff9aac44d0e06f0aecd3ee985afb38037f3f915451e51fa974e
 
 defaults:
   run:
@@ -170,8 +180,8 @@ jobs:
           pattern: part-*-${{ env.COMMIT }}
           retention-days: 7
 
-  arm64ec:
-    name: Build ARM64EC
+  arm64:
+    name: Build arm64 (Mach9)
     runs-on: xcode-27
     timeout-minutes: 120
     steps:
@@ -183,6 +193,33 @@ jobs:
           persist-credentials: false
       - name: Select Xcode
         run: sudo xcode-select -s "/Applications/Xcode_$XCODE_VERSION.app"
+
+      # What the build links against and what the checks compare with: the engine's winemac.so and
+      # ntdll.so, its import libraries for both arches and its own DXMT (the tree and the
+      # winemetal.so the tree links to). Read, never run.
+      - name: Restore Mach9
+        id: mach9
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: mach9-${{ env.MACH9_VERSION }}
+          path: toolchains/mach9
+      - name: Download Mach9
+        if: steps.mach9.outputs.cache-hit != 'true'
+        run: |
+          w=wine/lib/wine
+          .github/gw2/toolchain.zsh fetch \
+            "https://github.com/athei/mach9/releases/download/$MACH9_VERSION/wine-$MACH9_VERSION-macos-arm64.tar.xz" \
+            "$MACH9_SHA256" toolchains/mach9 --strip-components 1 \
+            $w/aarch64-unix/winemac.so $w/aarch64-unix/ntdll.so $w/aarch64-unix/winemetal.so $w/dxgi/dxmt \
+            $w/aarch64-windows/libwinecrt0.a $w/aarch64-windows/libntdll.a $w/aarch64-windows/libdbghelp.a \
+            $w/i386-windows/libwinecrt0.a $w/i386-windows/libntdll.a $w/i386-windows/libdbghelp.a
+          find toolchains/mach9 | sort
+      - name: Save Mach9
+        if: steps.mach9.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: mach9-${{ env.MACH9_VERSION }}
+          path: toolchains/mach9
 
       - name: Restore Wine
         id: wine
@@ -236,17 +273,57 @@ jobs:
 
       - name: Build
         run: |
-          export PATH="$PWD/toolchains/llvm-mingw/bin:$PATH"
+          # appended, as Mach9 does: llvm-mingw's unprefixed clang mustn't replace Apple's, which
+          # builds winemetal.so and airconv
+          export PATH="$PATH:$PWD/toolchains/llvm-mingw/bin"
+          # meson takes <wine_install_path>/bin/winebuild; the engine's own is never run
+          mkdir -p toolchains/mach9/bin
+          ln -sf "$PWD/toolchains/wine/bin/winebuild" toolchains/mach9/bin/winebuild
           arm64ec-w64-mingw32-gcc --version | head -1
-          meson setup build --cross-file build-arm64ec.txt --buildtype release --strip --prefix "$PWD/install" \
-            -Dwine_install_path="$PWD/toolchains/wine" -Dnative_llvm_path=toolchains/llvm
-          meson compile -C build
-          meson install -C build --quiet
-      - name: The four DLLs are there
+          meson setup build-arm64 --cross-file build-arm64ec.txt --buildtype release --strip --prefix "$PWD/install" \
+            -Dwine_install_path=toolchains/mach9 -Dnative_llvm_path=toolchains/llvm
+          meson compile -C build-arm64
+          meson install -C build-arm64 --quiet
+          meson setup build-i386 --cross-file build-win32.txt --buildtype release --strip --prefix "$PWD/install" \
+            -Dwine_install_path=toolchains/mach9
+          meson compile -C build-i386
+          meson install -C build-i386 --quiet
+      - name: Stage
         run: |
-          for dll in d3d11 dxgi d3d10core winemetal; do
-            file "install/aarch64-windows/$dll.dll" | tee /dev/stderr | grep -q 'PE32+'
-          done
+          rm -f install/*/*.dll.a
+          find install -type f | sort
+          mkdir dist
+          mv install/aarch64-windows install/i386-windows install/aarch64-unix dist/
+          rmdir install
+          wine=$(strings -a toolchains/mach9/lib/wine/aarch64-unix/ntdll.so | grep -oE 'wine-[0-9]+\.[0-9]+(-[0-9]+-g[0-9a-f]+)?' | sort -u)
+          {
+            git -c diff.ignoreSubmodules=all describe --always --dirty
+            echo "commit: $COMMIT"
+            echo "engine: Mach9 $MACH9_VERSION (wine-$MACH9_VERSION-macos-arm64.tar.xz, sha256 $MACH9_SHA256), $wine"
+            echo "toolchain: llvm-mingw $LLVM_MINGW_VERSION, Xcode $XCODE_VERSION (macOS SDK $(xcrun -sdk macosx --show-sdk-version)), LLVM $LLVM_VERSION, macOS $MACOSX_DEPLOYMENT_TARGET, meson $MESON_VERSION"
+          } >dist/VERSION
+          cp COPYING.LIB LICENSE dist/
+          cat dist/VERSION
+          find dist -type f | sort
+      - name: Checks without Wine
+        run: .github/gw2/check-mach9.zsh dist toolchains/mach9 toolchains/llvm-mingw/bin/llvm-readobj | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: The checks fail on a broken copy
+        run: |
+          # an export without an address in each tree, and an i386 DLL where an ARM64X one belongs
+          cp -R dist "$RUNNER_TEMP/broken"
+          python3 -I .github/gw2/zero-export.py "$RUNNER_TEMP/broken/aarch64-windows/d3d11.dll" D3D11CreateDevice
+          python3 -I .github/gw2/zero-export.py "$RUNNER_TEMP/broken/i386-windows/dxgi.dll" CreateDXGIFactory
+          cp "$RUNNER_TEMP/broken/i386-windows/d3d10core.dll" "$RUNNER_TEMP/broken/aarch64-windows/d3d10core.dll"
+          status=0
+          .github/gw2/check-mach9.zsh "$RUNNER_TEMP/broken" toolchains/mach9 toolchains/llvm-mingw/bin/llvm-readobj >"$RUNNER_TEMP/broken.txt" || status=$?
+          grep FAIL "$RUNNER_TEMP/broken.txt"
+          [[ $status == 1 ]] && [[ $(grep -c '^FAIL' "$RUNNER_TEMP/broken.txt") == 4 ]]
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dxmt-mach9-${{ env.COMMIT }}
+          path: dist
+          retention-days: 7
+          if-no-files-found: error
 
   tests:
     name: Native tests

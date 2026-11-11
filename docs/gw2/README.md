@@ -1166,8 +1166,21 @@ so only the first run after a version change builds LLVM (about 25 minutes per a
   in the same file gets through. The job prints the build's whole list. When a change removes a warning,
   or has to keep a new one, that list replaces the file. x86_64 also runs the meson `gw2` suite without
   `gw2-metal`.
-- **Build ARM64EC**: build only, with llvm-mingw 20260908 and 3Shain's Wine 11.2, as upstream's CI does
-  it. It checks that `d3d11.dll`, `dxgi.dll`, `d3d10core.dll` and `winemetal.dll` come out.
+- **Build arm64 (Mach9)** (#182): the build for GW2 on Mac 0.2's engine, Mach9 0.3.1, made the way
+  Mach9's `bin/build-dxmt.sh` makes its own DXMT. One meson tree with `build-arm64ec.txt` builds the
+  ARM64X DLLs and the arm64 `winemetal.so`, a second with `build-win32.txt` the i386 DLLs, both with
+  llvm-mingw 20261104 (Mach9's pin). They link against the engine's own `winemac.so`, `ntdll.so` and
+  import libraries, taken from its release tarball (pinned by SHA-256). `winebuild` comes from 3Shain's
+  Wine 11.2, since nothing of Mach9's engine is ever run. Then `.github/gw2/check-mach9.zsh` compares the
+  result with the engine's DXMT, without Wine: every DLL's machine (ARM64X or i386, as the engine's) and
+  builtin marker, every export of the engine's DLL of the same name in each view, `winemetal.so`'s
+  architecture, macOS floor and libraries, every symbol it imports from `winemac.so` and `ntdll.so`, and
+  `macdrv_functions`. An export counts only with an address. The job then breaks a copy
+  (`.github/gw2/zero-export.py` clears two exports' addresses, and an i386 DLL takes an ARM64X one's
+  place) and requires the script to fail on exactly those four checks. The engine's table has the 10 entries in the order `winemetal_unix.c` declares,
+  and its window data the same first four fields (athei/wine `53def892`,
+  `dlls/winemac.drv/window.c`, which asserts both). No warnings list for this job yet: llvm-mingw's clang
+  warns differently from GCC.
 - **Native tests**: `zsh -n` on the zsh scripts and a self-check of `.github/gw2/warnings.zsh`, then
   `tests/gw2/run.zsh pure` and `metal`. The zsh checks run here because macOS has zsh, so they install
   nothing (#174). The runner's GPU is an Apple Paravirtual device
@@ -1184,6 +1197,12 @@ so only the first run after a version change builds LLVM (about 25 minutes per a
   the branch's head, not GitHub's merge commit, so `VERSION` and the startup line name it. To play it,
   unzip it into a directory, then run `scripts/dxmt-use.zsh save <name> <dir>` and
   `scripts/dxmt-use.zsh <name>`.
+- **Artifact** `dxmt-mach9-<commit>` (#182): the arm64 build in the layout of the engine's
+  `lib/wine/dxgi/dxmt` (`aarch64-windows`, `i386-windows`, `aarch64-unix`), the licenses and `VERSION`:
+  its first line is the `git describe` that `d3d11.dll` carries, then `commit:`, `engine:` (the tarball,
+  its SHA-256 and the Wine version its `ntdll.so` carries) and `toolchain:`. Kept 7 days. In the engine
+  the tree's `aarch64-unix/winemetal.so` is a link to `lib/wine/aarch64-unix/winemetal.so`, which serves
+  the i386 DLLs too.
 
 ## Native tests
 

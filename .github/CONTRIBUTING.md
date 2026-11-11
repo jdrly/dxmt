@@ -92,7 +92,7 @@ If two sources conflict, report the conflict instead of silently choosing one.
 
 - [ ] **Clean build.** The `GW2` workflow (`.github/workflows/gw2.yml`) is green on the pull
       request. It builds x86_64 and i386 the way `scripts/build-dxmt.zsh` (GW2 on Mac) does,
-      without new warnings, builds ARM64EC and runs the native tests. That run is the build gate.
+      without new warnings, builds arm64 for Mach9's engine and runs the native tests. That run is the build gate.
       A local build is only for installing and playing, and the run's artifact can replace it
       ([CI](../docs/gw2/README.md#ci)).
 - [ ] **Logged and switchable.** The change writes a log line when it acts (once, or on each
