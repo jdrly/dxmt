@@ -28,8 +28,15 @@
 // - 40 swap chains one after another, each made, presented with twice and released, as a program
 //   that replaces its swap chain does;
 // - 40 swap chains alive at once, each presented with, then each presented with again;
-// - no command buffer reports an error. Under MTL_DEBUG_LAYER and MTL_SHADER_VALIDATION (the arm64
-//   run) a drawable that isn't resident fails the run.
+// - no command buffer reports an error (the arm64 run with MTL_DEBUG_LAYER and MTL_SHADER_VALIDATION).
+//
+// What it doesn't see: a present pass that names no set for its drawable. Without the layer's set the
+// test still passes, with and without Metal's validation (2026-11-11, M5 Max), because the drawable is
+// only a render attachment there. That rests on the presenter's code, not on this test.
+//
+// Both phases hold whether presenters leak (today) or are deleted: the first fails only if a
+// presenter's set stays on the queue after its swap chain, the second whenever each swap chain puts a
+// set on the queue.
 //
 // What the test provides in place of DXMT: the statistics hooks (off), the lifetime check (off), the
 // device set's commit hook (its set here is fixed), Forget_sRGB for the formats used here, and the
