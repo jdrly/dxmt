@@ -5,12 +5,14 @@
 // priorities and its concurrency policy.
 #include <condition_variable>
 #include <mutex>
+#include <shared_mutex>
 #include <thread>
 
 namespace dxmt {
 using thread = std::thread;
 using mutex = std::mutex;
 using condition_variable = std::condition_variable;
+using shared_mutex = std::shared_mutex;
 struct null_mutex { // as src/util/thread.hpp's
   void lock() {}
   void unlock() noexcept {}

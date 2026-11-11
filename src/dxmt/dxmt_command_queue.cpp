@@ -199,6 +199,9 @@ CommandQueue::CommandQueue(WMT::Device device) :
           "Metal 4: on (DXMT_METAL4=1, the default): this device's chunks go to an MTL4CommandQueue, with ", chunk_count_,
           " command allocators (one per chunk slot) and commit feedback"
       ));
+      // gw2 (#184): the queue holds only the device's set; a queue takes at most 32
+      Logger::info("Metal 4: drawables stay resident through their layer's residency set, used by each present's "
+                   "command buffer; the queue holds no layer's set");
     }
   }
   // gw2 (#78): Metal 3, unless the queue is on Metal 4

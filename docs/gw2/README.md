@@ -166,6 +166,7 @@ Sections: a feature registers a function with `gw2::SectionRegistrar` (`src/dxmt
 | `Metal 4: the layer has no residency set; drawables may not be resident` | Warning, on the Metal 4 path, at a presenter's first present, if `CAMetalLayer.residencySet` is nil |
 | `Metal 4: unavailable (<what> failed), staying on Metal 3` | Warning, once: the Metal 4 queue, its event or allocators couldn't be created, or the residency set couldn't be attached to it |
 | `Metal 4: on (DXMT_METAL4=1, the default): this device's chunks go to an MTL4CommandQueue, with N command allocators (one per chunk slot) and commit feedback` | Once per device (command queue), when it takes the Metal 4 path |
+| `Metal 4: drawables stay resident through their layer's residency set, used by each present's command buffer; the queue holds no layer's set` | Once per device, right after it (#184). A Metal 4 queue takes at most 32 residency sets; the queue holds only the device's (`Residency:`), so a program may make any number of swap chains. Until #184 each presenter added its layer's set to the queue for the rest of the process, and Steam's browser hit the limit at its 32nd swap chain |
 | `Metal 4: newCommandBuffer failed after N command buffers; DXMT can't continue on Metal 4, aborting` | Error, on the Metal 4 path, when Metal returns no command buffer after the queue's first ones (one per slot and two spares, made with the queue): the process aborts, since earlier chunks may still be on the GPU |
 | `Residency: the residency set is attached to this device's Metal 4 queue too (DXMT_METAL4)` | Once per device, on the Metal 4 path, after the usual `Residency:` line |
 | `Metal 4: chunk S's completion event not signalled after 1 s; still waiting` | Warning, on the Metal 4 path: the finish thread waits for a chunk's completion event (after its commits) over a second |
@@ -1033,8 +1034,8 @@ branches off), on Metal 4 into a `gw2::Mtl4Encoding` with the same encoder and e
 - The queue waits for the drawable (`waitForDrawable`: the command buffers committed after it), the
   present pass is encoded into a command buffer of its own (the drawable's texture stays out of the
   chunk's residency set: a driver-owned set would pin drawables and starve `nextDrawable`, d9mt;
-  the layer's own residency set covers them, attached to the queue at a presenter's first present
-  and removed when the presenter goes), committed, then `signalDrawable` and the drawable's own
+  the layer's own residency set covers them, used by the present pass's command buffer, #184),
+  committed, then `signalDrawable` and the drawable's own
   present: `presentAfterMinimumDuration:` (the cap), `presentAtTime:` now + the deadline
   (`DXMT_PRESENT_DEADLINE`, the control file), or `present`. PRESENT's presented handler, the
   pacing and the background throttle are unchanged (they live in the swapchain and on the
