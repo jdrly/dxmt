@@ -1728,6 +1728,8 @@ _MetalLayer_setProps(void *obj) {
     layer.displaySyncEnabled = props->display_sync_enabled;
     layer.drawableSize = CGSizeMake(props->drawable_width, props->drawable_height);
     layer.pixelFormat = to_metal_pixel_format(props->pixel_format);
+    if (props->maximum_drawable_count) /* gw2 (#157): DXMT_PRESENT_QUEUE=two */
+      layer.maximumDrawableCount = props->maximum_drawable_count;
   });
   return STATUS_SUCCESS;
 }

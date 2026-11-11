@@ -14,6 +14,7 @@
 #include "dxmt_gw2_lifetime.hpp"
 #include "dxmt_gw2_recipe.hpp"
 #include "dxmt_gw2_present.hpp"
+#include "dxmt_gw2_present_pace.hpp"
 #include "dxmt_gw2_map.hpp"
 #include "dxmt_gw2_metal4.hpp"
 #include "dxmt_gw2_rebind.hpp"
@@ -1004,6 +1005,7 @@ public:
     int64_t gw2_wait_t0 = gw2_present_t0 ? gw2::nowNs() : 0;
     cmd_queue.PresentBoundary();
     PresentEnd(gw2_present_t0, gw2_wait_t0);
+    PaceNextFrame(pacing);
 
     return hr;
   };
@@ -1267,6 +1269,32 @@ public:
       return;
     }
     std::this_thread::sleep_until(cap_deadline_);
+  }
+
+  // gw2 (#157): DXMT_PRESENT_QUEUE=pace. At the end of Present, after the frame's commit and the
+  // latency wait, so only the game's next frame starts later (a sleep next to LimitFrameRate would
+  // hold back this frame's GPU work too). Only at one frame per refresh with display sync; it gives
+  // up for the swap chain's life at the first refresh skipped while it sleeps (PresentPace).
+  gw2::PresentPace present_pace_;
+
+  void PaceNextFrame(const Pacing &p) {
+    if (!gw2::presentPaceOn())
+      return;
+    double refresh = init_refresh_rate_ != DBL_MAX ? init_refresh_rate_ : 60.0;
+    bool every_vsync = p.display_sync && p.vsyncs == 1 && p.limiter <= 0 && p.vsync_duration <= 0;
+    auto sig = gw2::presentPaceSignals();
+    auto step = present_pace_.next(
+        gw2::nowNs(), sig.blocked_ns, sig.blocked_seq, every_vsync ? int64_t(1e9 / refresh) : 0, sig.missed,
+        sig.starved
+    );
+    gw2::presentPaceStep(step.sleep_ns, step.gave_up);
+    if (step.gave_up)
+      Logger::info(std::format(
+          "Present queue: pace gives up at frame {} (missed +{}, starved +{}; last sleep {:.2f} ms)",
+          presentation_count_, step.missed, step.starved, step.last_sleep_ns / 1e6
+      ));
+    if (step.sleep_ns > 0)
+      std::this_thread::sleep_for(std::chrono::nanoseconds(step.sleep_ns));
   }
 
   // gw2 (#7): the deadline setting this Present uses (-1 one refresh, 0 off, > 0 ms): the control
