@@ -15,6 +15,7 @@ namespace dxmt {
 namespace {
 // gw2 (#156): how often Present asks the bridge for the layer's screen values, in ms (0: every Present)
 sw::Switch<uint32_t> kLayerPropsPollMs{"DXMT_LAYER_PROPS_POLL_MS", 250, sw::legacy::strtoul32};
+std::atomic<uint32_t> g_alive = 0; // gw2 (#185)
 } // namespace
 
 Presenter::Presenter(WMT::Device device, WMT::MetalLayer layer, InternalCommandLibrary &lib, float scale_factor, uint8_t sample_count) :
@@ -42,6 +43,17 @@ Presenter::Presenter(WMT::Device device, WMT::MetalLayer layer, InternalCommandL
   texture_info.sample_count = 1;
   texture_info.array_length = 1;
   gamma_lut_texture_ = device.newTexture(texture_info);
+  g_alive.fetch_add(1, std::memory_order_relaxed);
+}
+
+Presenter::~Presenter() {
+  auto alive = g_alive.fetch_sub(1, std::memory_order_relaxed) - 1;
+  Logger::info(str::format("Presenter: freed, ", alive, " alive"));
+}
+
+uint32_t
+Presenter::alive() {
+  return g_alive.load(std::memory_order_relaxed);
 }
 
 bool

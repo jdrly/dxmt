@@ -34,14 +34,24 @@
 // test still passes, with and without Metal's validation (2026-11-11, M5 Max), because the drawable is
 // only a render attachment there. That rests on the presenter's code, not on this test.
 //
-// Both phases hold whether presenters leak (today) or are deleted: the first fails only if a
-// presenter's set stays on the queue after its swap chain, the second whenever each swap chain puts a
-// set on the queue.
+// Both phases hold whether presenters stay or are deleted: the first fails only if a presenter's set
+// stays on the queue after its swap chain, the second whenever each swap chain puts a set on the queue.
+//
+// gw2 (#185): an Rc doesn't delete, and Presenter used to inherit RcObject's decRef, which only
+// counts down, so no presenter was ever deleted. Its own decRef deletes it at zero with
+// DXMT_PRESENTER_FREE=1. The test counts presenters alive (Presenter::alive()) and runs the phases
+// twice, with the switch off and on (the test's presenterFree() in place of the switch):
+// - off (the default): the 40 replaced swap chains leave 40 presenters alive, as before #185;
+// - on: they leave none, and the 40 alive at once are gone once released.
+// Each present holds the presenter as the retirement ledger does (CommandQueue::Hold) and lets go
+// once the chunk retired, after the present's PresentState went (CommandChunk::reset() destroys the
+// present's command, then the ledger releases its holds).
 //
 // What the test provides in place of DXMT: the statistics hooks (off) and clock, the lifetime check
-// (off), the device set's commit hook (its set here is fixed), Forget_sRGB for the formats used here,
-// and the internal command library, compiled at run time from src/dxmt/dxmt_command.metal (the build
-// makes a metallib of the same file). Run it from the checkout's root, as tests/gw2/run.zsh does.
+// (off) and DXMT_PRESENTER_FREE (set per phase), the device set's commit hook (its set here is
+// fixed), Forget_sRGB for the formats used here, and the internal command library, compiled at run
+// time from src/dxmt/dxmt_command.metal (the build makes a metallib of the same file). Run it from
+// the checkout's root, as tests/gw2/run.zsh does.
 //
 // Exit 77 (skipped): no Metal device, no Metal 4, or a layer without a window gave no drawable.
 
@@ -94,6 +104,11 @@ mtl4DeviceResidencyRequested() {
 namespace lifetime {
 void
 useSlow(uint32_t, uint64_t, obj_handle_t, Kind) {}
+bool g_presenter_free = false; // DXMT_PRESENTER_FREE, per phase
+bool
+presenterFree() {
+  return g_presenter_free;
+}
 } // namespace lifetime
 } // namespace dxmt::gw2
 
@@ -201,28 +216,80 @@ releaseSwapChain(Fixture &fx, SwapChain &sc) {
 // commits nothing here: the chunk has no other work), then waited for and retired
 static void
 present(Fixture &fx, SwapChain &sc, const char *what, uint32_t index) {
-  auto state = sc.presenter->synchronizeLayerProperties();
   uint64_t seq = fx.seq++;
+  Rc<Presenter> held; // the retirement ledger's hold (CommandQueue::Hold), until the chunk retires
   {
-    Mtl4Encoding encoding(*fx.queue, seq, [&](uint64_t size) {
-      id<MTLBuffer> b = [fx.device newBufferWithLength:size
-                                               options:MTLResourceStorageModeShared |
-                                                       MTLResourceHazardTrackingModeUntracked];
-      fx.arenas.push_back(b);
-      return Mtl4Encoding::Bytes{WMT::Buffer{H(b)}, 0, false};
-    });
-    auto drawable = sc.presenter->encodeCommandsMetal4(
-        encoding, WMT::Texture{H(sc.backbuffer)}, state.metadata, [](WMT::MTL4RenderCommandEncoder) {},
-        [](WMT::MTL4RenderCommandEncoder) {}
-    );
-    encoding.signalDrawable(drawable); // commits the present pass first
-    drawable.present();
-    fx.presents++;
+    // the present's command (the swap chain's lambda) holds it until CommandChunk::reset()
+    auto state = sc.presenter->synchronizeLayerProperties();
+    {
+      Mtl4Encoding encoding(*fx.queue, seq, [&](uint64_t size) {
+        id<MTLBuffer> b = [fx.device newBufferWithLength:size
+                                                 options:MTLResourceStorageModeShared |
+                                                         MTLResourceHazardTrackingModeUntracked];
+        fx.arenas.push_back(b);
+        return Mtl4Encoding::Bytes{WMT::Buffer{H(b)}, 0, false};
+      });
+      auto drawable = sc.presenter->encodeCommandsMetal4(
+          encoding, WMT::Texture{H(sc.backbuffer)}, state.metadata, [](WMT::MTL4RenderCommandEncoder) {},
+          [](WMT::MTL4RenderCommandEncoder) {}
+      );
+      encoding.signalDrawable(drawable); // commits the present pass first
+      drawable.present();
+      held = sc.presenter;
+      fx.presents++;
+    }
+    for (auto *commit : fx.queue->wait(seq))
+      CHECK(!commit->feedback.error, "%s %u: the present's command buffer reported an error", what, index);
   }
-  for (auto *commit : fx.queue->wait(seq))
-    CHECK(!commit->feedback.error, "%s %u: the present's command buffer reported an error", what, index);
+  held = nullptr; // RetireChunk: after reset(), the ledger's holds
   fx.queue->retire(seq);
   fx.arenas.clear();
+}
+
+// the replaced and the alive-at-once phases, with DXMT_PRESENTER_FREE as `free`
+static void
+phases(Fixture &fx, bool free) {
+  dxmt::gw2::lifetime::g_presenter_free = free;
+  const char *mode = free ? "DXMT_PRESENTER_FREE=1" : "DXMT_PRESENTER_FREE=0";
+  uint32_t before = Presenter::alive();
+
+  // a program that replaces its swap chain: each made, presented with, released
+  for (uint32_t i = 0; i < kSwapChains; i++) {
+    @autoreleasepool {
+      SwapChain sc = makeSwapChain(fx);
+      present(fx, sc, "replaced swap chain", i);
+      present(fx, sc, "replaced swap chain", i);
+      releaseSwapChain(fx, sc);
+    }
+  }
+  uint32_t left = Presenter::alive() - before;
+  std::printf("%s: replaced %u swap chains one after another, %u presenters left alive\n", mode, kSwapChains,
+              left);
+  CHECK(left == (free ? 0 : kSwapChains), "%s: %u presenters left alive", mode, left);
+
+  // a program with many windows: all alive at once
+  before = Presenter::alive();
+  std::vector<SwapChain> alive;
+  for (uint32_t i = 0; i < kSwapChains; i++) {
+    @autoreleasepool {
+      alive.push_back(makeSwapChain(fx));
+      present(fx, alive.back(), "alive swap chain", i);
+    }
+  }
+  for (uint32_t i = 0; i < kSwapChains; i++) {
+    @autoreleasepool {
+      present(fx, alive[i], "alive swap chain, again", i);
+    }
+  }
+  CHECK(Presenter::alive() - before == kSwapChains, "%s: %u presenters alive with %u swap chains", mode,
+        Presenter::alive() - before, kSwapChains);
+  for (auto &sc : alive)
+    releaseSwapChain(fx, sc);
+  alive.clear();
+  left = Presenter::alive() - before;
+  std::printf("%s: %u swap chains alive at once, %u presenters left alive once released\n", mode, kSwapChains,
+              left);
+  CHECK(left == (free ? 0 : kSwapChains), "%s: %u presenters left alive", mode, left);
 }
 
 int
@@ -269,34 +336,8 @@ main() {
     fx.device_set = [fx.device newResidencySetWithDescriptor:set_desc error:nil];
     queue.queue().addResidencySet(WMT::ResidencySet{H(fx.device_set)});
 
-    // a program that replaces its swap chain: each made, presented with, released
-    for (uint32_t i = 0; i < kSwapChains; i++) {
-      @autoreleasepool {
-        SwapChain sc = makeSwapChain(fx);
-        present(fx, sc, "replaced swap chain", i);
-        present(fx, sc, "replaced swap chain", i);
-        releaseSwapChain(fx, sc);
-      }
-    }
-    std::printf("replaced: %u swap chains, one after another\n", kSwapChains);
-
-    // a program with many windows: all alive at once
-    std::vector<SwapChain> alive;
-    for (uint32_t i = 0; i < kSwapChains; i++) {
-      @autoreleasepool {
-        alive.push_back(makeSwapChain(fx));
-        present(fx, alive.back(), "alive swap chain", i);
-      }
-    }
-    for (uint32_t i = 0; i < kSwapChains; i++) {
-      @autoreleasepool {
-        present(fx, alive[i], "alive swap chain, again", i);
-      }
-    }
-    std::printf("alive: %u swap chains at once\n", kSwapChains);
-    for (auto &sc : alive)
-      releaseSwapChain(fx, sc);
-    alive.clear();
+    phases(fx, false); // the default: presenters stay, as before #185
+    phases(fx, true);
     queue.waitIdle();
 
     std::printf("presents %u\n", fx.presents);

@@ -31,6 +31,10 @@ public:
   Presenter(
       WMT::Device device, WMT::MetalLayer layer, InternalCommandLibrary &lib, float scale_factor, uint8_t sample_count
   );
+  ~Presenter();
+
+  // gw2 (#185): presenters made and not deleted in this process
+  static uint32_t alive();
 
   bool changeLayerProperties(
       WMTPixelFormat format, WMTColorSpace colorspace, double width, double height, uint8_t sample_count
