@@ -1228,6 +1228,18 @@ so only the first run after a version change builds LLVM (about 25 minutes per a
   its SHA-256 and the Wine version its `ntdll.so` carries) and `toolchain:`. Kept 7 days. In the engine
   the tree's `aarch64-unix/winemetal.so` is a link to `lib/wine/aarch64-unix/winemetal.so`, which serves
   the i386 DLLs too.
+- **Publish** (#194): after every other job is green, packs `dxmt-mach9-<commit>` into
+  `dxmt-mach9-<commit>.tar.xz` (the same files at the archive's root, owner 0, directories and `.so`
+  755, the rest 644), checks that it unpacks to the artifact's files sha256 for sha256, and prints the
+  list and the archive's sha256. For a push to `gw2-on-mac` it adds the archive to the pre-release
+  `mach9-builds` of my fork, so a build stays downloadable past the artifact's 7 days, without a
+  token:
+  `https://github.com/jdrly/dxmt/releases/download/mach9-builds/dxmt-mach9-<sha>.tar.xz`, with the
+  full sha. GitHub reports each asset's sha256 as its `digest`
+  (`gh release view mach9-builds -R jdrly/dxmt --json assets`). One release, one asset per commit, the 30
+  newest kept. An asset that's there already is never replaced. The release is never marked latest, and
+  its tag is a lightweight one, which `git describe` and so `VERSION` skip. A run with a red job
+  publishes nothing. GW2 on Mac's dev build (jdrly/gw2-on-mac) takes its DXMT from this asset.
 
 ## Native tests
 

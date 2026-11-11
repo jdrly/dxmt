@@ -18,6 +18,10 @@
 # lint: actionlint for the workflows.
 # artifact: the installable build of the commit (as build-dxmt.zsh stages it: x86_64-windows,
 #   i386-windows, x86_64-unix, VERSION), kept 7 days, for scripts/dxmt-use.zsh save.
+# publish (#194): after every other job is green, packs dxmt-mach9-<commit> into
+#   dxmt-mach9-<commit>.tar.xz and prints its files and sha256. For a push to gw2-on-mac it adds the
+#   archive to the pre-release mach9-builds, the one release this workflow makes, never marked latest,
+#   never replaces an asset, and keeps the 30 newest. The only job with contents: write.
 name: GW2
 
 on:
@@ -383,3 +387,80 @@ jobs:
           echo "$ACTIONLINT_SHA256  $RUNNER_TEMP/$f" | sha256sum -c
           tar -xzf "$RUNNER_TEMP/$f" -C "$RUNNER_TEMP" actionlint
           "$RUNNER_TEMP/actionlint" -color .github/workflows/gw2.yml
+
+  publish:
+    name: Publish
+    needs: [build, artifact, arm64, tests, lint]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    # Two pushes never upload at once: the workflow's concurrency group runs one push to gw2-on-mac
+    # at a time and never cancels it. A group of this job's own would let a pull request's pending
+    # job cancel a push's.
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE: mach9-builds
+      NAME: dxmt-mach9-${{ github.event.pull_request.head.sha || github.sha }}.tar.xz
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dxmt-mach9-${{ env.COMMIT }}
+          path: dist
+      - name: Pack
+        run: |
+          # VERSION as the arm64 job wrote it: git describe of this commit (no lightweight tag
+          # such as mach9-builds), then commit:
+          describe=$(head -1 dist/VERSION)
+          [[ $describe =~ ^v[0-9][^[:space:]]*-[0-9]+-g([0-9a-f]{7,})$ ]]
+          [[ $COMMIT == "${BASH_REMATCH[1]}"* ]]
+          grep -qx "commit: $COMMIT" dist/VERSION
+          # the artifact keeps no modes: directories and .so 755, the rest 644
+          chmod -R u=rwX,go=rX dist
+          find dist -name '*.so' -exec chmod 755 {} +
+          (cd dist && find . -type f | sort | xargs sha256sum) >"$RUNNER_TEMP/files.sha256"
+          tar --sort=name --owner=0 --group=0 --numeric-owner -C dist -cJf "$NAME" \
+            aarch64-windows i386-windows aarch64-unix VERSION LICENSE COPYING.LIB
+          tar -tvJf "$NAME"
+          # the archive unpacks to the artifact's files, sha256 for sha256, and nothing else
+          mkdir "$RUNNER_TEMP/unpacked"
+          tar -xJf "$NAME" -C "$RUNNER_TEMP/unpacked"
+          (cd "$RUNNER_TEMP/unpacked" && find . -type f | sort | xargs sha256sum) | diff "$RUNNER_TEMP/files.sha256" -
+          cat "$RUNNER_TEMP/files.sha256"
+          sha256sum "$NAME" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Upload to the pre-release ${{ env.RELEASE }}
+        if: github.event_name == 'push' && github.ref == 'refs/heads/gw2-on-mac'
+        run: |
+          if ! gh release view "$RELEASE" >/dev/null 2>&1; then
+            gh release create "$RELEASE" --prerelease --latest=false --target "$COMMIT" --title "Mach9 builds of my DXMT fork" \
+              --notes "CI output for GW2 on Mac's arm64 line, not a release of DXMT: my fork's build for Mach9 $MACH9_VERSION's engine, built and checked by .github/workflows/gw2.yml for each push to gw2-on-mac. One asset per commit, dxmt-mach9-<full sha>.tar.xz, in the layout of the engine's lib/wine/dxgi/dxmt; the 30 newest stay."
+          fi
+          # a lightweight tag, which git describe (the arm64 job's VERSION) skips
+          [[ $(gh api "repos/$GH_REPO/git/ref/tags/$RELEASE" -q .object.type) == commit ]]
+          uploaded=0
+          if gh release view "$RELEASE" --json assets -q '.assets[].name' | grep -qxF "$NAME"; then
+            echo "$NAME is there already, and a published file is never replaced"
+          else
+            gh release upload "$RELEASE" "$NAME"
+            uploaded=1
+          fi
+          # the 30 newest assets stay
+          id=$(gh api "repos/$GH_REPO/releases/tags/$RELEASE" -q .id)
+          gh api --paginate "repos/$GH_REPO/releases/$id/assets?per_page=100" -q '.[] | [.created_at, .id, .name] | @tsv' |
+            grep -P '\tdxmt-mach9-[0-9a-f]{40}\.tar\.xz$' | sort -r | tail -n +31 | while IFS=$'\t' read -r _ asset old; do
+              echo "deleting $old"
+              gh api -X DELETE "repos/$GH_REPO/releases/assets/$asset"
+            done
+          digest=$(gh api "repos/$GH_REPO/releases/tags/$RELEASE" -q ".assets[] | select(.name == \"$NAME\") | .digest")
+          echo "$RELEASE has $NAME, $digest" | tee -a "$GITHUB_STEP_SUMMARY"
+          [[ $digest == sha256:* ]]
+          # what anyone downloads by URL is what GitHub reports, and, when this run uploaded it, this archive
+          url="https://github.com/$GH_REPO/releases/download/$RELEASE/$NAME"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/download.tar.xz" "$url"
+          [[ $digest == "sha256:$(sha256sum "$RUNNER_TEMP/download.tar.xz" | cut -d' ' -f1)" ]]
+          (( !uploaded )) || cmp "$RUNNER_TEMP/download.tar.xz" "$NAME"
+          echo "$url" | tee -a "$GITHUB_STEP_SUMMARY"
+          latest=$(gh api "repos/$GH_REPO/releases/latest" -q .tag_name 2>/dev/null || true)
+          echo "releases/latest: ${latest:-none}"
+          [[ $latest != "$RELEASE" ]]
