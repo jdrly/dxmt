@@ -17,7 +17,9 @@
 //
 // The main thread never pthread_joins a thread before that thread has measured: a joiner lends the
 // joined thread its QoS as an override, which raises its base priority to 31 while the join lasts.
-// Needs no Metal device, only the bridge's unix side linked in.
+// Needs no Metal device, only the bridge's unix side linked in. Skips (77) in a task whose priority is
+// 20 or less: GitHub's macOS runner runs its jobs clamped to the utility band (task priority 20, as
+// `taskpolicy -c utility` does), where no thread can go above or below it.
 
 #include <libproc.h>
 #include <mach/mach.h>
@@ -83,7 +85,15 @@ thread_main(void *unused) {
 int
 main(void) {
   struct proc_taskinfo task;
-  CHECK(proc_pidinfo(getpid(), PROC_PIDTASKINFO, 0, &task, sizeof(task)) == sizeof(task));
+  if (proc_pidinfo(getpid(), PROC_PIDTASKINFO, 0, &task, sizeof(task)) != sizeof(task)) {
+    printf("FAIL: can't read the task's priority\n");
+    return 1;
+  }
+  if (task.pti_priority <= 20) {
+    printf("skip: task priority %d; a task clamped to the utility band or below (a CI runner's) keeps every "
+           "thread at it, so base priority 20 can't be told apart\n", task.pti_priority);
+    return 77;
+  }
   const struct wine_state states[] = {
       {"normal (timeshare, importance 0)", 1, 0},
       {"highest (timeshare, importance 9)", 1, 9},
