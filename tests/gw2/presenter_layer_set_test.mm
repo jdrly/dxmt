@@ -5,7 +5,7 @@
 // gw2-build:   for f in $U; do clang -c -x objective-c -std=gnu17 -fblocks -fno-objc-arc -arch $arch -mmacosx-version-min=26.0 -DDXMT_NATIVE=1 -Wno-unused-function -Isrc/airconv -Isrc/nativemetal -Isrc/winemetal src/winemetal/unix/$f -o $T/u_${f:r}_$arch.o; done
 // gw2-build:   clang -c -std=gnu17 -arch $arch -mmacosx-version-min=26.0 -DDXMT_NATIVE=1 -Isrc/nativemetal -Isrc/winemetal src/winemetal/winemetal_thunks.c -o $T/thunks_$arch.o
 // gw2-build:   clang -c -std=gnu17 -arch $arch -mmacosx-version-min=26.0 -Wno-ignored-attributes -Isrc/airconv tests/gw2/shim/airconv_absent.c -o $T/airconv_absent_$arch.o
-// gw2-build:   clang++ -std=c++20 -fobjc-arc -Wall -arch $arch -mmacosx-version-min=26.0 -DDXMT_PAGE_SIZE=4096 -Itests/gw2/shim -Isrc/winemetal -Isrc/dxmt -Isrc/util -Iinclude tests/gw2/presenter_layer_set_test.mm src/dxmt/dxmt_presenter.cpp src/dxmt/dxmt_gw2_mtl4_queue.cpp src/dxmt/dxmt_gw2_mtl4_encoding.cpp $T/thunks_$arch.o $T/u_*_$arch.o $T/airconv_absent_$arch.o -framework Metal -framework MetalFX -framework QuartzCore -framework Foundation -framework CoreGraphics -framework ColorSync -framework Cocoa -lsqlite3 -o ${OUT}_$arch
+// gw2-build:   clang++ -std=c++20 -fobjc-arc -Wall -arch $arch -mmacosx-version-min=26.0 -DDXMT_PAGE_SIZE=4096 -Itests/gw2/shim -Isrc/winemetal -Isrc/dxmt -Isrc/util -Iinclude tests/gw2/presenter_layer_set_test.mm src/dxmt/dxmt_presenter.cpp src/dxmt/dxmt_gw2_switches.cpp src/dxmt/dxmt_gw2_mtl4_queue.cpp src/dxmt/dxmt_gw2_mtl4_encoding.cpp $T/thunks_$arch.o $T/u_*_$arch.o $T/airconv_absent_$arch.o -framework Metal -framework MetalFX -framework QuartzCore -framework Foundation -framework CoreGraphics -framework ColorSync -framework Cocoa -lsqlite3 -o ${OUT}_$arch
 // gw2-build: done
 // gw2-run: ${OUT}_x86_64 && MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 ${OUT}_arm64
 //
@@ -38,10 +38,10 @@
 // presenter's set stays on the queue after its swap chain, the second whenever each swap chain puts a
 // set on the queue.
 //
-// What the test provides in place of DXMT: the statistics hooks (off), the lifetime check (off), the
-// device set's commit hook (its set here is fixed), Forget_sRGB for the formats used here, and the
-// internal command library, compiled at run time from src/dxmt/dxmt_command.metal (the build makes
-// a metallib of the same file). Run it from the checkout's root, as tests/gw2/run.zsh does.
+// What the test provides in place of DXMT: the statistics hooks (off) and clock, the lifetime check
+// (off), the device set's commit hook (its set here is fixed), Forget_sRGB for the formats used here,
+// and the internal command library, compiled at run time from src/dxmt/dxmt_command.metal (the build
+// makes a metallib of the same file). Run it from the checkout's root, as tests/gw2/run.zsh does.
 //
 // Exit 77 (skipped): no Metal device, no Metal 4, or a layer without a window gave no drawable.
 
@@ -52,6 +52,7 @@
 #include "dxmt_gw2_mtl4_encoding.hpp"
 #include "dxmt_gw2_mtl4_queue.hpp"
 #include "dxmt_gw2_stats.hpp"
+#include <chrono>
 #include <cstdio>
 #include <fstream>
 #include <sstream>
@@ -76,6 +77,12 @@ registerSection(const char *, SectionFn) {}
 bool
 statsEnabled() {
   return false;
+}
+// gw2 (#156): the presenter's layer poll
+int64_t
+nowNs() {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
+      .count();
 }
 void
 residencyBeforeCommit() {}
