@@ -211,6 +211,7 @@ main() {
       CHECK(nuls[i] == (got[i].find('\0') != std::string::npos));
   }
 
+  CHECK(!"gw2 #162: a deliberate failure for the CI check");
   if (failures) {
     std::printf("%d failure(s)\n", failures);
     return 1;
