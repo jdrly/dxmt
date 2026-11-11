@@ -1058,10 +1058,43 @@ slot waits for every earlier update of that slot, as Metal 4 documents) and chec
 a control without window or checkpoint must fail it. A fusion case (the production
 `fuseRenderPassFences`) checks that waits on a fused pass's own updates aren't counted as emitted.
 
+## CI
+
+`.github/workflows/gw2.yml` (#162) checks every pull request into `gw2-on-mac` and every push to it on
+GitHub's runners, so nothing has to build on my Mac. The macOS jobs run on the `xcode-27` image (macOS 27,
+a public preview) with Xcode 27.2, the one I build with. The toolchains are cached under their versions,
+so only the first run after a version change builds LLVM (about 25 minutes per architecture).
+
+- **Build x86_64, Build i386**: the build `scripts/build-dxmt.zsh` (GW2 on Mac) makes. Release,
+  stripped, NVEXT off, Homebrew's mingw-w64 (GCC 16), meson 1.12.1, LLVM 15.0.7 built for macOS 26.0 as
+  airconv needs it. Wine's import libraries, `winebuild`, `winemac.so` and `ntdll.so` come from 3Shain's
+  Wine 8.16, as in upstream's CI. My CrossOver engine isn't downloadable. The job checks that
+  `winemetal.so` still loads both through `@rpath`, so it finds the engine's copies. A compiler warning
+  fails the job unless `.github/gw2/warnings-<arch>.txt` lists it. The list keys a warning on its file
+  and message without the line, so moved code keeps its warnings, and a second warning of the same kind
+  in the same file gets through. The job prints the build's whole list. When a change removes a warning,
+  or has to keep a new one, that list replaces the file. x86_64 also runs the meson `gw2` suite without
+  `gw2-metal`.
+- **Build ARM64EC**: build only, with llvm-mingw 20260908 and 3Shain's Wine 11.2, as upstream's CI does
+  it. It checks that `d3d11.dll`, `dxgi.dll`, `d3d10core.dll` and `winemetal.dll` come out.
+- **Native tests**: `tests/gw2/run.zsh pure` and `metal`. The runner's GPU is an Apple Paravirtual device
+  with Metal 3 and no Metal 4. There, `commit_record_metal_test`, `pso_archive_test` and
+  `shared_event_listener_test` pass. `chunk_submission_test` and `mtl4fx_test` run their Metal 3 half and
+  skip, while `mtl4_bridge_test`, `mtl4_queue_test` and `paired_replay_test` skip outright (no Metal 4).
+  `pso_archive_tool_test` skips without the AIR copy from my Mac (`GW2_AIR_DB`). A skip shows as `skip`
+  with the test's reason. It never counts as a pass. The Metal 4 paths are still tested only on my Mac.
+- **Lint**: actionlint on the workflow (`.github/actionlint.yaml` names the `xcode-27` label it doesn't
+  know yet) and `zsh -n` on the zsh scripts.
+- **Artifact** `dxmt-<commit>`: the build as `build-dxmt.zsh` stages it (`x86_64-windows`,
+  `i386-windows`, `x86_64-unix`, `VERSION`, the licenses), kept 7 days. On a pull request the commit is
+  the branch's head, not GitHub's merge commit, so `VERSION` and the startup line name it. To play it,
+  unzip it into a directory, then run `scripts/dxmt-use.zsh save <name> <dir>` and
+  `scripts/dxmt-use.zsh <name>`.
+
 ## Native tests
 
 `tests/gw2/run.zsh [pure|metal|all] [--meson <build dir>]` (X1) builds and runs every registered test
-under `tests/gw2/`, on the Mac, with no Wine and no game. A test registers in its header:
+under `tests/gw2/`, on the Mac, with no Wine and no game. The CI runs it too ([CI](#ci)). A test registers in its header:
 `// gw2-test: pure` (no Metal device) or `metal`, one or more `// gw2-build:` lines (zsh, from the
 checkout's root, writing `$OUT`) and optional `// gw2-run:` lines (default `"$OUT"`). A failed build or
 a nonzero exit fails the run; exit 77 is *skipped*, never counted as passed; a test without the lines
