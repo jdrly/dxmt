@@ -33,6 +33,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <unistd.h>
 #include <vector>
 
@@ -100,6 +101,14 @@ compileWorkerPriority(ThreadPriority mode) {
   std::lock_guard<std::mutex> l(g_priority_mutex);
   g_priority_calls.push_back({std::this_thread::get_id(), mode, t_ran_a_job});
 }
+// #159: the most speculative jobs running at once (production: WARM's jobs=)
+std::atomic<uint32_t> g_speculative_peak{0};
+void
+warmJobsRunning(uint32_t running) {
+  uint32_t peak = g_speculative_peak.load();
+  while (running > peak && !g_speculative_peak.compare_exchange_weak(peak, running))
+    ;
+}
 } // namespace dxmt::gw2
 
 static int failures = 0;
@@ -123,6 +132,7 @@ struct FakeJob {
   bool fail_early = false;     // geometry/tessellation: a done but failed dependency fails the job at once
   bool fails = false;          // its own build fails (done, with no result)
   int lie_once = -1;           // returns deps[lie_once] once although it is done (spurious dependency)
+  int64_t cost = 0;            // #159: added to the fake clock (compileNowNs) while it runs: its build time
   Gate *gate = nullptr;
   std::atomic_bool ready{false};
   std::atomic<int> done_count{0};
@@ -185,6 +195,7 @@ FakeJob::run() {
     return this;
   }
   gate->enter(id);
+  g_now += cost;
   for (size_t i = 0; i < deps.size(); i++) {
     auto *d = deps[i];
     if (int(i) == lie_once) {
@@ -1048,6 +1059,94 @@ waitGated(Gate &gate, size_t n) {
   return gate.cv.wait_for(l, std::chrono::seconds(10), [&] { return gate.gated.size() >= n; });
 }
 
+// gw2 (#159): Options::speculative_jobs (DXMT_WARM_JOBS). Slowness comes from the fake clock: a job's
+// `cost` is added to it while the job runs, so no real time decides admission.
+static void
+declaredSpeculativeJobs() {
+  constexpr int64_t kSlow = 5 * compile::kSpeculativeSlowNs;
+  auto speculative = [](unsigned jobs) {
+    auto o = declared(2, 8);
+    o.speculative_jobs = jobs;
+    return o;
+  };
+  // one at a time while the runs are fast (N = 3), and with N = 1 while they are slow (today's rule)
+  for (auto [jobs, cost, what] : {std::tuple{3u, int64_t(0), "N=3, fast runs"}, std::tuple{1u, kSlow, "N=1, slow runs"}}) {
+    Scenario sc;
+    for (int i = 0; i < 3; i++)
+      sc.add()->cost = cost;
+    Gate gate;
+    for (auto &j : sc.jobs)
+      j->gate = &gate;
+    compile::Service<FakeJob *> sched(speculative(jobs));
+    CHECK(currentWorkers() == (jobs > 1 ? 4u : 2u), "%s: %zu workers", what, currentWorkers());
+    for (auto &j : sc.jobs)
+      sched.submit(j.get(), compile::Lane::Speculative);
+    for (int i = 0; i < 3; i++) {
+      auto g = gatedNow(gate, currentWorkers());
+      CHECK(g == std::set<int>({i}), "%s: one speculative job at a time (gated %s)", what, str(g).c_str());
+      releaseJob(gate, i);
+    }
+  }
+  // N = 3, slow runs: three at once; a demand still goes first
+  gw2::g_speculative_peak = 0;
+  Scenario sc;
+  for (int i = 0; i < 6; i++)
+    sc.add()->cost = kSlow; // 0-5: speculative
+  auto *n6 = sc.add();      // 6: normal, demanded
+  Gate gate;
+  for (auto &j : sc.jobs)
+    j->gate = &gate;
+  {
+    compile::Service<FakeJob *> sched(speculative(3));
+    CHECK(currentWorkers() == 4, "N=3: a worker more than the speculative jobs (%zu)", currentWorkers());
+    for (int i = 0; i < 6; i++)
+      sched.submit(sc.jobs[i].get(), compile::Lane::Speculative);
+    auto g = gatedNow(gate, 4);
+    CHECK(g == std::set<int>({0}), "N=3: one at a time before a run was slow (gated %s)", str(g).c_str());
+    releaseJob(gate, 0); // slow: the average is 5 ms
+    waitGated(gate, 3);
+    g = gatedNow(gate, 4);
+    CHECK(g == std::set<int>({1, 2, 3}), "N=3: three at once after a slow run (gated %s)", str(g).c_str());
+    CHECK(gw2::g_speculative_peak.load() == 3, "N=3: jobs= peak %u", gw2::g_speculative_peak.load());
+    sched.submit(n6);
+    waitGated(gate, 4);
+    g = gatedNow(gate, 4);
+    CHECK(g == std::set<int>({1, 2, 3, 6}), "N=3: the fourth worker takes a normal job (gated %s)", str(g).c_str());
+    // a demand pending (on the running normal job): a freed slot stays free
+    uint64_t promoted = gw2::g_promoted_count.load();
+    std::thread demander([&] { compile::demand(n6->record, n6->ready); });
+    while (gw2::g_promoted_count.load() == promoted)
+      std::this_thread::yield();
+    releaseJob(gate, 1);
+    g = gatedNow(gate, 4);
+    CHECK(g == std::set<int>({2, 3, 6}), "N=3: no speculative job starts while a demand waits (gated %s)",
+          str(g).c_str());
+    // a demand on the last queued speculative job: it goes ahead of the one queued before it
+    auto *s5 = sc.jobs[5].get();
+    std::thread demander5([&] { compile::demand(s5->record, s5->ready); });
+    waitGated(gate, 4);
+    g = gatedNow(gate, 4);
+    CHECK(g == std::set<int>({2, 3, 5, 6}), "N=3: the demanded speculative job runs before job 4 (gated %s)",
+          str(g).c_str());
+    releaseJob(gate, 5);
+    demander5.join();
+    g = gatedNow(gate, 4);
+    CHECK(g == std::set<int>({2, 3, 6}), "N=3: still none while the first demand waits (gated %s)", str(g).c_str());
+    releaseJob(gate, 6);
+    demander.join();
+    waitGated(gate, 3);
+    g = gatedNow(gate, 4);
+    CHECK(g == std::set<int>({2, 3, 4}), "N=3: admission resumes up to three after the demands (gated %s)",
+          str(g).c_str());
+    for (int i : {2, 3, 4})
+      releaseJob(gate, i);
+  }
+  bool once = std::all_of(sc.jobs.begin(), sc.jobs.end(), [](auto &j) { return j->done_count.load() == 1; });
+  CHECK(once, "N=3: every job completed once");
+  std::printf("%s declared, DXMT_WARM_JOBS: one at a time while fast or N=1, up to N while slow, demands first\n",
+              failures ? "?   " : "ok  ");
+}
+
 // gw2 (#152): with each DXMT_COMPILE_PRIORITY setting and either policy, every worker, the first two
 // and those a submit adds, applies Options::priority once, on itself, before it runs a job; the jobs
 // all complete.
@@ -1129,6 +1228,7 @@ main() {
   declaredSpeculativeResume();
   declaredPromoteReleased();
   declaredStress();
+  declaredSpeculativeJobs();
   workerPriority();
   std::printf(failures ? "%d FAILED\n" : "all passed\n", failures);
   return failures ? 1 : 0;

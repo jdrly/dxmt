@@ -1,4 +1,5 @@
 #include "dxmt_gw2_warm.hpp"
+#include "dxmt_gw2_compile.hpp"
 #include "dxmt_gw2_recipe_use.hpp"
 #include "dxmt_gw2_stats.hpp"
 #include "dxmt_gw2_switches.hpp"
@@ -29,11 +30,23 @@ parseMax(const std::string &raw, const uint32_t &fallback) {
   return end && *end == 0 && v > 0 ? uint32_t(std::min<unsigned long>(v, 1u << 20)) : fallback;
 }
 
+// gw2 (#159): 1 to 8, anything else the default
+uint32_t
+parseJobs(const std::string &raw, const uint32_t &fallback) {
+  if (raw.empty())
+    return fallback;
+  char *end = nullptr;
+  unsigned long v = std::strtoul(raw.c_str(), &end, 10);
+  return end && *end == 0 && v >= 1 && v <= 8 ? uint32_t(v) : fallback;
+}
+
 sw::Switch<std::string> kWarm{"DXMT_WARM", "off", rawText};
 // gw2 (#124): 8192 (about two sessions of GW2's 2,700-4,800 pipelines); #88's was 2048
 sw::Switch<uint32_t> kWarmMax{"DXMT_WARM_MAX", 8192, parseMax};
 // gw2 (#124): "use" (default) or "rowid" (#88's plan)
 sw::Switch<std::string> kWarmOrder{"DXMT_WARM_ORDER", "use", rawText};
+// gw2 (#159): speculative jobs at once while the warm builds are slow; 1 (default): one at a time
+sw::Switch<uint32_t> kWarmJobs{"DXMT_WARM_JOBS", 1, parseJobs};
 // the startup line shows the effective mode by name (off for anything not understood)
 sw::Effective kWarmLine{"DXMT_WARM", [] { return std::string(warmModeName(warmMode())); }};
 // gw2 (#124): the order in effect (anything but "rowid" plans by use)
@@ -50,6 +63,8 @@ std::atomic<uint64_t> g_used_planned{0}, g_used_total{0}, g_newest{0}, g_use_err
 constinit std::atomic<WarmHitUse> g_hit_use{nullptr};
 std::atomic<int64_t> g_oldest{-1};
 std::atomic<bool> g_planned_now{false};
+// gw2 (#159): speculative jobs running now, and the most at once in the window
+std::atomic<uint32_t> g_jobs_now{0}, g_jobs_peak{0};
 
 std::string
 section(double, uint32_t) {
@@ -58,10 +73,11 @@ section(double, uint32_t) {
   auto x = [](WarmCounter c) { return g_counters[uint32_t(c)].exchange(0, std::memory_order_relaxed); };
   std::string text = std::format(
       "functions={} pipelines={} skipped={} airmiss={} failed={} nofunctions={} live=variants:{},pipelines:{} "
-      "joins={}",
+      "joins={} jobs={}/{}",
       x(WarmCounter::Functions), x(WarmCounter::Pipelines), x(WarmCounter::Skipped), x(WarmCounter::AirMiss),
       x(WarmCounter::Failed), x(WarmCounter::NoFunctions), x(WarmCounter::LiveVariantHit),
-      x(WarmCounter::LivePipelineHit), x(WarmCounter::LiveJoin)
+      x(WarmCounter::LivePipelineHit), x(WarmCounter::LiveJoin),
+      g_jobs_peak.exchange(g_jobs_now.load(std::memory_order_relaxed), std::memory_order_relaxed), warmJobs()
   );
   if (g_planned_now.exchange(false))
     text += std::format(" planned=recipes:{},functions:{},pipelines:{} read={:.1f}ms capped={} othertarget={} "
@@ -109,6 +125,20 @@ bool
 warmOrderByUse() {
   static const bool by_use = kWarmOrder() != "rowid";
   return by_use;
+}
+
+uint32_t
+warmJobs() {
+  static const uint32_t jobs = kWarmJobs();
+  return jobs;
+}
+
+void
+warmJobsRunning(uint32_t running) {
+  g_jobs_now.store(running, std::memory_order_relaxed);
+  uint32_t peak = g_jobs_peak.load(std::memory_order_relaxed);
+  while (running > peak && !g_jobs_peak.compare_exchange_weak(peak, running, std::memory_order_relaxed))
+    ;
 }
 
 uint32_t
