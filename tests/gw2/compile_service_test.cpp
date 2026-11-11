@@ -195,7 +195,8 @@ FakeJob::run() {
     return this;
   }
   gate->enter(id);
-  g_now += cost;
+  if (cost)
+    g_now += cost;
   for (size_t i = 0; i < deps.size(); i++) {
     auto *d = deps[i];
     if (int(i) == lie_once) {
@@ -1082,6 +1083,7 @@ declaredSpeculativeJobs() {
     for (auto &j : sc.jobs)
       sched.submit(j.get(), compile::Lane::Speculative);
     for (int i = 0; i < 3; i++) {
+      waitGated(gate, 1);
       auto g = gatedNow(gate, currentWorkers());
       CHECK(g == std::set<int>({i}), "%s: one speculative job at a time (gated %s)", what, str(g).c_str());
       releaseJob(gate, i);
@@ -1101,6 +1103,7 @@ declaredSpeculativeJobs() {
     CHECK(currentWorkers() == 4, "N=3: a worker more than the speculative jobs (%zu)", currentWorkers());
     for (int i = 0; i < 6; i++)
       sched.submit(sc.jobs[i].get(), compile::Lane::Speculative);
+    waitGated(gate, 1);
     auto g = gatedNow(gate, 4);
     CHECK(g == std::set<int>({0}), "N=3: one at a time before a run was slow (gated %s)", str(g).c_str());
     releaseJob(gate, 0); // slow: the average is 5 ms

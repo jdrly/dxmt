@@ -76,9 +76,11 @@ section(double, uint32_t) {
       "joins={} jobs={}/{}",
       x(WarmCounter::Functions), x(WarmCounter::Pipelines), x(WarmCounter::Skipped), x(WarmCounter::AirMiss),
       x(WarmCounter::Failed), x(WarmCounter::NoFunctions), x(WarmCounter::LiveVariantHit),
-      x(WarmCounter::LivePipelineHit), x(WarmCounter::LiveJoin),
-      g_jobs_peak.exchange(g_jobs_now.load(std::memory_order_relaxed), std::memory_order_relaxed), warmJobs()
+      x(WarmCounter::LivePipelineHit), x(WarmCounter::LiveJoin), g_jobs_peak.exchange(0, std::memory_order_relaxed),
+      warmJobs()
   );
+  // the next window starts from the jobs still running (a change after the reset raises it itself)
+  warmJobsRunning(g_jobs_now.load(std::memory_order_relaxed));
   if (g_planned_now.exchange(false))
     text += std::format(" planned=recipes:{},functions:{},pipelines:{} read={:.1f}ms capped={} othertarget={} "
                         "malformed={}",

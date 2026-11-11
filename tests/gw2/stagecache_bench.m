@@ -112,7 +112,7 @@ enum { V0P0, V1P0, V0P1s, V1P1s, V0P1d, V1P1d, V0Pn, V1Pn, NCLASS };
 static const char *g_class_names[NCLASS] = {"V0P0", "V1P0", "V0P1s", "V1P1s", "V0P1d", "V1P1d", "V0Pn", "V1Pn"};
 
 typedef struct {
-  // the plan (read-only while the threads run)
+  // the plan (read-only while the threads run; main's locals own it, kept alive to the end)
   const char *shaders_path;
   qos_class_t qos;
   int use_qos;
@@ -235,7 +235,8 @@ main(int argc, char **argv) {
     else if (!strcmp(qos, "background"))
       w.qos = QOS_CLASS_BACKGROUND;
 
-    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+    // precise lifetime: the threads reach these only through Work's unretained pointers
+    __attribute__((objc_precise_lifetime)) id<MTLDevice> device = MTLCreateSystemDefaultDevice();
     device.shouldMaximizeConcurrentCompilation = YES; // as DXMT sets it
     printf("device=%s maximumConcurrentCompilationTaskCount=%lu\n", device.name.UTF8String,
            (unsigned long)device.maximumConcurrentCompilationTaskCount);
@@ -250,10 +251,10 @@ main(int argc, char **argv) {
       fprintf(stderr, "prepare: %s\n", sqlite3_errmsg(rdb));
       return 1;
     }
-    NSMutableArray<NSData *> *function_keys = [NSMutableArray array];
-    NSMutableArray<NSString *> *function_names = [NSMutableArray array];
+    __attribute__((objc_precise_lifetime)) NSMutableArray<NSData *> *function_keys = [NSMutableArray array];
+    __attribute__((objc_precise_lifetime)) NSMutableArray<NSString *> *function_names = [NSMutableArray array];
     NSMutableDictionary<NSData *, NSNumber *> *function_index = [NSMutableDictionary dictionary];
-    NSMutableArray<MTLRenderPipelineDescriptor *> *descriptors = [NSMutableArray array];
+    __attribute__((objc_precise_lifetime)) NSMutableArray<MTLRenderPipelineDescriptor *> *descriptors = [NSMutableArray array];
     NSMutableSet<NSData *> *vs_seen = [NSMutableSet set], *ps_seen = [NSMutableSet set],
                            *ps_state_seen = [NSMutableSet set];
     int cap = 1024, recipes = 0, row = 0, bad = 0;
