@@ -79,6 +79,11 @@ statsEnabled() {
 }
 void
 residencyBeforeCommit() {}
+// gw2 (#153): DXMT_MTL4_DEVICE_RESIDENCY unset (the default path)
+bool
+mtl4DeviceResidencyRequested() {
+  return false;
+}
 namespace lifetime {
 void
 useSlow(uint32_t, uint64_t, obj_handle_t, Kind) {}
@@ -197,7 +202,7 @@ present(Fixture &fx, SwapChain &sc, const char *what, uint32_t index) {
                                                options:MTLResourceStorageModeShared |
                                                        MTLResourceHazardTrackingModeUntracked];
       fx.arenas.push_back(b);
-      return std::pair<WMT::Buffer, uint64_t>{WMT::Buffer{H(b)}, 0};
+      return Mtl4Encoding::Bytes{WMT::Buffer{H(b)}, 0, false};
     });
     auto drawable = sc.presenter->encodeCommandsMetal4(
         encoding, WMT::Texture{H(sc.backbuffer)}, state.metadata, [](WMT::MTL4RenderCommandEncoder) {},

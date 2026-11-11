@@ -44,7 +44,7 @@ public:
   // --- as WMT::CommandBuffer's
   // flags: WMTMtl4BindingState::flags for this encoder (WMT_MTL4_NO_ATTACHMENT_RESIDENCY: the
   // attachments stay out of the chunk's set; the present pass's drawable is in the layer's own set,
-  // gw2 #153: other attachments in the device's)
+  // which its command buffer uses (gw2 #184); gw2 #153: other attachments in the device's)
   WMT::MTL4RenderCommandEncoder renderCommandEncoder(WMTRenderPassInfo &info, uint32_t flags = 0);
   WMT::MTL4ComputeCommandEncoder computeCommandEncoder(bool concurrent);
   WMT::MTL4BlitCommandEncoder blitCommandEncoder();

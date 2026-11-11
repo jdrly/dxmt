@@ -310,8 +310,9 @@ _MTL4CommandBuffer_computeCommandEncoder(void *obj) {
 /* gw2 (#32 part 3): residency. Metal 4 makes nothing resident by itself, not even what an encoder
    names directly, so every allocation a packet names goes into the state's residency set (the
    chunk's). A small direct-mapped cache skips repeats within one call; the set ignores the rest.
-   gw2 (#153): except what a set the queue has already holds: a packet with WMT_CMD_RESIDENT (its
-   pipeline, buffers, index buffer), the bytes buffer with WMT_MTL4_BYTES_RESIDENT. */
+   gw2 (#153): except what the device's set (on the queue) already holds: a packet with
+   WMT_CMD_RESIDENT (its pipeline, buffers, index buffer), the bytes buffer with
+   WMT_MTL4_BYTES_RESIDENT. */
 struct replay {
   struct WMTMtl4BindingState *state;
   obj_handle_t recent[64];
