@@ -2241,6 +2241,14 @@ WINEMETAL_API int WMTSetThreadQoSClassSelf(
     enum WMTQoSClass qos, int relative_priority, enum WMTQoSClass *old_qos, enum WMTQoSClass *new_qos
 );
 
+/* gw2 (#151): sets the calling thread's Mach base priority to base_priority (20 is the utility
+   band, which macOS keeps on the P cores) with a THREAD_PRECEDENCE_POLICY call, as the heat ntdll
+   does for HEAT_QOS=1=utility. pthread QoS is no use on a Wine thread: macOS refuses it once the
+   wineserver has set Mach policies. Returns 0 or the kern_return_t; -1 if the task's priority
+   couldn't be read (nothing set). *old_base and *new_base are the thread's base priority before
+   and after (-1 if unreadable). */
+WINEMETAL_API int WMTSetThreadBasePrioritySelf(int base_priority, int *old_base, int *new_base);
+
 /* gw2 (#5): persistent Metal binary archives for pipelines (DXMT_PSO_ARCHIVE=1). The unix side
    owns the archives: it loads valid ones of earlier sessions for lookup, adds every render and
    compute pipeline it builds to this session's archive (on a background queue), and serializes
