@@ -3675,11 +3675,13 @@ public:
     for (unsigned slot = StartSlot; slot < StartSlot + NumViews; slot++) {
       auto pView = static_cast<D3D11ShaderResourceView *>(ppShaderResourceViews[slot - StartSlot]);
       // gw2 (#147): the view this slot already holds (its private reference keeps the address from
-      // being reused). With the switch on, a bound view that can be an output always has its hazard
-      // bit (below), and binding an output unbinds every SRV it overlaps through those bits
-      // (ResolveSRVHazard), so ValidateSRVHazard would pass it and bind() find it redundant: the
-      // state and the encode thread's slot stay as they are, without loading the view.
-      if (pView && ShaderStage.SRVs.test_bound(slot) && ShaderStage.SRVs.at(slot).RawPointer == pView) {
+      // being reused), with a clear hazard bit. With the switch on, every bound view that can be an
+      // output has the bit (bind() on an empty slot, the correction below on a replacement), so
+      // this view is hazardsFree(): ValidateSRVHazard passes it at its first line and bind() finds
+      // it redundant. The state and the encode thread's slot stay as they are, without loading the
+      // view. A view that can be an output always takes the full path.
+      if (pView && ShaderStage.SRVs.test_bound(slot) && !ShaderStage.SRVs.test_hazard(slot) &&
+          ShaderStage.SRVs.at(slot).RawPointer == pView) {
         gw2_pso_.count(gw2::PsoCounter::SrvSame);
         if (gw2_skip_same_srv_)
           continue;

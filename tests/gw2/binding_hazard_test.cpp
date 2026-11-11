@@ -8,11 +8,15 @@
 // src/d3d11/d3d11_context_impl.cpp: the skip's test (`sameBound`, SetShaderResource) and the unbind
 // loop of ResolveSRVHazard (`resolve`, which OMSetRenderTargets runs for each new render target).
 //
-// - A slot first bound with a view that can be an output has its hazard bit; binding the texture as a
-//   render target unbinds it, the skip's test no longer matches, and binding the view again replaces.
+// The skip leaves a slot only when its hazard bit is clear, which must mean the bound view can't be
+// an output (so ValidateSRVHazard passes it at its first line).
+// - A view that can't be an output, set again: skipped.
+// - A slot first bound with a view that can be an output has its hazard bit, so setting it again is
+//   never skipped; binding the texture as a render target unbinds it, and binding the view again
+//   afterwards replaces.
 // - The hole: a slot that held a view that can't be an output keeps a clear bit when that view is
-//   replaced by one that can. The render target's unbind misses it, and the skip's test would still
-//   match while the texture is a render target. set_hazard (the switch's correction) closes it.
+//   replaced by one that can. The render target's unbind misses it, and the skip's test would match
+//   while the texture is a render target. set_hazard (the switch's correction) closes both.
 
 // the header relies on what its includers brought in before it
 #include <array>
@@ -62,10 +66,10 @@ template <> struct redundant_binding_trait<Srv> {
 
 using Set = BindingSet<Srv, 128>;
 
-// SetShaderResource: what the slot holds is the incoming view
+// SetShaderResource's skip: the slot holds the incoming view and its hazard bit is clear
 static bool
 sameBound(Set &set, unsigned slot, View *view) {
-  return set.test_bound(slot) && set.at(slot).RawPointer == view;
+  return set.test_bound(slot) && !set.test_hazard(slot) && set.at(slot).RawPointer == view;
 }
 
 // SetShaderResource's bind of a view that passed ValidateSRVHazard; `correct` is the switch on
@@ -95,14 +99,29 @@ resolve(Set &set, int resource) {
 }
 
 static void
+plainView() {
+  Set set;
+  View plain{2, false};
+  CHECK(!sameBound(set, 0, &plain)); // empty: bound
+  CHECK(bindView(set, 0, &plain, true));
+  CHECK(!set.test_hazard(0));
+  CHECK(sameBound(set, 0, &plain)); // again: skipped
+  View other{4, false};
+  CHECK(!sameBound(set, 0, &other)); // another view: replaced
+  CHECK(bindView(set, 0, &other, true));
+  CHECK(set.unbind(0));
+  CHECK(!sameBound(set, 0, &other)); // unbound: bound again
+}
+
+static void
 firstBound() {
   for (bool correct : {false, true}) {
     Set set;
     View target{1, true};
     CHECK(bindView(set, 0, &target, correct));
     CHECK(set.test_hazard(0));
-    CHECK(sameBound(set, 0, &target));
-    CHECK(!bindView(set, 0, &target, correct)); // the same view again: redundant either way
+    CHECK(!sameBound(set, 0, &target));          // never skipped: the full path validates it
+    CHECK(!bindView(set, 0, &target, correct)); // and bind() finds it redundant
 
     CHECK(resolve(set, 1) == 1); // bound as a render target
     CHECK(!set.test_bound(0));
@@ -138,26 +157,29 @@ replacedInBoundSlot() {
     CHECK(bindView(set, 0, &plain, true));
     CHECK(bindView(set, 0, &target, true));
     CHECK(set.test_hazard(0));
+    CHECK(!sameBound(set, 0, &target)); // the next set validates it
     CHECK(resolve(set, 1) == 1);
     CHECK(!sameBound(set, 0, &target));
     CHECK(bindView(set, 0, &target, true));
     CHECK(set.test_hazard(0));
   }
 
-  // A view that can't be an output replacing one that can keeps the set bit: the unbind loop then
-  // only compares resources, and another resource doesn't match
+  // A view that can't be an output replacing one that can keeps the set bit, as upstream: the
+  // unbind loop only compares one more slot, and that view is never skipped (it is validated, and
+  // passes)
   {
     Set set;
     CHECK(bindView(set, 3, &target, true));
     CHECK(bindView(set, 3, &plain, true));
     CHECK(set.test_hazard(3));
     CHECK(resolve(set, 1) == 0);
-    CHECK(sameBound(set, 3, &plain));
+    CHECK(!sameBound(set, 3, &plain));
   }
 }
 
 int
 main() {
+  plainView();
   firstBound();
   replacedInBoundSlot();
   std::printf("binding_hazard: %d checks, %d failures\n", checks, failures);
