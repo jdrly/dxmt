@@ -37,10 +37,13 @@ pe_machine() {
 }
 # llvm-readobj's name for the format: COFF-ARM64X only for an ARM64 image with ARM64EC metadata
 pe_format() { "$readobj" --file-headers "$1" | sed -n 's/^Format: //p' | head -1 }
-# "<view> <name>" for every named export; an ARM64X image has a native view and an ec view
+# "<view> <name>" for every named export with an address (RVA 0 is no export); an ARM64X image has
+# a native view and an ec view. llvm-readobj prints Ordinal, Name, RVA for each.
 pe_exports() {
   "$readobj" --coff-exports "$1" |
-    awk '/^HybridObject/ { view = "ec" } $1 == "Name:" && NF > 1 { print (view ? view : "native"), $2 }' |
+    awk '/^HybridObject/ { view = "ec" }
+         $1 == "Name:" { name = (NF > 1) ? $2 : "" }
+         $1 == "RVA:" && name != "" && $2 !~ /^0x0+$/ { print (view ? view : "native"), name; name = "" }' |
     sort -u
 }
 
@@ -84,9 +87,15 @@ else
   [[ $(otool -hv "$so" | awk 'NR == 4 { print $5 }') == DYLIB ]] && ok "winemetal.so is a dylib" ||
     fail "winemetal.so isn't a dylib: $(otool -hv "$so" | tail -1)"
 
-  minos() { otool -l "$1" | awk '$1 == "cmd" { c = $2 } c == "LC_BUILD_VERSION" && $1 == "minos" { print $2; exit }' }
+  # LC_BUILD_VERSION's minos, or the older LC_VERSION_MIN_MACOSX's version
+  minos() {
+    otool -l "$1" | awk '$1 == "cmd" { c = $2 }
+      (c == "LC_BUILD_VERSION" && $1 == "minos") || (c == "LC_VERSION_MIN_MACOSX" && $1 == "version") { print $2; exit }'
+  }
   mine_os=$(minos "$so") theirs_os=$(minos "$theirs_so")
-  if [[ $(printf '%s\n' "$mine_os" "$theirs_os" | sort -V | tail -1) == "$theirs_os" ]]; then
+  if [[ -z $mine_os || -z $theirs_os ]]; then
+    fail "winemetal.so's macOS floor unread (mine: ${mine_os:-none}, the engine's: ${theirs_os:-none})"
+  elif [[ $(printf '%s\n' "$mine_os" "$theirs_os" | sort -V | tail -1) == "$theirs_os" ]]; then
     ok "winemetal.so needs macOS $mine_os, the engine's $theirs_os"
   else
     fail "winemetal.so needs macOS $mine_os, newer than the engine's $theirs_os"

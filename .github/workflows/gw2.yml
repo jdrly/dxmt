@@ -307,6 +307,17 @@ jobs:
           find dist -type f | sort
       - name: Checks without Wine
         run: .github/gw2/check-mach9.zsh dist toolchains/mach9 toolchains/llvm-mingw/bin/llvm-readobj | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: The checks fail on a broken copy
+        run: |
+          # an export without an address in each tree, and an i386 DLL where an ARM64X one belongs
+          cp -R dist "$RUNNER_TEMP/broken"
+          python3 -I .github/gw2/zero-export.py "$RUNNER_TEMP/broken/aarch64-windows/d3d11.dll" D3D11CreateDevice
+          python3 -I .github/gw2/zero-export.py "$RUNNER_TEMP/broken/i386-windows/dxgi.dll" CreateDXGIFactory
+          cp "$RUNNER_TEMP/broken/i386-windows/d3d10core.dll" "$RUNNER_TEMP/broken/aarch64-windows/d3d10core.dll"
+          status=0
+          .github/gw2/check-mach9.zsh "$RUNNER_TEMP/broken" toolchains/mach9 toolchains/llvm-mingw/bin/llvm-readobj >"$RUNNER_TEMP/broken.txt" || status=$?
+          grep FAIL "$RUNNER_TEMP/broken.txt"
+          [[ $status == 1 ]] && [[ $(grep -c '^FAIL' "$RUNNER_TEMP/broken.txt") == 4 ]]
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dxmt-mach9-${{ env.COMMIT }}

@@ -1175,7 +1175,9 @@ so only the first run after a version change builds LLVM (about 25 minutes per a
   result with the engine's DXMT, without Wine: every DLL's machine (ARM64X or i386, as the engine's) and
   builtin marker, every export of the engine's DLL of the same name in each view, `winemetal.so`'s
   architecture, macOS floor and libraries, every symbol it imports from `winemac.so` and `ntdll.so`, and
-  `macdrv_functions`. The engine's table has the 10 entries in the order `winemetal_unix.c` declares,
+  `macdrv_functions`. An export counts only with an address. The job then breaks a copy
+  (`.github/gw2/zero-export.py` clears two exports' addresses, and an i386 DLL takes an ARM64X one's
+  place) and requires the script to fail on exactly those four checks. The engine's table has the 10 entries in the order `winemetal_unix.c` declares,
   and its window data the same first four fields (athei/wine `53def892`,
   `dlls/winemac.drv/window.c`, which asserts both). No warnings list for this job yet: llvm-mingw's clang
   warns differently from GCC.
