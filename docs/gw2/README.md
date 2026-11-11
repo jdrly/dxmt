@@ -1061,8 +1061,8 @@ a control without window or checkpoint must fail it. A fusion case (the producti
 ## CI
 
 `.github/workflows/gw2.yml` (#162) checks every pull request into `gw2-on-mac` and every push to it on
-GitHub's runners, so nothing has to build on my Mac. The macOS jobs run on the `xcode-27` image (macOS 27,
-a public preview) with Xcode 27.2, the one I build with. The toolchains are cached under their versions,
+GitHub's runners, so nothing has to build on my Mac. The macOS jobs run on the `xcode-27` image (macOS 27)
+with Xcode 27.2, the one I build with. The toolchains are cached under their versions,
 so only the first run after a version change builds LLVM (about 25 minutes per architecture).
 
 - **Build x86_64, Build i386**: the build `scripts/build-dxmt.zsh` (GW2 on Mac) makes. Release,

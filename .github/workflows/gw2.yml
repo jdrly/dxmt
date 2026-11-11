@@ -30,7 +30,7 @@ concurrency:
 env:
   # The PR's own commit, not GitHub's merge commit, so VERSION and the startup line name it
   COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
-  # The xcode-27 image (macOS 27, a public preview) has the Xcode I build with locally
+  # The xcode-27 image (macOS 27) has the Xcode I build with locally
   XCODE_VERSION: "27.2"
   MACOSX_DEPLOYMENT_TARGET: "26.0"
   MESON_VERSION: 1.12.1
@@ -295,3 +295,13 @@ jobs:
         run: |
           sudo apt-get install -y --no-install-recommends zsh >/dev/null
           for f in tests/gw2/*.zsh .github/gw2/*.zsh; do zsh -n "$f"; echo "ok $f"; done
+      - name: warnings.zsh self-check
+        run: |
+          # a warning with a location (through nt/../), one without, and a line that isn't one
+          log=$RUNNER_TEMP/warnings.log base=$RUNNER_TEMP/warnings.txt
+          printf '%s\n' "../../src/airconv/nt/../air_type.hpp:12:3: warning: x [-Wreturn-type]" \
+            "warning: unknown warning option '-Wfoo' [-Wunknown-warning-option]" "[3/9] Compiling C++ object" >"$log"
+          printf '%s\n' "src/airconv/air_type.hpp: warning: x [-Wreturn-type]" \
+            "warning: unknown warning option '-Wfoo' [-Wunknown-warning-option]" >"$base"
+          .github/gw2/warnings.zsh "$log" "$base"
+          ! .github/gw2/warnings.zsh "$log" /dev/null
