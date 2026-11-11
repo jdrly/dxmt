@@ -32,6 +32,7 @@
 #include "dxmt_gw2_retirement.hpp"
 #include "dxmt_gw2_submission.hpp"
 #include "dxmt_gw2_stats.hpp"
+#include "dxmt_gw2_thread_priority.hpp"
 #include "dxmt_occlusion_query.hpp"
 #include "dxmt_resource_initializer.hpp"
 #include "dxmt_ring_bump_allocator.hpp"
@@ -194,9 +195,6 @@ public:
   }
 };
 
-// gw2 (#151): DXMT_THREAD_PRIORITY, the encode and finish threads' priority
-enum class QueueThreadPriority : uint8_t { Critical, Normal, Utility };
-
 class CommandQueue {
 
 private:
@@ -248,7 +246,7 @@ private:
   const bool unretained_;
   const uint32_t lifetime_id_;
   const bool retire_recovery_; // gw2 (#113): DXMT_RETIRE_RECOVERY
-  const QueueThreadPriority thread_priority_; // gw2 (#151): DXMT_THREAD_PRIORITY (before the threads)
+  const gw2::ThreadPriority thread_priority_; // gw2 (#151): DXMT_THREAD_PRIORITY (before the threads)
 
 public:
   // gw2 (#8): one frame's RING totals, kept by CommitCurrentChunk until the next frame's first commit

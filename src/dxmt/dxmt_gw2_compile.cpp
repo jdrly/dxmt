@@ -21,6 +21,8 @@ namespace dxmt::gw2 {
 namespace {
 // gw2 (C2): =1 only (exactly "1"), off by default
 sw::Switch<bool> kCompileDemand{"DXMT_COMPILE_DEMAND", false, sw::legacy::exactlyOne};
+// gw2 (#152)
+ThreadPrioritySwitch kCompilePriority{"DXMT_COMPILE_PRIORITY"};
 std::atomic<uint64_t> g_promoted{0};
 // gw2 (W0): per variant stage: count, total and max ns in the window, published and drained together
 // under the stage's own lock (STATS only; uncontended but for a drain every 2 s)
@@ -415,6 +417,16 @@ bool
 compileDemand() {
   static const bool on = kCompileDemand();
   return on;
+}
+
+ThreadPriority
+compilePriority() {
+  return kCompilePriority.read();
+}
+
+void
+compileWorkerPriority(ThreadPriority mode) {
+  kCompilePriority.apply(mode, "dxmt-compile-worker");
 }
 
 void

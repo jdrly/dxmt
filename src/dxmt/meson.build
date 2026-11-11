@@ -25,6 +25,7 @@ dxmt_src = [
   'dxmt_keyed_mutex.cpp',
   'dxmt_gw2_stats.cpp',
   'dxmt_gw2_switches.cpp',
+  'dxmt_gw2_thread_priority.cpp', # gw2 (#151, #152)
   'dxmt_compile_builder.cpp',
   'dxmt_compile_recipe.cpp',
   'dxmt_gw2_compile.cpp',

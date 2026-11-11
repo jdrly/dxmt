@@ -51,6 +51,7 @@ std::atomic<uint64_t> g_waits{0};
 CompileWaitScope::CompileWaitScope(const compile::JobRecord *) { g_waits++; }
 CompileWaitScope::~CompileWaitScope() {}
 void compilePromoted() {}
+void compileWorkerPriority(ThreadPriority) {} // #152
 } // namespace dxmt::gw2
 extern "C" void NSObject_retain(obj_handle_t) {}
 extern "C" void NSObject_release(obj_handle_t) {}

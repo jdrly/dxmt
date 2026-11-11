@@ -821,7 +821,9 @@ public:
   PipelineCache(MTLD3D11Device *pDevice) :
       scache_(ShaderCache::getInstance(pDevice->GetDXMTDevice().metalVersion())),
       // gw2 (C2): the declared policy with DXMT_COMPILE_DEMAND=1, and with warming (it needs the speculative lane)
-      scheduler_(compile::Options{.policy = gw2::compileDemand() || gw2::warmMode() != gw2::WarmMode::Off
+      // gw2 (#152): DXMT_COMPILE_PRIORITY
+      scheduler_(compile::Options{.priority = gw2::compilePriority(),
+                                  .policy = gw2::compileDemand() || gw2::warmMode() != gw2::WarmMode::Off
                                                 ? compile::Policy::Declared
                                                 : compile::Policy::Legacy}),
       device(pDevice),
