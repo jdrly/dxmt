@@ -51,6 +51,18 @@ public:
     return bound.get(slot);
   };
 
+  // gw2 (#147): bind() sets a slot's hazard bit only when the slot goes from unbound to bound; a
+  // replacement in a bound slot keeps the old bit. These let a caller read and correct it.
+  constexpr bool
+  test_hazard(size_t slot) const noexcept {
+    return hazard.get(slot);
+  };
+
+  inline void
+  set_hazard(size_t slot) {
+    hazard.set(slot, true);
+  };
+
   constexpr bool
   test_dirty(size_t slot) const noexcept {
     return dirty.get(slot);

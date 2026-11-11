@@ -52,8 +52,19 @@ psoBlendHash() {
 // they invalidate the pipeline or emit a command. Read once per process.
 bool skipSameState();
 
+// gw2 (#147): DXMT_SKIP_SAME_SRV (default off): XXSetShaderResources keeps a slot's hazard bit set
+// when a bound slot is replaced by a view that can be an output, and then leaves a slot whose bound
+// view is the incoming one and whose hazard bit is clear before it validates the view. Read once
+// per process.
+bool skipSameSrv();
+
 // gw2 (#146): LayoutSame, NullShaderEmpty, VertexBufferSame and IndexBufferSame count those setter
 // calls (a vertex buffer per slot), with the switch on or off.
+// gw2 (#147): Srv* and Sampler* count XXSetShaderResources and XXSetSamplers calls, their slots,
+// the slots the switch leaves (SrvSame: the bound view again, hazard bit clear; not counted for
+// samplers) and the slots
+// that emitted a bind or an unbind; SrvHazardMissed counts bound slots replaced by a view that can be
+// an output while the slot's hazard bit was clear. All with DXMT_SKIP_SAME_SRV on or off.
 enum class PsoCounter : unsigned {
   Build,
   MruHit,
@@ -65,6 +76,14 @@ enum class PsoCounter : unsigned {
   NullShaderEmpty,
   VertexBufferSame,
   IndexBufferSame,
+  SrvCall,
+  SrvSlot,
+  SrvSame,
+  SrvSet,
+  SrvHazardMissed,
+  SamplerCall,
+  SamplerSlot,
+  SamplerSet,
   Count
 };
 extern std::atomic<uint64_t> g_pso_counters[(unsigned)PsoCounter::Count];
@@ -80,6 +99,11 @@ struct PsoContextCounters {
   count(PsoCounter c) {
     if (on)
       n[(unsigned)c]++;
+  }
+  void
+  add(PsoCounter c, uint32_t v) {
+    if (on)
+      n[(unsigned)c] += v;
   }
   void
   publish() {
