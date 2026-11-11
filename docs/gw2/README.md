@@ -320,9 +320,9 @@ Present falls into the window in which its sleep ended.
 `PSO builds= mru= lookups= equal= depth=avg/max new= topokept= lock=wait/held samelayout= nullshader= samevb= sameib=` (jdrly/dxmt #6, #146):
 the pipeline lookup on the render thread. Counts are per frame (encode-thread frames of the
 window) unless noted; all contexts and all three pipeline caches (plain, geometry,
-tessellation) together. Omitted when nothing was looked up. Each context counts `builds`, `mru`,
-`topokept` and #146's four `same…` fields with plain increments and hands them over once per chunk, a deferred context at
-`FinishCommandList` (#149).
+tessellation) together. Omitted when the window had no builds, lookups, `topokept` or `same…`
+counts. Each context counts `builds`, `mru`, `topokept` and #146's four `same…` fields with plain
+increments and hands them over once per chunk, a deferred context at `FinishCommandList` (#149).
 
 | Field | Meaning |
 |---|---|
