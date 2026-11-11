@@ -1149,7 +1149,9 @@ so only the first run after a version change builds LLVM (about 25 minutes per a
   `gw2-metal`.
 - **Build ARM64EC**: build only, with llvm-mingw 20260908 and 3Shain's Wine 11.2, as upstream's CI does
   it. It checks that `d3d11.dll`, `dxgi.dll`, `d3d10core.dll` and `winemetal.dll` come out.
-- **Native tests**: `tests/gw2/run.zsh pure` and `metal`. The runner's GPU is an Apple Paravirtual device
+- **Native tests**: `zsh -n` on the zsh scripts and a self-check of `.github/gw2/warnings.zsh`, then
+  `tests/gw2/run.zsh pure` and `metal`. The zsh checks run here because macOS has zsh, so they install
+  nothing (#174). The runner's GPU is an Apple Paravirtual device
   with Metal 3 and no Metal 4. There, `commit_record_metal_test`, `pso_archive_test` and
   `shared_event_listener_test` pass. `chunk_submission_test` and `mtl4fx_test` run their Metal 3 half and
   skip, while `mtl4_bridge_test`, `mtl4_queue_test` and `paired_replay_test` skip outright (no Metal 4).
@@ -1157,7 +1159,7 @@ so only the first run after a version change builds LLVM (about 25 minutes per a
   because the runner's jobs run clamped to the utility band (maximum priority 20). A skip shows as `skip`
   with the test's reason. It never counts as a pass. The Metal 4 paths are still tested only on my Mac.
 - **Lint**: actionlint on the workflow (`.github/actionlint.yaml` names the `xcode-27` label it doesn't
-  know yet) and `zsh -n` on the zsh scripts.
+  know yet).
 - **Artifact** `dxmt-<commit>`: the build as `build-dxmt.zsh` stages it (`x86_64-windows`,
   `i386-windows`, `x86_64-unix`, `VERSION`, the licenses), kept 7 days. On a pull request the commit is
   the branch's head, not GitHub's merge commit, so `VERSION` and the startup line name it. To play it,

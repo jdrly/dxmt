@@ -8,8 +8,9 @@
 #   $WINE_VERSION, as in upstream's CI, since the CrossOver engine I build against locally isn't
 #   downloadable.
 # arm64ec: build only, with llvm-mingw, as upstream's CI does it.
-# tests: tests/gw2/run.zsh pure, and metal on the runner's Metal device.
-# lint: actionlint for the workflows, zsh -n for the zsh scripts.
+# tests: zsh -n for the zsh scripts and warnings.zsh's self-check, then tests/gw2/run.zsh pure,
+#   and metal on the runner's Metal device.
+# lint: actionlint for the workflows.
 # artifact: the installable build of the commit (as build-dxmt.zsh stages it: x86_64-windows,
 #   i386-windows, x86_64-unix, VERSION), kept 7 days, for scripts/dxmt-use.zsh save.
 name: GW2
@@ -258,6 +259,20 @@ jobs:
         with:
           ref: ${{ env.COMMIT }}
           persist-credentials: false
+      # here, not in lint: macOS has zsh, so no package mirror can fail the check (#174)
+      - name: zsh syntax
+        run: |
+          for f in tests/gw2/*.zsh .github/gw2/*.zsh; do zsh -n "$f"; echo "ok $f"; done
+      - name: warnings.zsh self-check
+        run: |
+          # a warning with a location (through nt/../), one without, and a line that isn't one
+          log=$RUNNER_TEMP/warnings.log base=$RUNNER_TEMP/warnings.txt
+          printf '%s\n' "../../src/airconv/nt/../air_type.hpp:12:3: warning: x [-Wreturn-type]" \
+            "warning: unknown warning option '-Wfoo' [-Wunknown-warning-option]" "[3/9] Compiling C++ object" >"$log"
+          printf '%s\n' "src/airconv/air_type.hpp: warning: x [-Wreturn-type]" \
+            "warning: unknown warning option '-Wfoo' [-Wunknown-warning-option]" >"$base"
+          .github/gw2/warnings.zsh "$log" "$base"
+          ! .github/gw2/warnings.zsh "$log" /dev/null
       - name: Select Xcode
         run: sudo xcode-select -s "/Applications/Xcode_$XCODE_VERSION.app"
       - name: Pure tests
@@ -291,17 +306,3 @@ jobs:
           echo "$ACTIONLINT_SHA256  $RUNNER_TEMP/$f" | sha256sum -c
           tar -xzf "$RUNNER_TEMP/$f" -C "$RUNNER_TEMP" actionlint
           "$RUNNER_TEMP/actionlint" -color .github/workflows/gw2.yml
-      - name: zsh syntax
-        run: |
-          sudo apt-get install -y --no-install-recommends zsh >/dev/null
-          for f in tests/gw2/*.zsh .github/gw2/*.zsh; do zsh -n "$f"; echo "ok $f"; done
-      - name: warnings.zsh self-check
-        run: |
-          # a warning with a location (through nt/../), one without, and a line that isn't one
-          log=$RUNNER_TEMP/warnings.log base=$RUNNER_TEMP/warnings.txt
-          printf '%s\n' "../../src/airconv/nt/../air_type.hpp:12:3: warning: x [-Wreturn-type]" \
-            "warning: unknown warning option '-Wfoo' [-Wunknown-warning-option]" "[3/9] Compiling C++ object" >"$log"
-          printf '%s\n' "src/airconv/air_type.hpp: warning: x [-Wreturn-type]" \
-            "warning: unknown warning option '-Wfoo' [-Wunknown-warning-option]" >"$base"
-          .github/gw2/warnings.zsh "$log" "$base"
-          ! .github/gw2/warnings.zsh "$log" /dev/null
