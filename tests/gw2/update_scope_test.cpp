@@ -124,12 +124,27 @@ main() {
                 wall / 1e6);
   }
 
-  // gw2 (#150): the clock's floor is its own cost. An empty interval reads 0 on average, though the
-  // clock steps 100 ns (a single one reads 0 or 100, less the floor). The median of 9 groups' means,
-  // so a preempted group doesn't count.
+  // gw2 (#150): the clock's floor is its own cost, and sinceNs takes it off once. The interval's end,
+  // put back together from what sinceNs returned, lies between its start and a read taken right
+  // after. That holds exactly on any machine. Without the floor taken off, or with it taken off
+  // twice, it lands a floor past one end, which an empty interval of 0 or one clock step (100 ns)
+  // misses most of the time.
   {
     int64_t floor_ns = clockFloorNs();
     CHECK(floor_ns > 0 && floor_ns < 1000);
+    int outside = 0;
+    for (int i = 0; i < 1000; i++) {
+      int64_t t0 = nowNs();
+      int64_t t1 = sinceNs(t0) + t0 + floor_ns;
+      int64_t after = nowNs();
+      outside += t1 < t0 || t1 > after;
+    }
+    CHECK(outside == 0);
+
+    // On the real clock an empty interval reads 0 on average, but only while the clock costs what it
+    // did when the floor was measured. On GitHub's virtual machines that cost moves by tens of ns
+    // between the two (#179), so this bound only catches a floor that is wildly off. The median of 9
+    // groups' means, so a preempted group doesn't count.
     double mean[9];
     for (auto &m : mean) {
       int64_t sum = 0;
@@ -140,8 +155,9 @@ main() {
       m = sum / 1000.0;
     }
     std::nth_element(mean, mean + 4, mean + 9);
-    CHECK(std::fabs(mean[4]) < 10);
-    std::printf("clock floor %lld ns, empty interval %.2f ns\n", (long long)floor_ns, mean[4]);
+    CHECK(std::fabs(mean[4]) < 1000);
+    std::printf("clock floor %lld ns, empty interval %.2f ns, %d of 1000 outside\n", (long long)floor_ns, mean[4],
+                outside);
   }
 
   // gw2 (#150): a buffer's Map, sampled 1 in 64: MAP takes the ApiScope's interval, so both lines read
