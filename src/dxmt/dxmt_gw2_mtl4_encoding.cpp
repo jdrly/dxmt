@@ -29,6 +29,7 @@ Mtl4Encoding::open() {
     return *commit;
   auto &commit = queue_.begin(seq_);
   segments_.push_back({&commit, position_});
+  waited_ = false;
   return commit;
 }
 
@@ -40,7 +41,7 @@ Mtl4Encoding::commitOpen() {
 
 void
 Mtl4Encoding::openForTimestamps(bool extra) {
-  if (extra || segments_.empty())
+  if (extra || segments_.empty() || waited_)
     open();
 }
 
@@ -124,6 +125,7 @@ void
 Mtl4Encoding::encodeWaitForEvent(WMT::Event event, uint64_t value) {
   commitOpen();
   queue_.waitForEvent(event, value);
+  waited_ = true; // gw2 (#154)
 }
 
 void

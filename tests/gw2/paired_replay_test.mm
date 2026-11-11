@@ -63,8 +63,8 @@
 // - gw2 (#154): Metal 4 chunks end as flushCommands ends them with timestamp queries pending (GW2 always
 //   has some): openForTimestamps, then the commit. The frame still makes two commits, not a third, empty
 //   one after the present, and the present's commit has a GPU end for the queries to read. A chunk with
-//   no encoder gets one command buffer for its queries; with DXMT_MTL4_TIMESTAMP_REUSE=0 a chunk whose
-//   last buffer is committed gets another.
+//   no encoder gets one command buffer for its queries, and another after a queue-level wait; with
+//   DXMT_MTL4_TIMESTAMP_REUSE=0 a chunk whose last buffer is committed gets another.
 //
 // How much it sees (measured 2026-11-04 on an M5 Max by mutating a scratch copy of mtl4.c, arm64): each
 // of these made the run fail: Set*BufferOffset ignoring its offset, a Set*Bytes overflow skipped instead
@@ -1190,6 +1190,8 @@ main() {
       CHECK(state.residency_adds > 0, "Metal 4: nothing went into the chunk's residency set");
       waitMetal4(queue, seq, run4.presented ? 2 : 1, "Metal 4 frame", true);
       // gw2 (#154): a chunk with timestamp queries and no encoder (ring slot 0 again, the load retired)
+      id<MTLSharedEvent> event = [fx.device newSharedEvent];
+      event.signaledValue = 1; // the queue wait below is already met
       {
         Mtl4Encoding encoding(queue, 2, bytes);
         encoding.openForTimestamps(false);
@@ -1197,11 +1199,15 @@ main() {
         encoding.commitOpen();
         encoding.openForTimestamps(false);
         CHECK(encoding.segments().size() == 1, "Metal 4: another command buffer after the chunk's last was committed");
+        encoding.encodeWaitForEvent(WMT::Event{H(event)}, 1);
+        encoding.openForTimestamps(false);
+        CHECK(encoding.segments().size() == 2, "Metal 4: no command buffer for the timestamps after a queue wait");
+        encoding.commitOpen();
         encoding.openForTimestamps(true); // DXMT_MTL4_TIMESTAMP_REUSE=0
-        CHECK(encoding.segments().size() == 2, "Metal 4: DXMT_MTL4_TIMESTAMP_REUSE=0 began no command buffer");
+        CHECK(encoding.segments().size() == 3, "Metal 4: DXMT_MTL4_TIMESTAMP_REUSE=0 began no command buffer");
         encoding.commitOpen();
       }
-      waitMetal4(queue, 2, 2, "Metal 4 chunk without encoders");
+      waitMetal4(queue, 2, 3, "Metal 4 chunk without encoders");
       queue.waitIdle();
     }
 
