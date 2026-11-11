@@ -53,7 +53,7 @@ Mtl4Encoding::prepare(Kind kind, uint32_t flags) {
   } else if (kind == Kind::Compute) {
     state_.tables[WMTMtl4TableCompute] = tables.compute.handle;
   }
-  state_.flags = flags;
+  state_.flags = flags | bytes_flags_;
   if (state_.bytes_end - state_.bytes_offset < kBytesReserve)
     newArena(kBytesArena);
 }
@@ -61,10 +61,12 @@ Mtl4Encoding::prepare(Kind kind, uint32_t flags) {
 void
 Mtl4Encoding::newArena(uint64_t size) {
   size = std::max(size, kBytesArena);
-  auto [buffer, offset] = bytes_(size);
-  state_.bytes_buffer = buffer.handle;
-  state_.bytes_offset = offset;
-  state_.bytes_end = offset + size;
+  auto bytes = bytes_(size);
+  state_.bytes_buffer = bytes.buffer.handle;
+  state_.bytes_offset = bytes.offset;
+  state_.bytes_end = bytes.offset + size;
+  bytes_flags_ = bytes.resident ? WMT_MTL4_BYTES_RESIDENT : 0; // gw2 (#153)
+  state_.flags = (state_.flags & ~WMT_MTL4_BYTES_RESIDENT) | bytes_flags_;
 }
 
 void

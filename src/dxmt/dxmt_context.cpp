@@ -687,7 +687,8 @@ ArgumentEncodingContext::startRenderPass(
   encoder_info->dsv_planar_flags = dsv_planar_flags;
   encoder_info->dsv_readonly_flags = dsv_readonly_flags;
   encoder_info->render_target_count = render_target_count;
-  auto [gpu_buffer_contents, gpu_buffer_, offset] = queue_.AllocateArgumentBuffer(seq_id_, encoder_argbuf_size);
+  auto [gpu_buffer_contents, gpu_buffer_, offset] =
+      queue_.AllocateArgumentBuffer(seq_id_, encoder_argbuf_size, &encoder_info->allocated_argbuf_resident);
   encoder_info->allocated_argbuf = gpu_buffer_;
   encoder_info->allocated_argbuf_offset = offset;
   encoder_info->allocated_argbuf_mapping = gpu_buffer_contents;
@@ -712,7 +713,8 @@ ArgumentEncodingContext::startComputePass(uint64_t encoder_argbuf_size) {
   encoder_info->cmd_head.type = WMTComputeCommandNop;
   encoder_info->cmd_head.next.set(0);
   encoder_info->cmd_tail = (wmtcmd_base *)&encoder_info->cmd_head;
-  auto [gpu_buffer_contents, gpu_buffer_, offset] = queue_.AllocateArgumentBuffer(seq_id_, encoder_argbuf_size);
+  auto [gpu_buffer_contents, gpu_buffer_, offset] =
+      queue_.AllocateArgumentBuffer(seq_id_, encoder_argbuf_size, &encoder_info->allocated_argbuf_resident);
   encoder_info->allocated_argbuf = gpu_buffer_;
   encoder_info->allocated_argbuf_offset = offset;
   encoder_info->allocated_argbuf_mapping = gpu_buffer_contents;
@@ -1014,6 +1016,21 @@ ArgumentEncodingContext::gw2CountAttachments(RenderEncoderData *data) {
     count(data->stencil.attachment.ptr(), data->stencil.load_action, data->stencil.store_action, gw2::Aspect::Stencil);
 }
 
+// gw2 (#153): every attachment the pass info names (colors, resolves, depth, stencil) is in the device's
+// residency set, on Metal 4 (Metal 4's replay then leaves them out of the chunk's set)
+bool
+ArgumentEncodingContext::gw2AttachmentsResident(RenderEncoderData *data) {
+  if (!gw2::mtl4DeviceResidency())
+    return false;
+  auto resident = [](const TextureViewRef &view) {
+    return !view || (view->allocation && view->allocation->gw2Resident);
+  };
+  for (auto &color : data->colors)
+    if (!resident(color.attachment) || !resident(color.resolve_attachment))
+      return false;
+  return resident(data->depth.attachment) && resident(data->stencil.attachment);
+}
+
 // gw2 (#4): ENCODE's enc= kind of a (non-null) encoder
 static gw2::Enc
 gw2EncoderKind(EncoderType type) {
@@ -1263,19 +1280,27 @@ ArgumentEncodingContext::flushCommandsImpl(CommandBuffer &cmdbuf, uint64_t seqId
         }
         gw2::lifetime::useCommands(lt_queue, seqId, (const wmtcmd_base *)&data->cmd_head, LtEncoder::Render);
       }
-      auto encoder = cmdbuf.renderCommandEncoder(render_pass_info);
+      auto encoder = [&] {
+        if constexpr (kMetal4) // gw2 (#153): attachments the device's residency set holds stay out of the chunk's
+          return cmdbuf.renderCommandEncoder(
+              render_pass_info, gw2AttachmentsResident(data) ? WMT_MTL4_NO_ATTACHMENT_RESIDENCY : 0
+          );
+        else
+          return cmdbuf.renderCommandEncoder(render_pass_info);
+      }();
       data->fence_wait.forEach(
           data->fence_wait_vertex, // if a fence is waited pre-raster, no need to wait again at fragment
           [&](auto id) { encoder.waitForFence(fence_pool_[id], WMTRenderStagePreRaster); },
           [&](auto id) { encoder.waitForFence(fence_pool_[id], WMTRenderStageFragment); }
       );
-      encoder.setVertexBuffer(gpu_buffer_, 0, SM50_BINDING_INDEX_VERTEX_BUFFER);
-      encoder.setVertexBuffer(gpu_buffer_, 0, SM50_BINDING_INDEX_CONSTANT_BUFFER);
-      encoder.setVertexBuffer(gpu_buffer_, 0, SM50_BINDING_INDEX_ARGUMENT_TABLE);
+      uint16_t argbuf_flags = data->allocated_argbuf_resident ? WMT_CMD_RESIDENT : 0; // gw2 (#153)
+      encoder.setVertexBuffer(gpu_buffer_, 0, SM50_BINDING_INDEX_VERTEX_BUFFER, argbuf_flags);
+      encoder.setVertexBuffer(gpu_buffer_, 0, SM50_BINDING_INDEX_CONSTANT_BUFFER, argbuf_flags);
+      encoder.setVertexBuffer(gpu_buffer_, 0, SM50_BINDING_INDEX_ARGUMENT_TABLE, argbuf_flags);
       if (data->use_emulated_so)
-        encoder.setVertexBuffer(gpu_buffer_, 0, SM50_BINDING_INDEX_STREAM_OUTPUT0);
-      encoder.setFragmentBuffer(gpu_buffer_, 0, SM50_BINDING_INDEX_CONSTANT_BUFFER);
-      encoder.setFragmentBuffer(gpu_buffer_, 0, SM50_BINDING_INDEX_ARGUMENT_TABLE);
+        encoder.setVertexBuffer(gpu_buffer_, 0, SM50_BINDING_INDEX_STREAM_OUTPUT0, argbuf_flags);
+      encoder.setFragmentBuffer(gpu_buffer_, 0, SM50_BINDING_INDEX_CONSTANT_BUFFER, argbuf_flags);
+      encoder.setFragmentBuffer(gpu_buffer_, 0, SM50_BINDING_INDEX_ARGUMENT_TABLE, argbuf_flags);
       if constexpr (kMetal4) { // gw2 (#32): mesh draws through the replay, untested on Metal 4
         if (data->use_geometry)
           gw2::metal4Untested("geometry shader emulation");
@@ -1283,16 +1308,16 @@ ArgumentEncodingContext::flushCommandsImpl(CommandBuffer &cmdbuf, uint64_t seqId
           gw2::metal4Untested("tessellation emulation");
       }
       if (data->use_geometry || data->use_tessellation) {
-        encoder.setObjectBuffer(gpu_buffer_, 0, SM50_BINDING_INDEX_VERTEX_BUFFER);
-        encoder.setObjectBuffer(gpu_buffer_, 0, SM50_BINDING_INDEX_DRAW_ARGUMENTS);
+        encoder.setObjectBuffer(gpu_buffer_, 0, SM50_BINDING_INDEX_VERTEX_BUFFER, argbuf_flags);
+        encoder.setObjectBuffer(gpu_buffer_, 0, SM50_BINDING_INDEX_DRAW_ARGUMENTS, argbuf_flags);
         if (data->use_tessellation) {
-          encoder.setObjectBuffer(gpu_buffer_, 0, SM50_BINDING_INDEX_CONSTANT_BUFFER2);
-          encoder.setObjectBuffer(gpu_buffer_, 0, SM50_BINDING_INDEX_ARGUMENT_TABLE2);
+          encoder.setObjectBuffer(gpu_buffer_, 0, SM50_BINDING_INDEX_CONSTANT_BUFFER2, argbuf_flags);
+          encoder.setObjectBuffer(gpu_buffer_, 0, SM50_BINDING_INDEX_ARGUMENT_TABLE2, argbuf_flags);
         }
-        encoder.setObjectBuffer(gpu_buffer_, 0, SM50_BINDING_INDEX_CONSTANT_BUFFER);
-        encoder.setObjectBuffer(gpu_buffer_, 0, SM50_BINDING_INDEX_ARGUMENT_TABLE);
-        encoder.setMeshBuffer(gpu_buffer_, 0, SM50_BINDING_INDEX_CONSTANT_BUFFER);
-        encoder.setMeshBuffer(gpu_buffer_, 0, SM50_BINDING_INDEX_ARGUMENT_TABLE);
+        encoder.setObjectBuffer(gpu_buffer_, 0, SM50_BINDING_INDEX_CONSTANT_BUFFER, argbuf_flags);
+        encoder.setObjectBuffer(gpu_buffer_, 0, SM50_BINDING_INDEX_ARGUMENT_TABLE, argbuf_flags);
+        encoder.setMeshBuffer(gpu_buffer_, 0, SM50_BINDING_INDEX_CONSTANT_BUFFER, argbuf_flags);
+        encoder.setMeshBuffer(gpu_buffer_, 0, SM50_BINDING_INDEX_ARGUMENT_TABLE, argbuf_flags);
       }
       if (data->gs_arg_marshal_tasks.size()) {
         auto task_count = data->gs_arg_marshal_tasks.size();
@@ -1378,6 +1403,8 @@ ArgumentEncodingContext::flushCommandsImpl(CommandBuffer &cmdbuf, uint64_t seqId
       data->fence_wait.forEach([&](auto id) { encoder.waitForFence(fence_pool_[id]); });
       struct wmtcmd_compute_setbuffer setcmd;
       setcmd.type = WMTComputeCommandSetBuffer;
+      // gw2 (#153): set here, not left as the stack's
+      WMT::setPacketFlags(setcmd, data->allocated_argbuf_resident ? WMT_CMD_RESIDENT : 0);
       setcmd.next.set(nullptr);
       setcmd.buffer = data->allocated_argbuf;
       setcmd.offset = 0;

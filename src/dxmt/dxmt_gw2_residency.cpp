@@ -1,11 +1,14 @@
 #include "dxmt_gw2_residency.hpp"
+#include "dxmt_gw2_metal4.hpp"
 #include "dxmt_gw2_stats.hpp"
+#include "dxmt_gw2_switches.hpp"
 #include "log/log.hpp"
 #include "util_env.hpp"
 #include <atomic>
 #include <format>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 
 namespace dxmt::gw2 {
 
@@ -23,6 +26,7 @@ struct ResidencyState {
   // under the mutex
   uint64_t resident = 0; // DXMT allocations in the set
   uint64_t bytes = 0;
+  std::unordered_map<obj_handle_t, uint32_t> pipelines; // gw2 (#153): pipeline objects holding each
   // window totals
   std::atomic<uint64_t> adds{0}, removes{0}, commits{0};
 };
@@ -52,6 +56,8 @@ residencySection(double, uint32_t) {
 }
 
 SectionRegistrar s_residency("RESIDENCY", &residencySection);
+
+sw::Switch<bool> kMtl4DeviceResidency{"DXMT_MTL4_DEVICE_RESIDENCY", false, sw::legacy::exactlyOne}; // gw2 (#153)
 
 } // namespace
 
@@ -127,7 +133,14 @@ residencyAttachMtl4Queue(WMT::Device device, WMT::MTL4CommandQueue queue) {
   if (!s.active.load(std::memory_order_relaxed) || device.handle != s.device)
     return false;
   queue.addResidencySet(s.set);
-  Logger::info("Residency: the residency set is attached to this device's Metal 4 queue too (DXMT_METAL4)");
+  Logger::info(
+      mtl4DeviceResidencyRequested()
+          ? "Residency: the residency set is attached to this device's Metal 4 queue too (DXMT_METAL4); pipelines "
+            "and argument buffers enter it, and what it holds stays out of each chunk's set "
+            "(DXMT_MTL4_DEVICE_RESIDENCY=1)"
+          : "Residency: the residency set is attached to this device's Metal 4 queue too (DXMT_METAL4); every "
+            "allocation a packet names also goes into its chunk's set"
+  );
   return true;
 }
 
@@ -192,6 +205,48 @@ residencyBeforeCommit() {
   s.dirty.store(false, std::memory_order_release);
   if (statsEnabled())
     s.commits.fetch_add(1, std::memory_order_relaxed);
+}
+
+bool
+mtl4DeviceResidencyRequested() {
+  static const bool on = kMtl4DeviceResidency();
+  return on;
+}
+
+bool
+mtl4DeviceResidency() {
+  return metal4Active() && mtl4DeviceResidencyRequested();
+}
+
+bool
+residencyAddPipeline(WMT::Device device, obj_handle_t pipeline) {
+  auto &s = state();
+  if (!pipeline || !mtl4DeviceResidency() || !s.active.load(std::memory_order_acquire) || device.handle != s.device)
+    return false;
+  std::lock_guard lock(s.mutex);
+  if (s.pipelines[pipeline]++)
+    return true;
+  MTLResidencySet_addAllocations(s.set.handle, &pipeline, 1);
+  s.resident++;
+  s.dirty.store(true, std::memory_order_release);
+  if (statsEnabled())
+    s.adds.fetch_add(1, std::memory_order_relaxed);
+  return true;
+}
+
+void
+residencyRemovePipeline(obj_handle_t pipeline) {
+  auto &s = state();
+  std::lock_guard lock(s.mutex);
+  auto it = s.pipelines.find(pipeline);
+  if (it == s.pipelines.end() || --it->second)
+    return;
+  s.pipelines.erase(it);
+  MTLResidencySet_removeAllocations(s.set.handle, &pipeline, 1);
+  s.resident--;
+  s.dirty.store(true, std::memory_order_release);
+  if (statsEnabled())
+    s.removes.fetch_add(1, std::memory_order_relaxed);
 }
 
 } // namespace dxmt::gw2

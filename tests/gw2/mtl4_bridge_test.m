@@ -1,6 +1,6 @@
 // gw2-test: metal
 // gw2-build: for arch in x86_64 arm64; do clang -x objective-c -std=gnu17 -fblocks -fno-objc-arc -O1 -arch $arch -mmacosx-version-min=26.0 -Isrc/winemetal -Isrc/winemetal/unix -Isrc/airconv src/winemetal/unix/mtl4.c tests/gw2/mtl4_bridge_test.m -framework Metal -framework QuartzCore -framework Foundation -lsqlite3 -o ${OUT}_$arch; done
-// gw2-run: ${OUT}_x86_64 && MTL_DEBUG_LAYER=1 ${OUT}_arm64
+// gw2-run: ${OUT}_x86_64 && MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 ${OUT}_arm64
 //
 // gw2 (#32): native test and probe of the Metal 4 bridge (src/winemetal/unix/mtl4.c, slots 155-178).
 // It calls the bridge's unix entry points directly, as winemetal.so does for the PE side, on a real
@@ -14,7 +14,12 @@
 //       -framework Metal -framework QuartzCore -framework Foundation -lsqlite3 -o $T/mtl4_test_$arch
 //   done
 //   $T/mtl4_test_x86_64                    # under Rosetta, as winemetal.so runs in the game
-//   MTL_DEBUG_LAYER=1 $T/mtl4_test_arm64   # with Metal's validation layer
+//   MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 $T/mtl4_test_arm64   # with Metal's validation layers
+//
+// gw2 (#153): shader validation is what sees a residency hole. On my M5 Max (macOS 27) a buffer that
+// the packets mark resident but no set holds draws right under MTL_DEBUG_LAYER=1 alone and reads as
+// zeros under MTL_SHADER_VALIDATION=1 (the flagged run then fails). A pipeline in no set runs under
+// both: no layer reports it.
 //
 // 1. Replay: a device-built render pipeline (newRenderPipelineStateWithDescriptor, as DXMT builds
 //    them) draws through today's packets on an MTL4 render encoder: buffers bound by Set*Buffer and
@@ -27,6 +32,12 @@
 //    event; the pixels and buffers are checked.
 //    Then the same again with nothing made resident by hand: the replays put every allocation the
 //    packets name (pipelines, buffers, textures, attachments, UseResource's) into a chunk set (part 3).
+//    Then (gw2 #153, the path DXMT_MTL4_DEVICE_RESIDENCY=1 takes; the two runs above are the default
+//    path's) everything resident by hand in the queue's set again, with the packets and the
+//    binding states saying so (WMT_CMD_RESIDENT on Set*PSO, Set*Buffer and the indexed draw, whose
+//    index buffer handle is a decoy: the draw must use the packet's address and length;
+//    WMT_MTL4_NO_ATTACHMENT_RESIDENCY, WMT_MTL4_BYTES_RESIDENT): the chunk set gets only what the
+//    unmarked packets name (UseResource's two, the blits' six), the compute replay adds nothing.
 // 2. Part 4: a fence orders two separately committed command buffers (A fills 64 MB, B copies its
 //    end), as the present split and queue-level events rely on; and the present path on a layer
 //    without a window (waitForDrawable, a pass, signalDrawable, present at a deadline), skipped if
@@ -114,7 +125,16 @@ struct mtl4 {
   id<MTLResidencySet> residency;
   /* part 3: residency only from the replays, into this set (the chunk's), nothing added by hand */
   id<MTLResidencySet> chunk;
+  /* gw2 (#153): with chunk: everything resident by hand as well, and the packets say so */
+  bool flagged;
 };
+
+/* gw2 (#153): in the flagged run, the packet says the queue's set holds what it names */
+static void
+mark(struct mtl4 *m, void *cmd) {
+  if (m->flagged)
+    ((struct wmtcmd_base *)cmd)->flags = WMT_CMD_RESIDENT;
+}
 
 static obj_handle_t
 new_table(id<MTLDevice> device, uint32_t buffers, uint32_t textures) {
@@ -198,7 +218,7 @@ resident_buffer(struct mtl4 *m, NSUInteger length) {
   id<MTLBuffer> b = [m->device newBufferWithLength:length
                                            options:MTLResourceStorageModeShared | MTLResourceHazardTrackingModeUntracked];
   memset(b.contents, 0, length);
-  if (!m->chunk)
+  if (!m->chunk || m->flagged)
     [m->residency addAllocation:b];
   return b;
 }
@@ -213,7 +233,7 @@ resident_texture(struct mtl4 *m, MTLTextureUsage usage) {
   d.storageMode = MTLStorageModePrivate;
   d.hazardTrackingMode = MTLHazardTrackingModeUntracked;
   id<MTLTexture> t = [m->device newTextureWithDescriptor:d];
-  if (!m->chunk)
+  if (!m->chunk || m->flagged)
     [m->residency addAllocation:t];
   return t;
 }
@@ -241,7 +261,7 @@ test_replay(struct mtl4 *m) {
     return;
   /* Metal 4: pipelines are allocations too and must be resident (Apple, WWDC25 254; d9mt #63); with
      m->chunk the replays add them (SetPSO) */
-  if (!m->chunk) {
+  if (!m->chunk || m->flagged) {
     [m->residency addAllocation:pso];
     [m->residency addAllocation:cs_fill];
     [m->residency addAllocation:cs_double];
@@ -264,6 +284,11 @@ test_replay(struct mtl4 *m) {
   memcpy(positions.contents, pos, sizeof(pos));
   uint32_t idx[4] = {7, 0, 1, 2}; /* drawn from offset 4: the first is junk */
   memcpy(indices.contents, idx, sizeof(idx));
+  /* gw2 (#153): the flagged draw names this buffer but must read `indices` (its packet's address):
+     these indices would draw nothing */
+  id<MTLBuffer> decoy = resident_buffer(m, 64);
+  uint32_t junk[4] = {0, 0, 0, 0};
+  memcpy(decoy.contents, junk, sizeof(junk));
   uint8_t texel[4 * 4 * 4];
   for (int i = 0; i < 16; i++) {
     texel[4 * i + 0] = 128, texel[4 * i + 1] = 128, texel[4 * i + 2] = 255, texel[4 * i + 3] = 255;
@@ -291,6 +316,10 @@ test_replay(struct mtl4 *m) {
   memset(&compute_state, 0, sizeof(compute_state));
   compute_state.tables[WMTMtl4TableCompute] = new_table(m->device, 8, 0);
   render_state.residency_set = blit_state.residency_set = compute_state.residency_set = H(m->chunk);
+  if (m->flagged) {
+    render_state.flags = WMT_MTL4_NO_ATTACHMENT_RESIDENCY | WMT_MTL4_BYTES_RESIDENT;
+    compute_state.flags = WMT_MTL4_BYTES_RESIDENT;
+  }
   compute_state.bytes_buffer = H(bytes);
   compute_state.bytes_offset = 1024;
   compute_state.bytes_end = 4096;
@@ -331,14 +360,17 @@ test_replay(struct mtl4 *m) {
     wait->stages = WMTRenderStageFragment;
     struct wmtcmd_render_setbuffer *vb = chain_add(&c, sizeof(*vb), WMTRenderCommandSetVertexBuffer);
     vb->buffer = H(argbuf), vb->offset = 128, vb->index = 1; /* moved to 0 below */
+    mark(m, vb);
     struct wmtcmd_render_setbufferoffset *vbo = chain_add(&c, sizeof(*vbo), WMTRenderCommandSetVertexBufferOffset);
     vbo->offset = 0, vbo->index = 1;
     struct wmtcmd_render_setbuffer *fb0 = chain_add(&c, sizeof(*fb0), WMTRenderCommandSetFragmentBuffer);
     fb0->buffer = H(argbuf), fb0->offset = 0, fb0->index = 0;
+    mark(m, fb0);
     struct wmtcmd_render_setbufferoffset *fbo = chain_add(&c, sizeof(*fbo), WMTRenderCommandSetFragmentBufferOffset);
     fbo->offset = 256, fbo->index = 0;
     struct wmtcmd_render_setbuffer *fb1 = chain_add(&c, sizeof(*fb1), WMTRenderCommandSetFragmentBuffer);
     fb1->buffer = H(argbuf), fb1->offset = 512, fb1->index = 1;
+    mark(m, fb1);
     struct wmtcmd_render_setbytes *fbytes = chain_add(&c, sizeof(*fbytes), WMTRenderCommandSetFragmentBytes);
     fbytes->bytes.ptr = add, fbytes->length = sizeof(add), fbytes->index = 2;
     struct wmtcmd_render_useresource *use = chain_add(&c, sizeof(*use), WMTRenderCommandUseResource);
@@ -347,6 +379,7 @@ test_replay(struct mtl4 *m) {
     use_pos->resource = H(positions), use_pos->usage = WMTResourceUsageRead, use_pos->stages = WMTRenderStageVertex;
     struct wmtcmd_render_setpso *setpso = chain_add(&c, sizeof(*setpso), WMTRenderCommandSetPSO);
     setpso->pso = H(pso);
+    mark(m, setpso);
     struct wmtcmd_render_setviewport *vp = chain_add(&c, sizeof(*vp), WMTRenderCommandSetViewport);
     vp->viewport = (struct WMTViewport){0, 0, 4, 4, 0, 1};
     struct wmtcmd_render_draw_indexed *draw = chain_add(&c, sizeof(*draw), WMTRenderCommandDrawIndexed);
@@ -356,6 +389,12 @@ test_replay(struct mtl4 *m) {
     draw->index_buffer = H(indices);
     draw->index_buffer_offset = 4;
     draw->instance_count = 1;
+    if (m->flagged) {
+      mark(m, draw);
+      draw->index_buffer = H(decoy);
+      draw->index_buffer_address = indices.gpuAddress;
+      draw->index_buffer_length = indices.length;
+    }
     struct wmtcmd_render_fence_op *update = chain_add(&c, sizeof(*update), WMTRenderCommandUpdateFence);
     update->fence = H(fence);
     update->stages = WMTRenderStageFragment;
@@ -390,8 +429,10 @@ test_replay(struct mtl4 *m) {
     uint32_t base = 1000;
     struct wmtcmd_compute_setpso *p1 = chain_add(&c, sizeof(*p1), WMTComputeCommandSetPSO);
     p1->pso = H(cs_fill), p1->threadgroup_size = (struct WMTSize){64, 1, 1};
+    mark(m, p1);
     struct wmtcmd_compute_setbuffer *b0 = chain_add(&c, sizeof(*b0), WMTComputeCommandSetBuffer);
     b0->buffer = H(out), b0->offset = 0, b0->index = 0;
+    mark(m, b0);
     struct wmtcmd_compute_setbytes *sb = chain_add(&c, sizeof(*sb), WMTComputeCommandSetBytes);
     sb->bytes.ptr = &base, sb->length = 4, sb->index = 1;
     struct wmtcmd_compute_dispatch *d1 = chain_add(&c, sizeof(*d1), WMTComputeCommandDispatchThreads);
@@ -399,6 +440,7 @@ test_replay(struct mtl4 *m) {
     chain_add(&c, sizeof(struct wmtcmd_compute_memory_barrier), WMTComputeCommandMemoryBarrier);
     struct wmtcmd_compute_setpso *p2 = chain_add(&c, sizeof(*p2), WMTComputeCommandSetPSO);
     p2->pso = H(cs_double), p2->threadgroup_size = (struct WMTSize){64, 1, 1};
+    mark(m, p2);
     struct wmtcmd_compute_dispatch *d2 = chain_add(&c, sizeof(*d2), WMTComputeCommandDispatchThreads);
     d2->size = (struct WMTSize){64, 1, 1};
     replay(_MTL4ComputeCommandEncoder_encodeCommands, enc, &compute_state, &c);
@@ -416,9 +458,11 @@ test_replay(struct mtl4 *m) {
     struct chain c = {0};
     struct wmtcmd_compute_setpso *p = chain_add(&c, sizeof(*p), WMTComputeCommandSetPSO);
     p->pso = H(cs_fill), p->threadgroup_size = (struct WMTSize){1, 1, 1};
+    mark(m, p);
     for (int k = 0; k < 4; k++) {
       struct wmtcmd_compute_setbuffer *b = chain_add(&c, sizeof(*b), WMTComputeCommandSetBuffer);
       b->buffer = H(out2), b->offset = 4 * k, b->index = 0;
+      mark(m, b);
       struct wmtcmd_compute_setbytes *sb = chain_add(&c, sizeof(*sb), WMTComputeCommandSetBytes);
       sb->bytes.ptr = &bases[k], sb->length = 4, sb->index = 1;
       struct wmtcmd_compute_dispatch *d = chain_add(&c, sizeof(*d), WMTComputeCommandDispatchThreads);
@@ -465,7 +509,13 @@ test_replay(struct mtl4 *m) {
           "bytes resume: %d resumes, out2 = %u %u %u %u (want 1 resume, 0 100 200 300)", resumes, o2[0], o2[1], o2[2],
           o2[3]);
   }
-  if (m->chunk) {
+  if (m->flagged) {
+    /* gw2 (#153): only the unmarked packets' allocations: UseResource's source and positions; the
+       blits' staging, source, target, readback, fill_a, fill_b; nothing of the compute replay */
+    CHECK(render_state.residency_adds == 2 && blit_state.residency_adds == 6 && compute_state.residency_adds == 0,
+          "flagged: residency_adds render %u (want 2) blit %u (want 6) compute %u (want 0)",
+          render_state.residency_adds, blit_state.residency_adds, compute_state.residency_adds);
+  } else if (m->chunk) {
     CHECK(render_state.use_resource_dropped == 0, "use_resource_dropped=%u, want 0 with a residency set",
           render_state.use_resource_dropped);
     /* render: argbuf, the bytes buffer, source, positions, target, the pipeline, indices; blit: staging,
@@ -484,7 +534,10 @@ test_replay(struct mtl4 *m) {
         (unsigned long long)render_state.bytes_offset);
   CHECK(blit_state.blit_barriers == 2, "blit_barriers=%u, want 2 (readback, fill, copy)", blit_state.blit_barriers);
   printf("replay (%s): render, blit and compute packets on Metal 4 encoders: %s\n",
-         m->chunk ? "residency from the replays only" : "everything resident by hand", failures ? "FAILED" : "ok");
+         m->flagged ? "the queue's set holds what the packets mark"
+         : m->chunk ? "residency from the replays only"
+                    : "everything resident by hand",
+         failures ? "FAILED" : "ok");
   for (int i = 0; i < 4; i++) {
     if (render_state.tables[i])
       [(id)render_state.tables[i] release];
@@ -493,7 +546,8 @@ test_replay(struct mtl4 *m) {
   if (m->chunk) {
     [m->chunk removeAllAllocations];
     [m->chunk commit];
-  } else {
+  }
+  if (!m->chunk || m->flagged) {
     [m->residency removeAllocation:pso];
     [m->residency removeAllocation:cs_fill];
     [m->residency removeAllocation:cs_double];
@@ -915,6 +969,10 @@ main(int argc, char **argv) {
     /* part 3: the same with nothing made resident by hand: only what the replays put in the chunk's set */
     m.chunk = [m.device newResidencySetWithDescriptor:rd error:&err];
     test_replay(&m);
+    /* gw2 (#153): the queue's set holds everything, the packets say so; the chunk's gets the rest */
+    m.flagged = true;
+    test_replay(&m);
+    m.flagged = false;
     [m.chunk release];
     m.chunk = nil;
     test_cross_commit_fence(&m);

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Metal.hpp"
+#include "dxmt_gw2_residency.hpp"
 #include "log/log.hpp"
 #include "thread.hpp"
 #include "util_math.hpp"
@@ -83,10 +84,15 @@ private:
 
 class StagingBufferBlockAllocator {
 public:
-  StagingBufferBlockAllocator(WMT::Device device, WMTResourceOptions block_options, bool placed_buffer = true) {
+  // gw2 (#153): gw2_resident: on Metal 4 (gw2::mtl4DeviceResidency), each block enters the device's
+  // residency set when it is made and leaves it when it is freed (the argument-buffer ring)
+  StagingBufferBlockAllocator(
+      WMT::Device device, WMTResourceOptions block_options, bool placed_buffer = true, bool gw2_resident = false
+  ) {
     device_ = device;
     buffer_info_ = block_options;
     placed_buffer_ = placed_buffer;
+    gw2_resident_ = gw2_resident;
   }
 
   class Block {
@@ -94,8 +100,15 @@ public:
     WMT::Reference<WMT::Buffer> buffer;
     uint64_t gpu_address;
     void *mapped_address;
+    // gw2 (#153): the block's bytes while it is in the device's residency set, else 0. A ring frees a
+    // block only after the last chunk that used it retired.
+    uint64_t gw2_resident_bytes = 0;
 
     ~Block() {
+      if (gw2_resident_bytes) {
+        obj_handle_t handle = buffer.handle;
+        gw2::residencyRemove(&handle, 1, gw2_resident_bytes);
+      }
       if (mapped_address) {
         free(mapped_address);
         mapped_address = nullptr;
@@ -110,6 +123,8 @@ public:
       gpu_address = move.gpu_address;
       mapped_address = move.mapped_address;
       move.mapped_address = nullptr;
+      gw2_resident_bytes = move.gw2_resident_bytes;
+      move.gw2_resident_bytes = 0;
     };
   };
 
@@ -123,6 +138,9 @@ public:
     info.length = block_size;
     block.buffer = device_.newBuffer(info);
     block.gpu_address = info.gpu_address;
+    obj_handle_t handle = block.buffer.handle;
+    if (gw2_resident_ && handle && gw2::mtl4DeviceResidency() && gw2::residencyAdd(device_, &handle, 1, block_size))
+      block.gw2_resident_bytes = block_size;
     return block;
   };
 
@@ -130,6 +148,7 @@ private:
   WMT::Device device_;
   WMTResourceOptions buffer_info_;
   bool placed_buffer_;
+  bool gw2_resident_;
 };
 
 class HostBufferBlockAllocator {

@@ -168,7 +168,8 @@ CommandQueue::CommandQueue(WMT::Device device) :
     copy_temp_allocator({device, WMTResourceHazardTrackingModeUntracked | WMTResourceStorageModePrivate}),
     argbuf_allocator({
         device,
-        WMTResourceHazardTrackingModeUntracked | WMTResourceCPUCacheModeWriteCombined | WMTResourceStorageModeShared
+        WMTResourceHazardTrackingModeUntracked | WMTResourceCPUCacheModeWriteCombined | WMTResourceStorageModeShared,
+        true, true // gw2 (#153): its blocks are in the device's residency set on Metal 4
     }),
     cpu_command_allocator({}),
     reftracker_storage_allocator({}),
@@ -375,8 +376,9 @@ CommandQueue::CommitChunkInternal(CommandChunk &chunk, uint64_t seq) {
     void
     encode(gw2::Mtl4Queue &mtl4) override {
       gw2::Mtl4Encoding encoding(mtl4, seq, [this](uint64_t size) {
-        auto [mapped, buffer, offset] = queue.AllocateArgumentBuffer(seq, size);
-        return std::pair<WMT::Buffer, uint64_t>{buffer, offset};
+        bool resident = false;
+        auto [mapped, buffer, offset] = queue.AllocateArgumentBuffer(seq, size, &resident);
+        return gw2::Mtl4Encoding::Bytes{buffer, offset, resident};
       });
       chunk.encodeMetal4(encoding, queue.argument_encoding_ctx);
     }
