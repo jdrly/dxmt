@@ -1,6 +1,7 @@
 #!/bin/zsh
-# gw2 (X1, architecture council): the fork's native test runner. Not part of the DLL build and not in
-# CI (the CI runner can't run Metal); run it on the Mac from anywhere in the checkout:
+# gw2 (X1, architecture council): the fork's native test runner. Not part of the DLL build. The CI
+# (.github/workflows/gw2.yml) runs pure and metal on a runner without Metal 4, where the Metal 4 tests
+# skip (docs/gw2/README.md, CI). Run it on the Mac from anywhere in the checkout:
 #
 #   tests/gw2/run.zsh [pure|metal|all] [--meson <build dir>]...
 #

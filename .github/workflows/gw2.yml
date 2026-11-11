@@ -1,0 +1,307 @@
+# gw2 (#162): my fork's checks, on GitHub's runners instead of my Mac. Upstream's ci.yml stays as it
+# is (it runs for main only), so an upstream sync doesn't conflict with this file.
+#
+# build (x86_64, i386): the build scripts/build-dxmt.zsh (GW2 on Mac) makes, release, NVEXT off,
+#   with Homebrew's mingw-w64, meson $MESON_VERSION and LLVM $LLVM_VERSION for macOS
+#   $MACOSX_DEPLOYMENT_TARGET. A compiler warning that .github/gw2/warnings-<arch>.txt doesn't
+#   list fails it. Wine's import libraries, winebuild and winemac.so come from 3Shain's Wine
+#   $WINE_VERSION, as in upstream's CI, since the CrossOver engine I build against locally isn't
+#   downloadable.
+# arm64ec: build only, with llvm-mingw, as upstream's CI does it.
+# tests: tests/gw2/run.zsh pure, and metal on the runner's Metal device.
+# lint: actionlint for the workflows, zsh -n for the zsh scripts.
+# artifact: the installable build of the commit (as build-dxmt.zsh stages it: x86_64-windows,
+#   i386-windows, x86_64-unix, VERSION), kept 7 days, for scripts/dxmt-use.zsh save.
+name: GW2
+
+on:
+  pull_request:
+    branches: [gw2-on-mac]
+  push:
+    branches: [gw2-on-mac]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gw2-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # The PR's own commit, not GitHub's merge commit, so VERSION and the startup line name it
+  COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+  # The xcode-27 image (macOS 27) has the Xcode I build with locally
+  XCODE_VERSION: "27.2"
+  MACOSX_DEPLOYMENT_TARGET: "26.0"
+  MESON_VERSION: 1.12.1
+  NINJA_VERSION: 1.13.0
+  LLVM_VERSION: 15.0.7
+  LLVM_SHA256: 8b5fcb24b4128cf04df1b0b9410ce8b1a729cb3c544e6da885d234280dedeac6
+  # Raise it when toolchain.zsh builds LLVM differently, so the cache doesn't keep the old build
+  LLVM_BUILD: 1
+  WINE_VERSION: v8.16-3shain
+  WINE_SHA256: 289c7f19e270a3d3d0a6fdb07691b176c70a0795f6811e5255cba82425de4f10
+  WINE_ARM64EC_VERSION: wine-11.2
+  WINE_ARM64EC_SHA256: 834ec0d4f1dff94de187f29891dc9938306ea2602d0fff603b407225c916d881
+  LLVM_MINGW_VERSION: "20260908"
+  LLVM_MINGW_SHA256: d1dc5d1ecf3a3ced5ed5544c72f1acd0c8e84eb3024d520ecc6b143eec62a149
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Build ${{ matrix.arch }}
+    runs-on: xcode-27
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            cross: build-win64.txt
+          - arch: i386
+            cross: build-win32.txt
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.COMMIT }}
+          fetch-depth: 0
+          submodules: true
+          persist-credentials: false
+      - name: Select Xcode
+        run: sudo xcode-select -s "/Applications/Xcode_$XCODE_VERSION.app"
+
+      - name: Restore Wine
+        id: wine
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: wine-x86_64-${{ env.WINE_VERSION }}
+          path: toolchains/wine
+      - name: Download Wine
+        if: steps.wine.outputs.cache-hit != 'true'
+        run: .github/gw2/toolchain.zsh fetch "https://github.com/3Shain/wine/releases/download/$WINE_VERSION/wine.tar.gz" "$WINE_SHA256" toolchains/wine
+      - name: Save Wine
+        if: steps.wine.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: wine-x86_64-${{ env.WINE_VERSION }}
+          path: toolchains/wine
+
+      - name: Restore LLVM
+        if: matrix.arch == 'x86_64'
+        id: llvm
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: llvm-${{ env.LLVM_VERSION }}-x86_64-macos${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ env.LLVM_BUILD }}
+          path: toolchains/llvm
+      - name: Build LLVM
+        if: matrix.arch == 'x86_64' && steps.llvm.outputs.cache-hit != 'true'
+        run: |
+          pip3 install --break-system-packages "ninja==$NINJA_VERSION"
+          .github/gw2/toolchain.zsh llvm x86_64 toolchains/llvm
+      - name: Save LLVM
+        if: matrix.arch == 'x86_64' && steps.llvm.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: llvm-${{ env.LLVM_VERSION }}-x86_64-macos${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ env.LLVM_BUILD }}
+          path: toolchains/llvm
+
+      - name: Install mingw-w64 and meson
+        run: |
+          brew install mingw-w64
+          pip3 install --break-system-packages "meson==$MESON_VERSION" "ninja==$NINJA_VERSION"
+      - name: Toolchain versions
+        run: |
+          {
+            echo "### ${{ matrix.arch }} toolchain"
+            echo '```'
+            xcodebuild -version
+            xcrun -sdk macosx --show-sdk-version
+            brew list --versions mingw-w64
+            x86_64-w64-mingw32-gcc --version | head -1
+            echo "meson $(meson --version), ninja $(ninja --version)"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Build
+        run: |
+          llvm=()
+          # relative: meson refuses an absolute include path inside the source tree
+          [[ ${{ matrix.arch }} == x86_64 ]] && llvm=(-Dnative_llvm_path=toolchains/llvm)
+          meson setup build --cross-file ${{ matrix.cross }} --buildtype release --strip \
+            --prefix "$PWD/install" -Dwine_install_path="$PWD/toolchains/wine" -Ddxmt_debug=false "${llvm[@]}"
+          meson compile -C build 2>&1 | tee build.log
+      - name: No new warnings
+        run: .github/gw2/warnings.zsh build.log .github/gw2/warnings-${{ matrix.arch }}.txt
+      - name: Meson tests (gw2 suite without Metal)
+        if: matrix.arch == 'x86_64'
+        run: meson test -C build --suite gw2 --no-suite gw2-metal --print-errorlogs
+
+      - name: Stage
+        run: |
+          meson install -C build --quiet
+          rm -f install/*/*.dll.a
+          if [[ ${{ matrix.arch }} == x86_64 ]]; then
+            git -c diff.ignoreSubmodules=all describe --always --dirty >install/VERSION
+            cp COPYING.LIB LICENSE install/
+            # winemetal.so has to find the engine's winemac.so and ntdll.so, not this runner's copies
+            otool -L install/x86_64-unix/winemetal.so | tee /dev/stderr |
+              grep -c -E '^[[:space:]]+@rpath/(winemac|ntdll)\.so ' | grep -qx 2
+          fi
+          find install -type f | sort
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: part-${{ matrix.arch }}-${{ env.COMMIT }}
+          path: install
+          retention-days: 1
+          if-no-files-found: error
+
+  artifact:
+    name: Artifact
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/upload-artifact/merge@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dxmt-${{ env.COMMIT }}
+          pattern: part-*-${{ env.COMMIT }}
+          retention-days: 7
+
+  arm64ec:
+    name: Build ARM64EC
+    runs-on: xcode-27
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.COMMIT }}
+          fetch-depth: 0
+          submodules: true
+          persist-credentials: false
+      - name: Select Xcode
+        run: sudo xcode-select -s "/Applications/Xcode_$XCODE_VERSION.app"
+
+      - name: Restore Wine
+        id: wine
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: wine-arm64ec-${{ env.WINE_ARM64EC_VERSION }}
+          path: toolchains/wine
+      - name: Download Wine
+        if: steps.wine.outputs.cache-hit != 'true'
+        run: .github/gw2/toolchain.zsh fetch "https://github.com/3Shain/wine/releases/download/$WINE_ARM64EC_VERSION/$WINE_ARM64EC_VERSION.tar.gz" "$WINE_ARM64EC_SHA256" toolchains/wine --strip-components 2
+      - name: Save Wine
+        if: steps.wine.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: wine-arm64ec-${{ env.WINE_ARM64EC_VERSION }}
+          path: toolchains/wine
+
+      - name: Restore llvm-mingw
+        id: mingw
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: llvm-mingw-${{ env.LLVM_MINGW_VERSION }}
+          path: toolchains/llvm-mingw
+      - name: Download llvm-mingw
+        if: steps.mingw.outputs.cache-hit != 'true'
+        run: .github/gw2/toolchain.zsh fetch "https://github.com/mstorsjo/llvm-mingw/releases/download/$LLVM_MINGW_VERSION/llvm-mingw-$LLVM_MINGW_VERSION-ucrt-macos-universal.tar.xz" "$LLVM_MINGW_SHA256" toolchains/llvm-mingw --strip-components 1
+      - name: Save llvm-mingw
+        if: steps.mingw.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: llvm-mingw-${{ env.LLVM_MINGW_VERSION }}
+          path: toolchains/llvm-mingw
+
+      - name: Install meson
+        run: pip3 install --break-system-packages "meson==$MESON_VERSION" "ninja==$NINJA_VERSION"
+      - name: Restore LLVM
+        id: llvm
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: llvm-${{ env.LLVM_VERSION }}-arm64-macos${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ env.LLVM_BUILD }}
+          path: toolchains/llvm
+      - name: Build LLVM
+        if: steps.llvm.outputs.cache-hit != 'true'
+        run: .github/gw2/toolchain.zsh llvm arm64 toolchains/llvm
+      - name: Save LLVM
+        if: steps.llvm.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: llvm-${{ env.LLVM_VERSION }}-arm64-macos${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ env.LLVM_BUILD }}
+          path: toolchains/llvm
+
+      - name: Build
+        run: |
+          export PATH="$PWD/toolchains/llvm-mingw/bin:$PATH"
+          arm64ec-w64-mingw32-gcc --version | head -1
+          meson setup build --cross-file build-arm64ec.txt --buildtype release --strip --prefix "$PWD/install" \
+            -Dwine_install_path="$PWD/toolchains/wine" -Dnative_llvm_path=toolchains/llvm
+          meson compile -C build
+          meson install -C build --quiet
+      - name: The four DLLs are there
+        run: |
+          for dll in d3d11 dxgi d3d10core winemetal; do
+            file "install/aarch64-windows/$dll.dll" | tee /dev/stderr | grep -q 'PE32+'
+          done
+
+  tests:
+    name: Native tests
+    runs-on: xcode-27
+    timeout-minutes: 30
+    env:
+      GW2_TEST_DIR: ${{ github.workspace }}/gw2-tests
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.COMMIT }}
+          persist-credentials: false
+      - name: Select Xcode
+        run: sudo xcode-select -s "/Applications/Xcode_$XCODE_VERSION.app"
+      - name: Pure tests
+        run: tests/gw2/run.zsh pure
+      - name: Metal tests
+        run: |
+          status=0
+          tests/gw2/run.zsh metal | tee "$RUNNER_TEMP/metal.txt" || status=$?
+          # each skipped test's own reason, and the device it saw
+          awk '$1 == "skip" { print $2 }' "$RUNNER_TEMP/metal.txt" | while read -r t; do
+            echo "== $t"
+            grep -i -E 'skip|device' "$GW2_TEST_DIR/$t.log" | head -4 || true
+          done
+          exit "$status"
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.COMMIT }}
+          persist-credentials: false
+      - name: actionlint
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          f="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/$f" "https://github.com/rhysd/actionlint/releases/download/v$ACTIONLINT_VERSION/$f"
+          echo "$ACTIONLINT_SHA256  $RUNNER_TEMP/$f" | sha256sum -c
+          tar -xzf "$RUNNER_TEMP/$f" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" -color .github/workflows/gw2.yml
+      - name: zsh syntax
+        run: |
+          sudo apt-get install -y --no-install-recommends zsh >/dev/null
+          for f in tests/gw2/*.zsh .github/gw2/*.zsh; do zsh -n "$f"; echo "ok $f"; done
+      - name: warnings.zsh self-check
+        run: |
+          # a warning with a location (through nt/../), one without, and a line that isn't one
+          log=$RUNNER_TEMP/warnings.log base=$RUNNER_TEMP/warnings.txt
+          printf '%s\n' "../../src/airconv/nt/../air_type.hpp:12:3: warning: x [-Wreturn-type]" \
+            "warning: unknown warning option '-Wfoo' [-Wunknown-warning-option]" "[3/9] Compiling C++ object" >"$log"
+          printf '%s\n' "src/airconv/air_type.hpp: warning: x [-Wreturn-type]" \
+            "warning: unknown warning option '-Wfoo' [-Wunknown-warning-option]" >"$base"
+          .github/gw2/warnings.zsh "$log" "$base"
+          ! .github/gw2/warnings.zsh "$log" /dev/null
