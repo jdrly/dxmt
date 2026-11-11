@@ -231,13 +231,17 @@ presentTrack(uint64_t drawable, uint64_t frame) {
   if (!n && !lost)
     return;
   if (presentPaceOn() && n) {
-    // gw2 (#157): pace's per-frame skip count, as the section counts them
-    std::sort(out, out + n, [](auto &a, auto &b) { return a.frame < b.frame; });
+    // gw2 (#157): pace's per-frame skip count, as the section counts them, in frame order. An insertion
+    // sort: mingw-GCC's -Warray-bounds misreads std::sort on this 8-record array
+    uint32_t m = std::min<uint32_t>(n, WMT_PRESENTED_BATCH);
+    for (uint32_t i = 1; i < m; i++)
+      for (uint32_t j = i; j > 0 && out[j].frame < out[j - 1].frame; j--)
+        std::swap(out[j], out[j - 1]);
     double refresh_ms = g_refresh_ms.load(std::memory_order_relaxed);
     uint32_t vsyncs = g_vsyncs.load(std::memory_order_relaxed);
     double limiter_ms = g_limiter_ms.load(std::memory_order_relaxed);
     std::lock_guard lock(g_pace_mutex);
-    for (uint32_t i = 0; i < n; i++)
+    for (uint32_t i = 0; i < m; i++)
       g_live.add(out[i].frame, out[i].encode_ns, out[i].presented_ns, refresh_ms, vsyncs, limiter_ms);
   }
   std::lock_guard lock(g_mutex);
