@@ -66,6 +66,13 @@ std::atomic<bool> g_planned_now{false};
 // gw2 (#159): speculative jobs running now, and the most at once in the window
 std::atomic<uint32_t> g_jobs_now{0}, g_jobs_peak{0};
 
+void
+raiseJobsPeak(uint32_t running) {
+  uint32_t peak = g_jobs_peak.load(std::memory_order_relaxed);
+  while (running > peak && !g_jobs_peak.compare_exchange_weak(peak, running, std::memory_order_relaxed))
+    ;
+}
+
 std::string
 section(double, uint32_t) {
   if (warmMode() == WarmMode::Off)
@@ -79,8 +86,9 @@ section(double, uint32_t) {
       x(WarmCounter::LivePipelineHit), x(WarmCounter::LiveJoin), g_jobs_peak.exchange(0, std::memory_order_relaxed),
       warmJobs()
   );
-  // the next window starts from the jobs still running (a change after the reset raises it itself)
-  warmJobsRunning(g_jobs_now.load(std::memory_order_relaxed));
+  // the next window starts from the jobs still running (a change after the reset raises it itself; this
+  // only raises the peak, so it can't write a stale count back)
+  raiseJobsPeak(g_jobs_now.load(std::memory_order_relaxed));
   if (g_planned_now.exchange(false))
     text += std::format(" planned=recipes:{},functions:{},pipelines:{} read={:.1f}ms capped={} othertarget={} "
                         "malformed={}",
@@ -138,9 +146,7 @@ warmJobs() {
 void
 warmJobsRunning(uint32_t running) {
   g_jobs_now.store(running, std::memory_order_relaxed);
-  uint32_t peak = g_jobs_peak.load(std::memory_order_relaxed);
-  while (running > peak && !g_jobs_peak.compare_exchange_weak(peak, running, std::memory_order_relaxed))
-    ;
+  raiseJobsPeak(running);
 }
 
 uint32_t
