@@ -36,10 +36,17 @@ airconv_dep_darwin = declare_dependency(
   link_args           : [ llvm_ld_flags_darwin, llvm_deps ] # meh
 )
 
-executable('airconv', airconv_src + airconv_cli_src,
+airconv_cli_darwin = executable('airconv', airconv_src + airconv_cli_src,
   include_directories : [ dxmt_include_path, llvm_include_path_darwin ],
   cpp_args            : [ airconv_args ],
   dependencies        : [ dxbc_parser_native_dep ],
   link_args           : [ llvm_ld_flags_darwin, llvm_deps ],
   native              : dxmt_crossbuild
+)
+
+# gw2 (#161): the vertex stage of a geometry-shader draw without an index buffer, converted by the
+# airconv above (no Metal device needed)
+test('airconv-gs-vertex', find_program('../../../tests/gw2/airconv_gs_vertex.zsh'),
+  args  : [ airconv_cli_darwin, meson.current_build_dir() / 'airconv-gs-vertex' ],
+  suite : [ 'gw2' ]
 )
