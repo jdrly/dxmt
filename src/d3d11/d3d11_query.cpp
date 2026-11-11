@@ -123,6 +123,11 @@ class MTLD3D11TimestampQueryImpl : public MTLD3DQueryBase<MTLD3D11TimestampQuery
     issued_chunk_ = seq;
   }
 
+  virtual uint64_t
+  IssuedChunk() override {
+    return issued_chunk_;
+  }
+
   virtual bool
   PollStalled(uint64_t current_seq) override {
     // a committed chunk resolves without help (the GPU, then the finish thread)

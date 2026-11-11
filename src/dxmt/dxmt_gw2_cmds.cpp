@@ -18,6 +18,7 @@ const char *const kPassCloseNames[kPassCloseCount] = {
 const char *const kPromoteNames[kPromoteCount] = {
     "skip", "reached", "nodefer", "gpuidle", "present", "explicit", "poll", "timer", "watchdog",
 };
+const char *const kGetDataNames[kGetDataKindCount] = {"event", "occlusion", "timestamp", "disjoint"};
 const char *const kEncNames[kEncCount] = {
     "render", "compute", "blit", "clear", "resolve", "present", "upscale", "event", "timestamp",
 };
@@ -32,6 +33,7 @@ using counter = std::atomic<uint64_t>;
 counter g_commit[kCommitWhyCount];
 counter g_pass_close[kPassCloseCount];
 counter g_promote[kPromoteCount];
+counter g_getflush[kGetDataKindCount], g_getskip[kGetDataKindCount]; // gw2 (#158)
 std::atomic<uint32_t> g_promote_min{0};
 std::atomic<uint32_t> g_promote_ms{2};
 
@@ -93,6 +95,8 @@ cmdsSection(double, uint32_t frames) {
   std::string out = std::format("cb={:.1f}", commits / f);
   out += " cbwhy=" + perFrameList(commit, kCommitWhyNames, f, (unsigned)CommitWhy::Other, (int)CommitWhy::Other);
   out += " close=" + perFrameList(takeAll(g_pass_close), kPassCloseNames, f, 0, -1);
+  out += " getflush=" + perFrameList(takeAll(g_getflush), kGetDataNames, f, 0, -1);
+  out += " getskip=" + perFrameList(takeAll(g_getskip), kGetDataNames, f, 0, -1);
   uint32_t min = g_promote_min.load(std::memory_order_relaxed);
   if (!min) {
     for (auto &c : g_promote)
@@ -152,6 +156,11 @@ promoteFlushMin() {
 uint32_t
 promoteFlushMs() {
   return g_promote_ms.load(std::memory_order_relaxed);
+}
+
+void
+getDataPoll(GetDataKind kind, bool flushed) {
+  (flushed ? g_getflush : g_getskip)[(unsigned)kind].fetch_add(1, std::memory_order_relaxed);
 }
 
 void
