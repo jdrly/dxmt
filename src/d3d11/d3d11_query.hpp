@@ -120,6 +120,8 @@ constexpr size_t kEventStallThreshold = 64;
 struct MTLD3D11EventQuery : public ID3D11Query1 {
   virtual void Issue(uint64_t current_seq_id) = 0;
   virtual EventState CheckEventState(uint64_t coherent_seq_id) = 0;
+  // gw2 (#158): the value Issue took (in estimate/boundary, a timestamp-disjoint query's chunk)
+  virtual uint64_t IssuedSeqId() = 0;
 };
 
 template <typename DataType>
@@ -154,6 +156,8 @@ public:
     return EventState::Stall;
   };
 
+  uint64_t IssuedSeqId() override { return should_be_signaled_at; }
+
 private:
   QueryState state = QueryState::Undefined;
   uint32_t stall_counter = 0;
@@ -178,6 +182,7 @@ public:
   virtual TimestampQuery *End() = 0;
   // gw2 (#24): DXMT_TIMESTAMP_MODE estimate/boundary: the chunk the last End was recorded in
   virtual void SetIssuedChunk(uint64_t seq) = 0;
+  virtual uint64_t IssuedChunk() = 0; // gw2 (#158)
   // gw2 (#24): a poll that found the value unresolved; true after kEventStallThreshold such polls
   // while the query's chunk is still the one being recorded (`current_seq`): the caller then commits
   virtual bool PollStalled(uint64_t current_seq) = 0;

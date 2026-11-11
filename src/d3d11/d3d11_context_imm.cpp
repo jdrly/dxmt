@@ -2,6 +2,7 @@
 #include "dxmt_gw2_stats.hpp"
 #include "dxmt_gw2_map.hpp"
 #include "dxmt_gw2_metal4.hpp"
+#include "dxmt_gw2_switches.hpp"
 #include "d3d11_context_state.hpp"
 #include "d3d11_fence.hpp"
 #include "d3d11_private.h"
@@ -16,6 +17,26 @@
 #include <cstdlib>
 
 namespace dxmt {
+
+namespace {
+// gw2 (#158): see gw2::getDataSkipsFlush
+sw::Switch<bool> kGetDataSkipFlush{"DXMT_GETDATA_SKIP_FLUSH", true, sw::legacy::notZero};
+
+gw2::GetDataKind
+getDataKind(D3D11_QUERY query) {
+  switch (query) {
+  case D3D11_QUERY_EVENT:
+    return gw2::GetDataKind::Event;
+  case D3D11_QUERY_TIMESTAMP:
+    return gw2::GetDataKind::Timestamp;
+  case D3D11_QUERY_TIMESTAMP_DISJOINT:
+    return gw2::GetDataKind::Disjoint;
+  default:
+    return gw2::GetDataKind::Occlusion;
+  }
+}
+} // namespace
+
 struct ContextInternalState {
   using device_mutex_t = d3d11_device_mutex;
   CommandQueue &cmd_queue;
@@ -100,6 +121,7 @@ public:
 
   gw2::TimestampMode timestamp_mode_ = gw2::timestampMode(); // gw2 (#24)
   bool gw2_ts_uncommitted_ = false; // gw2 (#24): a timestamp or disjoint query waits for the current chunk
+  const bool gw2_getdata_skip_flush_ = kGetDataSkipFlush(); // gw2 (#158): DXMT_GETDATA_SKIP_FLUSH, cached
 
   ~MTLD3D11ImmediateContext() {
     if (watchdog_started_) {
@@ -602,6 +624,7 @@ public:
       return E_INVALIDARG;
 
     HRESULT hr = S_FALSE;
+    uint64_t issued_chunk = 0; // gw2 (#158): a timestamp or disjoint query's chunk (estimate/boundary)
 
     D3D11_QUERY_DESC desc;
     ((ID3D11Query *)pAsync)->GetDesc(&desc);
@@ -612,6 +635,8 @@ public:
       uint64_t signaled = desc.Query == D3D11_QUERY_TIMESTAMP_DISJOINT && timestamp_mode_ != gw2::TimestampMode::Exact
                               ? cmd_queue.CoherentSeqId()
                               : cmd_queue.SignaledEventSeqId();
+      if (desc.Query == D3D11_QUERY_TIMESTAMP_DISJOINT)
+        issued_chunk = static_cast<MTLD3D11EventQuery *>(pAsync)->IssuedSeqId();
       switch (static_cast<MTLD3D11EventQuery *>(pAsync)->CheckEventState(signaled)) {
       case EventState::Pending:
         break;
@@ -651,6 +676,7 @@ public:
       uint64_t null_data;
       uint64_t *data_ptr = pData ? (uint64_t *)pData : &null_data;
       hr = static_cast<MTLD3D11TimestampQuery *>(pAsync)->GetData(data_ptr);
+      issued_chunk = static_cast<MTLD3D11TimestampQuery *>(pAsync)->IssuedChunk();
       // gw2 (#24): estimate/boundary leave the pass open, so a game that only polls with DONOTFLUSH
       // might never see its chunk committed (exact commits it at the next draw's new pass). As an event
       // query's stall: after 64 unresolved polls while the query's chunk is still being recorded,
@@ -675,6 +701,15 @@ public:
     default:
       ERR("Unknown query type ", desc.Query);
       return E_FAIL;
+    }
+    if (hr == S_FALSE && (GetDataFlags & D3D11_ASYNC_GETDATA_DONOTFLUSH) == 0) {
+      // gw2 (#158): a poll of a query whose chunk is already committed goes on as a DONOTFLUSH poll
+      bool skip =
+          gw2::getDataSkipsFlush(gw2_getdata_skip_flush_, timestamp_mode_, issued_chunk, cmd_queue.CurrentSeqId());
+      if (gw2_front_.on)
+        gw2::getDataPoll(getDataKind(desc.Query), !skip);
+      if (skip)
+        GetDataFlags |= D3D11_ASYNC_GETDATA_DONOTFLUSH;
     }
     if (hr == S_FALSE && (GetDataFlags & D3D11_ASYNC_GETDATA_DONOTFLUSH) == 0) {
       cmd_queue.CurrentFrameStatistics().event_stall++;
