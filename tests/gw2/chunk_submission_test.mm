@@ -108,9 +108,9 @@ residencyBeforeCommit() {
       g_mtl4_hooked_before++;
   }
 }
-// gw2 (#153): DXMT_MTL4_CHUNK_RESIDENCY unset
+// gw2 (#153): DXMT_MTL4_DEVICE_RESIDENCY unset (the default path)
 bool
-mtl4ChunkResidency() {
+mtl4DeviceResidencyRequested() {
   return false;
 }
 } // namespace dxmt::gw2

@@ -170,9 +170,9 @@ Mtl4Queue::commit(uint64_t seq) {
     return;
   s.open = nullptr;
   residencyBeforeCommit(); // gw2 (#29): the device set's pending adds and removes
-  // what this chunk's packets named so far; gw2 (#153): an empty set (everything named was in the
-  // device's) is neither committed nor used
-  if (mtl4ChunkResidency() || s.residency.allocationCount()) {
+  // what this chunk's packets named so far; gw2 (#153), with DXMT_MTL4_DEVICE_RESIDENCY=1: an empty
+  // set (everything named was in the device's) is neither committed nor used
+  if (!mtl4DeviceResidencyRequested() || s.residency.allocationCount()) {
     s.residency.commit();
     commit->cmdbuf.useResidencySet(s.residency);
   }
@@ -239,9 +239,9 @@ Mtl4Queue::retire(uint64_t seq) {
   for (auto *commit : s.commits)
     recycle(commit);
   s.commits.clear();
-  // nothing of the chunk runs any more: its allocations may leave (and be freed); gw2 (#153): an
-  // empty set stays as it is
-  if (mtl4ChunkResidency() || s.residency.allocationCount()) {
+  // nothing of the chunk runs any more: its allocations may leave (and be freed); gw2 (#153), with
+  // DXMT_MTL4_DEVICE_RESIDENCY=1: an empty set stays as it is
+  if (!mtl4DeviceResidencyRequested() || s.residency.allocationCount()) {
     s.residency.removeAllAllocations();
     s.residency.commit();
   }

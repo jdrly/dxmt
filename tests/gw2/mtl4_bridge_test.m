@@ -32,7 +32,8 @@
 //    event; the pixels and buffers are checked.
 //    Then the same again with nothing made resident by hand: the replays put every allocation the
 //    packets name (pipelines, buffers, textures, attachments, UseResource's) into a chunk set (part 3).
-//    Then (gw2 #153) everything resident by hand in the queue's set again, with the packets and the
+//    Then (gw2 #153, the path DXMT_MTL4_DEVICE_RESIDENCY=1 takes; the two runs above are the default
+//    path's) everything resident by hand in the queue's set again, with the packets and the
 //    binding states saying so (WMT_CMD_RESIDENT on Set*PSO, Set*Buffer and the indexed draw, whose
 //    index buffer handle is a decoy: the draw must use the packet's address and length;
 //    WMT_MTL4_NO_ATTACHMENT_RESIDENCY, WMT_MTL4_BYTES_RESIDENT): the chunk set gets only what the

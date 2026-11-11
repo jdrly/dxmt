@@ -57,7 +57,7 @@ residencySection(double, uint32_t) {
 
 SectionRegistrar s_residency("RESIDENCY", &residencySection);
 
-sw::Switch<bool> kMtl4ChunkResidency{"DXMT_MTL4_CHUNK_RESIDENCY", false, sw::legacy::exactlyOne}; // gw2 (#153)
+sw::Switch<bool> kMtl4DeviceResidency{"DXMT_MTL4_DEVICE_RESIDENCY", false, sw::legacy::exactlyOne}; // gw2 (#153)
 
 } // namespace
 
@@ -134,11 +134,12 @@ residencyAttachMtl4Queue(WMT::Device device, WMT::MTL4CommandQueue queue) {
     return false;
   queue.addResidencySet(s.set);
   Logger::info(
-      mtl4ChunkResidency()
-          ? "Residency: the residency set is attached to this device's Metal 4 queue too (DXMT_METAL4); every "
-            "allocation a packet names also goes into its chunk's set (DXMT_MTL4_CHUNK_RESIDENCY=1)"
-          : "Residency: the residency set is attached to this device's Metal 4 queue too (DXMT_METAL4); pipelines "
-            "and argument buffers enter it, and what it holds stays out of each chunk's set"
+      mtl4DeviceResidencyRequested()
+          ? "Residency: the residency set is attached to this device's Metal 4 queue too (DXMT_METAL4); pipelines "
+            "and argument buffers enter it, and what it holds stays out of each chunk's set "
+            "(DXMT_MTL4_DEVICE_RESIDENCY=1)"
+          : "Residency: the residency set is attached to this device's Metal 4 queue too (DXMT_METAL4); every "
+            "allocation a packet names also goes into its chunk's set"
   );
   return true;
 }
@@ -207,14 +208,14 @@ residencyBeforeCommit() {
 }
 
 bool
-mtl4ChunkResidency() {
-  static const bool on = kMtl4ChunkResidency();
+mtl4DeviceResidencyRequested() {
+  static const bool on = kMtl4DeviceResidency();
   return on;
 }
 
 bool
 mtl4DeviceResidency() {
-  return metal4Active() && !mtl4ChunkResidency();
+  return metal4Active() && mtl4DeviceResidencyRequested();
 }
 
 bool

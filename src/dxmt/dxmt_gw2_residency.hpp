@@ -19,12 +19,12 @@
 // - makeResident emits no useResource for an allocation whose gw2Resident flag is set (written
 //   once, before the allocation is visible to another thread).
 // - With DXMT_RESIDENCY_SET=0 nothing is created or flagged: makeResident is upstream's.
-// - gw2 (#153), Metal 4 only: pipelines (d3d11's graphics and compute pipelines, while a pipeline
-//   object holds them) and the argument-buffer ring's blocks (from creation until the ring frees
-//   them, after their last chunk retired) are in the set too, and the packets that name what the
-//   set holds say so (WMT_CMD_RESIDENT, winemetal.h), so Metal 4's replay leaves them out of the
-//   chunk's set. DXMT_MTL4_CHUNK_RESIDENCY=1 turns that off: every packet's allocations go into the
-//   chunk's set again, as before.
+// - gw2 (#153), Metal 4 with DXMT_MTL4_DEVICE_RESIDENCY=1 only (off by default): pipelines (d3d11's
+//   graphics and compute pipelines, while a pipeline object holds them) and the argument-buffer
+//   ring's blocks (from creation until the ring frees them, after their last chunk retired) are in
+//   the set too, and the packets that name what the set holds say so (WMT_CMD_RESIDENT,
+//   winemetal.h), so Metal 4's replay leaves them out of the chunk's set. Off, every packet's
+//   allocations go into the chunk's set, as before.
 //
 // The RESIDENCY section (2 s): resident=<allocations> mb=<their bytes> adds= removes= commits=
 // devmb=<MTLDevice currentAllocatedSize>.
@@ -65,14 +65,14 @@ void residencyRemove(const obj_handle_t *allocations, uint32_t count, uint64_t b
 // commit on a DXMT queue.
 void residencyBeforeCommit();
 
-// gw2 (#153): DXMT_MTL4_CHUNK_RESIDENCY=1 (exactly "1"; read once): Metal 4's replays put every
-// allocation the packets name into the chunk's set and the chunk's set is committed, used and
-// emptied with every command buffer, as before #153.
-bool mtl4ChunkResidency();
+// gw2 (#153): DXMT_MTL4_DEVICE_RESIDENCY=1 (exactly "1"; off by default; read once). Off: Metal 4's
+// replays put every allocation the packets name into the chunk's set, and the chunk's set is
+// committed, used and emptied with every command buffer, as before #153.
+bool mtl4DeviceResidencyRequested();
 
 // gw2 (#153): the set holds what Metal 4's packets can say it holds: this process is on Metal 4 and
-// DXMT_MTL4_CHUNK_RESIDENCY isn't 1. A packet builder marks an allocation WMT_CMD_RESIDENT only when
-// this is true and the allocation is in the set (gw2Resident, or the add below returned true).
+// DXMT_MTL4_DEVICE_RESIDENCY=1. A packet builder marks an allocation WMT_CMD_RESIDENT only when this
+// is true and the allocation is in the set (gw2Resident, or the add below returned true).
 bool mtl4DeviceResidency();
 
 // gw2 (#153): a pipeline state made on `device` enters the set, counted per handle (pipeline objects

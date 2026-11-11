@@ -127,9 +127,9 @@ statsEnabled() {
 // the device set (#29) isn't in this test: the queue's own per-slot sets are
 void
 residencyBeforeCommit() {}
-// gw2 (#153): DXMT_MTL4_CHUNK_RESIDENCY unset
+// gw2 (#153): DXMT_MTL4_DEVICE_RESIDENCY unset (the default path)
 bool
-mtl4ChunkResidency() {
+mtl4DeviceResidencyRequested() {
   return false;
 }
 } // namespace dxmt::gw2
