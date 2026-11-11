@@ -78,6 +78,12 @@ public:
   Mtl4Commit &open();
   // commits the open command buffer, if any
   void commitOpen();
+  // gw2 (#154): at the chunk's end, for its timestamp readbacks (they read segments()): begins a
+  // command buffer only if the chunk has none, or if a queue-level wait came after its last one (the
+  // queries then read a time after the wait), so queries after the present read the present's.
+  // `extra` (DXMT_MTL4_TIMESTAMP_REUSE off, the default): as open(), so a chunk whose last buffer is
+  // committed commits an empty one after it, as before #154.
+  void openForTimestamps(bool extra);
 
   // each command buffer begun, with the position it began at (timestamp estimates)
   struct Segment {
@@ -109,6 +115,7 @@ private:
   std::vector<Segment> segments_;
   WMTMtl4BindingState state_{};
   uint32_t bytes_flags_ = 0; // gw2 (#153): WMT_MTL4_BYTES_RESIDENT for the current arena
+  bool waited_ = false;      // gw2 (#154): a queue-level wait after the last command buffer began
 };
 
 } // namespace dxmt::gw2

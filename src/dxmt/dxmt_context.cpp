@@ -1803,9 +1803,11 @@ ArgumentEncodingContext::flushCommandsImpl(CommandBuffer &cmdbuf, uint64_t seqId
   if constexpr (kMetal4) {
     // gw2 (#32): the timestamp readbacks read the chunk's commits' feedback: exact mode the last
     // command buffer's end, estimate each buffer's span from the position it began at. A chunk with
-    // queries and no encoder still gets an (empty) command buffer for its times.
+    // queries and no encoder still gets an (empty) command buffer for its times. gw2 (#154): queries
+    // after the present read the present's buffer with DXMT_MTL4_TIMESTAMP_REUSE=1; off (the default),
+    // an empty one after it, as before.
     if (timestamp_state_.pending())
-      cmdbuf.open();
+      cmdbuf.openForTimestamps(!gw2::mtl4TimestampReuse());
     auto &segments = cmdbuf.segments();
     if (!segments.empty()) {
       readbacks.timestamp = timestamp_state_.flush(segments.back().commit, frame_id_);

@@ -57,9 +57,16 @@
 //   Metal 4;
 // - each also matches what the CPU computes at sample points (both backends), so a stream that draws
 //   nothing, or the wrong thing, on both doesn't pass;
-// - no command buffer reports an error; Metal 4: two commits (frame, present), no unsupported packet,
-//   no dropped UseResource, no Set*Bytes overflow, the bytes arena refilled at least once inside the rows
-//   pass's replay, and the replays put allocations into the chunk's residency set.
+// - no command buffer reports an error; Metal 4: no unsupported packet, no dropped UseResource, no
+//   Set*Bytes overflow, the bytes arena refilled at least once inside the rows pass's replay, and the
+//   replays put allocations into the chunk's residency set.
+// - gw2 (#154): Metal 4 chunks end as flushCommands ends them with timestamp queries pending (GW2 always
+//   has some): openForTimestamps, then the commit. With DXMT_MTL4_TIMESTAMP_REUSE off (the default) the
+//   frame makes three commits: frame, present, and an empty one after the present for the queries. A
+//   second Metal 4 frame, on resources of its own, runs with the switch on: two commits, and the
+//   present's has a GPU end for the queries to read. A chunk with no encoder gets one command buffer for
+//   its queries, and another after a queue-level wait; with the switch off a chunk whose last buffer is
+//   committed gets another.
 //
 // How much it sees (measured 2026-11-04 on an M5 Max by mutating a scratch copy of mtl4.c, arm64): each
 // of these made the run fail: Set*BufferOffset ignoring its offset, a Set*Bytes overflow skipped instead
@@ -775,6 +782,7 @@ struct Metal3Target {
 // Metal 4: DXMT's own encoding over gw2::Mtl4Queue
 struct Metal4Target {
   Mtl4Encoding &encoding;
+  bool timestamp_reuse = false; // gw2 (#154): DXMT_MTL4_TIMESTAMP_REUSE, off by default
   bool in_rows = false; // the rows pass's replay is running (its arena refills are the resumes)
   uint32_t rows_refills = 0;
 
@@ -805,6 +813,7 @@ struct Metal4Target {
   }
   void
   end() {
+    encoding.openForTimestamps(!timestamp_reuse); // gw2 (#154): with timestamp queries pending
     encoding.commitOpen();
   }
 };
@@ -1053,9 +1062,10 @@ waitMetal3(std::vector<WMT::CommandBuffer> &committed, size_t expected, const ch
   }
 }
 
-// the chunk's commits completed without an error; then it retires (its slot's residency set emptied)
+// the chunk's commits completed without an error; then it retires (its slot's residency set emptied).
+// `times`: the last commit has a GPU end, which exact timestamp queries read (gw2 #154).
 static void
-waitMetal4(Mtl4Queue &queue, uint64_t seq, size_t expected, const char *what) {
+waitMetal4(Mtl4Queue &queue, uint64_t seq, size_t expected, const char *what, bool times = false) {
   const auto &commits = queue.wait(seq);
   CHECK(commits.size() == expected, "%s: %zu commits, expected %zu", what, commits.size(), expected);
   for (auto *commit : commits) {
@@ -1063,6 +1073,8 @@ waitMetal4(Mtl4Queue &queue, uint64_t seq, size_t expected, const char *what) {
     WMT::Error error = commit->error();
     CHECK(!error, "%s: commit error %s", what, error ? error.description().getUTF8String().c_str() : "");
   }
+  if (times && !commits.empty())
+    CHECK(commits.back()->gpuEndNs() > 0, "%s: the last commit has no GPU end for the timestamps", what);
   queue.retire(seq);
 }
 
@@ -1179,7 +1191,46 @@ main() {
       CHECK(state.use_resource_dropped == 0, "Metal 4: %u UseResource dropped", state.use_resource_dropped);
       CHECK(state.bytes_overflow == 0, "Metal 4: %u Set*Bytes overflowed", state.bytes_overflow);
       CHECK(state.residency_adds > 0, "Metal 4: nothing went into the chunk's residency set");
-      waitMetal4(queue, seq, run4.presented ? 2 : 1, "Metal 4 frame");
+      // gw2 (#154): DXMT_MTL4_TIMESTAMP_REUSE off: the frame's, the present's, and an empty one after it
+      waitMetal4(queue, seq, run4.presented ? 3 : 2, "Metal 4 frame");
+      // gw2 (#154): a chunk with timestamp queries and no encoder (ring slot 0 again, the load retired)
+      id<MTLSharedEvent> event = [fx.device newSharedEvent];
+      event.signaledValue = 1; // the queue wait below is already met
+      {
+        Mtl4Encoding encoding(queue, 2, bytes);
+        encoding.openForTimestamps(false);
+        CHECK(encoding.segments().size() == 1, "Metal 4: a chunk with no command buffer got none for its timestamps");
+        encoding.commitOpen();
+        encoding.openForTimestamps(false);
+        CHECK(encoding.segments().size() == 1, "Metal 4: another command buffer after the chunk's last was committed");
+        encoding.encodeWaitForEvent(WMT::Event{H(event)}, 1);
+        encoding.openForTimestamps(false);
+        CHECK(encoding.segments().size() == 2, "Metal 4: no command buffer for the timestamps after a queue wait");
+        encoding.commitOpen();
+        encoding.openForTimestamps(true); // DXMT_MTL4_TIMESTAMP_REUSE off
+        CHECK(encoding.segments().size() == 3, "Metal 4: DXMT_MTL4_TIMESTAMP_REUSE off began no command buffer");
+        encoding.commitOpen();
+      }
+      waitMetal4(queue, 2, 3, "Metal 4 chunk without encoders");
+      // gw2 (#154): the frame again with DXMT_MTL4_TIMESTAMP_REUSE=1, on resources of its own (load: ring
+      // slot 1, frame: slot 0). The queries after the present read the present's command buffer: two
+      // commits, and the last has a GPU end. Its readbacks aren't compared; the first frame's are.
+      Resources r4r = makeResources(fx.device);
+      Stream s4r;
+      buildFrame(s4r, fx, r4r);
+      {
+        Mtl4Encoding encoding(queue, 3, bytes);
+        Metal4Target target{encoding, true};
+        encodeLoad(target, s4r);
+      }
+      waitMetal4(queue, 3, 1, "Metal 4 load (DXMT_MTL4_TIMESTAMP_REUSE=1)");
+      RunResult run4r;
+      {
+        Mtl4Encoding encoding(queue, 4, bytes);
+        Metal4Target target{encoding, true};
+        run4r = encodeFrame(target, s4r, fx, r4r, wmt_layer);
+      }
+      waitMetal4(queue, 4, run4r.presented ? 2 : 1, "Metal 4 frame (DXMT_MTL4_TIMESTAMP_REUSE=1)", true);
       queue.waitIdle();
     }
 

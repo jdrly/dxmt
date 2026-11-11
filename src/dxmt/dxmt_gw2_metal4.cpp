@@ -40,11 +40,19 @@ namespace {
 sw::Switch<bool> kMetalfxSpatialSwapchain{
     "DXMT_METALFX_SPATIAL_SWAPCHAIN", false, sw::legacy::exactlyOne, sw::Line::Unlisted
 };
+// gw2 (#154)
+sw::Switch<bool> kMtl4TimestampReuse{"DXMT_MTL4_TIMESTAMP_REUSE", false, sw::legacy::exactlyOne};
 } // namespace
 
 bool
 metalfxSpatialSwapchain() {
   return kMetalfxSpatialSwapchain();
+}
+
+bool
+mtl4TimestampReuse() {
+  static const bool on = kMtl4TimestampReuse();
+  return on;
 }
 
 bool
