@@ -52,10 +52,11 @@ extern std::atomic<uint64_t> g_pso_counters[(unsigned)PsoCounter::Count];
 
 // gw2 (#149): a context's PSO counters (Build, MruHit, TopologyKept): plain increments, added to
 // g_pso_counters once a chunk (the immediate context's commit, a deferred context's
-// FinishCommandList), as MapCounters does.
+// FinishCommandList), as MapCounters does, and what is left when the context goes.
 struct PsoContextCounters {
   bool on = statsEnabled(); // DXMT_STATS, cached: off, nothing is counted
   uint32_t n[(unsigned)PsoCounter::Count] = {};
+  ~PsoContextCounters() { publish(); }
   void
   count(PsoCounter c) {
     if (on)
