@@ -14,7 +14,7 @@ log=$1 base=$2
 found=(${(f)"$(grep -E '(^|: )warning: ' "$log" |
   sed -E 's#^(\.\./)+(dxmt/)?##; s#[^/ ]+/\.\./##g; s#:[0-9]+:[0-9]+: warning: #: warning: #' |
   LC_ALL=C sort -u || true)"})
-known=(${(f)"$(<"$base")"})
+known=(${(f)"$(cat -- "$base")"})
 new=(${found:|known})
 gone=(${known:|found})
 
