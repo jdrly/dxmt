@@ -6,8 +6,10 @@
 // gw2-build:   clang -c -std=gnu17 -arch $arch -mmacosx-version-min=26.0 -DDXMT_NATIVE=1 -Isrc/nativemetal -Isrc/winemetal src/winemetal/winemetal_thunks.c -o $T/thunks_$arch.o
 // gw2-build:   clang -c -std=gnu17 -arch $arch -mmacosx-version-min=26.0 -Wno-ignored-attributes -Isrc/airconv tests/gw2/shim/airconv_absent.c -o $T/airconv_absent_$arch.o
 // gw2-build:   clang++ -std=c++20 -fobjc-arc -Wall -arch $arch -mmacosx-version-min=26.0 -DDXMT_PAGE_SIZE=4096 -Itests/gw2/shim -Isrc/winemetal -Isrc/dxmt -Isrc/util -Iinclude tests/gw2/presenter_layer_set_test.mm src/dxmt/dxmt_presenter.cpp src/dxmt/dxmt_gw2_switches.cpp src/dxmt/dxmt_gw2_mtl4_queue.cpp src/dxmt/dxmt_gw2_mtl4_encoding.cpp $T/thunks_$arch.o $T/u_*_$arch.o $T/airconv_absent_$arch.o -framework Metal -framework MetalFX -framework QuartzCore -framework Foundation -framework CoreGraphics -framework ColorSync -framework Cocoa -lsqlite3 -o ${OUT}_$arch
+// gw2-build:   clang++ -std=c++20 -fobjc-arc -Wall -arch $arch -mmacosx-version-min=26.0 -DDXMT_PAGE_SIZE=4096 -DDXMT_GW2_LIFETIME_CHECK=1 -DGW2_TEST_REAL_ENV=1 -Itests/gw2/shim -Isrc/winemetal -Isrc/dxmt -Isrc/util -Iinclude tests/gw2/presenter_layer_set_test.mm src/dxmt/dxmt_presenter.cpp src/dxmt/dxmt_gw2_mtl4_queue.cpp src/dxmt/dxmt_gw2_mtl4_encoding.cpp src/dxmt/dxmt_gw2_lifetime.cpp src/dxmt/dxmt_gw2_switches.cpp $T/thunks_$arch.o $T/u_*_$arch.o $T/airconv_absent_$arch.o -framework Metal -framework MetalFX -framework QuartzCore -framework Foundation -framework CoreGraphics -framework ColorSync -framework Cocoa -lsqlite3 -o ${OUT}_check_$arch
 // gw2-build: done
 // gw2-run: ${OUT}_x86_64 && MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 ${OUT}_arm64
+// gw2-run: for arch in x86_64 arm64; do for free in 0 1; do DXMT_LIFETIME_CHECK=1 DXMT_PRESENTER_FREE=$free ${OUT}_check_$arch || exit 1; done; done
 //
 // gw2 (#184): a Metal 4 queue takes at most 32 residency sets. The presenter used to add its layer's
 // set to the device's queue at its first present, to leave it in ~Presenter. But an Rc doesn't delete
@@ -47,11 +49,19 @@
 // once the chunk retired, after the present's PresentState went (CommandChunk::reset() destroys the
 // present's command, then the ledger releases its holds).
 //
+// The lifetime-check build (${OUT}_check_*, -DDXMT_GW2_LIFETIME_CHECK=1 as meson's
+// -Dgw2_lifetime_check=true) links the real check (src/dxmt/dxmt_gw2_lifetime.cpp) and the real
+// DXMT_PRESENTER_FREE, read from the environment. Each present stamps the presenter's pipelines and
+// gamma texture as the context does (gw2LifetimeUse), and each chunk is completed before it retires,
+// as RetireChunk does. A presenter that died before its chunk completed would release them early;
+// the check's LIFECHECK section must count 0. It runs with DXMT_LIFETIME_CHECK=1, once per value of
+// the switch.
+//
 // What the test provides in place of DXMT: the statistics hooks (off) and clock, the lifetime check
-// (off) and DXMT_PRESENTER_FREE (set per phase), the device set's commit hook (its set here is
-// fixed), Forget_sRGB for the formats used here, and the internal command library, compiled at run
-// time from src/dxmt/dxmt_command.metal (the build makes a metallib of the same file). Run it from
-// the checkout's root, as tests/gw2/run.zsh does.
+// (off) and DXMT_PRESENTER_FREE (set per phase) outside the lifetime-check build, the device set's
+// commit hook (its set here is fixed), Forget_sRGB for the formats used here, and the internal
+// command library, compiled at run time from src/dxmt/dxmt_command.metal (the build makes a metallib
+// of the same file). Run it from the checkout's root, as tests/gw2/run.zsh does.
 //
 // Exit 77 (skipped): no Metal device, no Metal 4, or a layer without a window gave no drawable.
 
@@ -82,8 +92,12 @@ static int failures = 0;
 
 // --- what the rest of DXMT provides
 namespace dxmt::gw2 {
+static SectionFn g_lifecheck = nullptr; // the lifetime check's LIFECHECK section
 void
-registerSection(const char *, SectionFn) {}
+registerSection(const char *name, SectionFn fn) {
+  if (std::string(name) == "LIFECHECK")
+    g_lifecheck = fn;
+}
 bool
 statsEnabled() {
   return false;
@@ -101,15 +115,19 @@ bool
 mtl4DeviceResidencyRequested() {
   return false;
 }
+#ifndef DXMT_GW2_LIFETIME_CHECK
 namespace lifetime {
 void
 useSlow(uint32_t, uint64_t, obj_handle_t, Kind) {}
+void
+completedSlow(uint32_t, uint64_t) {}
 bool g_presenter_free = false; // DXMT_PRESENTER_FREE, per phase
 bool
 presenterFree() {
   return g_presenter_free;
 }
 } // namespace lifetime
+#endif
 } // namespace dxmt::gw2
 
 namespace dxmt {
@@ -176,6 +194,7 @@ struct Fixture {
   dxmt::InternalCommandLibrary *lib;
   id<MTLResidencySet> device_set; // as the device's set (#29): on the queue, with the back buffers
   std::vector<id<MTLBuffer>> arenas; // the chunks' bytes arenas
+  uint32_t lt_queue = 0;              // the lifetime check's id of the queue (its build only)
   uint64_t seq = 0;
   uint32_t presents = 0;
 };
@@ -216,7 +235,7 @@ releaseSwapChain(Fixture &fx, SwapChain &sc) {
 // commits nothing here: the chunk has no other work), then waited for and retired
 static void
 present(Fixture &fx, SwapChain &sc, const char *what, uint32_t index) {
-  uint64_t seq = fx.seq++;
+  uint64_t seq = ++fx.seq; // from 1, as the lifetime check's stamps count
   Rc<Presenter> held; // the retirement ledger's hold (CommandQueue::Hold), until the chunk retires
   {
     // the present's command (the swap chain's lambda) holds it until CommandChunk::reset()
@@ -235,11 +254,13 @@ present(Fixture &fx, SwapChain &sc, const char *what, uint32_t index) {
       );
       encoding.signalDrawable(drawable); // commits the present pass first
       drawable.present();
+      sc.presenter->gw2LifetimeUse(fx.lt_queue, seq); // the context's stamp (lifetime-check build)
       held = sc.presenter;
       fx.presents++;
     }
     for (auto *commit : fx.queue->wait(seq))
       CHECK(!commit->feedback.error, "%s %u: the present's command buffer reported an error", what, index);
+    dxmt::gw2::lifetime::completed(fx.lt_queue, seq); // RetireChunk: first, before reset()
   }
   held = nullptr; // RetireChunk: after reset(), the ledger's holds
   fx.queue->retire(seq);
@@ -249,7 +270,9 @@ present(Fixture &fx, SwapChain &sc, const char *what, uint32_t index) {
 // the replaced and the alive-at-once phases, with DXMT_PRESENTER_FREE as `free`
 static void
 phases(Fixture &fx, bool free) {
+#ifndef DXMT_GW2_LIFETIME_CHECK
   dxmt::gw2::lifetime::g_presenter_free = free;
+#endif
   const char *mode = free ? "DXMT_PRESENTER_FREE=1" : "DXMT_PRESENTER_FREE=0";
   uint32_t before = Presenter::alive();
 
@@ -336,9 +359,24 @@ main() {
     fx.device_set = [fx.device newResidencySetWithDescriptor:set_desc error:nil];
     queue.queue().addResidencySet(WMT::ResidencySet{H(fx.device_set)});
 
+#ifdef DXMT_GW2_LIFETIME_CHECK
+    CHECK(dxmt::gw2::lifetime::check(), "DXMT_LIFETIME_CHECK=1 in the lifetime-check build");
+    CHECK(dxmt::gw2::g_lifecheck, "the lifetime check registered its LIFECHECK section");
+    fx.lt_queue = dxmt::gw2::lifetime::attachQueue();
+    phases(fx, dxmt::gw2::lifetime::presenterFree()); // the switch, from the environment
+#else
     phases(fx, false); // the default: presenters stay, as before #185
     phases(fx, true);
+#endif
     queue.waitIdle();
+#ifdef DXMT_GW2_LIFETIME_CHECK
+    if (dxmt::gw2::g_lifecheck) {
+      std::string line = dxmt::gw2::g_lifecheck(0, 0);
+      std::printf("LIFECHECK %s\n", line.c_str());
+      CHECK(line.find(" total=0") != std::string::npos, "an object released before its chunk completed");
+    }
+    dxmt::gw2::lifetime::detachQueue(fx.lt_queue);
+#endif
 
     std::printf("presents %u\n", fx.presents);
   }

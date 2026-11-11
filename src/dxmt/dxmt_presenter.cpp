@@ -51,6 +51,17 @@ Presenter::~Presenter() {
   Logger::info(str::format("Presenter: freed, ", alive, " alive"));
 }
 
+void
+Presenter::incRef() {
+  refcount_.fetch_add(1, std::memory_order_relaxed);
+}
+
+void
+Presenter::decRef() {
+  if (refcount_.fetch_sub(1, std::memory_order_acq_rel) == 1 && gw2::lifetime::presenterFree())
+    delete this;
+}
+
 uint32_t
 Presenter::alive() {
   return g_alive.load(std::memory_order_relaxed);
