@@ -1363,6 +1363,16 @@ slot that held a plain view and was given one that can be an output keeps upstre
 so the render target's unbind misses it and the skip's test would match; with the switch's
 `set_hazard`, neither happens.
 
+`emit_window_test.cpp` (pure, #148) checks the emit window (`dxmt_gw2_emit_window.hpp`) over the
+fork's own ring allocator and command list, with a fake queue that commits and completes chunks as
+`CommandQueue` does and a ring of 64 KB blocks. Nothing the ring hands out may overlap a command of a
+chunk that hasn't completed, and each command runs in its own chunk with its payload intact. It covers
+a commit in the middle of a run of emits (each side in a slab taken while its own chunk was current),
+three chunks sharing a block whose first two complete before another user takes most of a block (run
+once more without the reset on commit, where the check must catch the reuse), commands larger than a
+slab, and 300,000 random steps of emits, other users' allocations, commits and late completions. It
+prints the ns an emit before #148 (an out-of-line ring allocation per command) and through the window.
+
 ## PSO archive tool
 
 `tools/gw2/pso_archive_tool.cpp` (#111) is a macOS executable, not part of the DLL build: it builds
