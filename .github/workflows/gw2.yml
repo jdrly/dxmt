@@ -30,6 +30,8 @@ concurrency:
 env:
   # The PR's own commit, not GitHub's merge commit, so VERSION and the startup line name it
   COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+  # The xcode-27 image (macOS 27, a public preview) has the Xcode I build with locally
+  XCODE_VERSION: "27.2"
   MACOSX_DEPLOYMENT_TARGET: "26.0"
   MESON_VERSION: 1.12.1
   NINJA_VERSION: 1.13.0
@@ -51,7 +53,7 @@ defaults:
 jobs:
   build:
     name: Build ${{ matrix.arch }}
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -68,6 +70,8 @@ jobs:
           fetch-depth: 0
           submodules: true
           persist-credentials: false
+      - name: Select Xcode
+        run: sudo xcode-select -s "/Applications/Xcode_$XCODE_VERSION.app"
 
       - name: Restore Wine
         id: wine
@@ -124,7 +128,8 @@ jobs:
       - name: Build
         run: |
           llvm=()
-          [[ ${{ matrix.arch }} == x86_64 ]] && llvm=(-Dnative_llvm_path="$PWD/toolchains/llvm")
+          # relative: meson refuses an absolute include path inside the source tree
+          [[ ${{ matrix.arch }} == x86_64 ]] && llvm=(-Dnative_llvm_path=toolchains/llvm)
           meson setup build --cross-file ${{ matrix.cross }} --buildtype release --strip \
             --prefix "$PWD/install" -Dwine_install_path="$PWD/toolchains/wine" -Ddxmt_debug=false "${llvm[@]}"
           meson compile -C build 2>&1 | tee build.log
@@ -166,7 +171,7 @@ jobs:
 
   arm64ec:
     name: Build ARM64EC
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -175,6 +180,8 @@ jobs:
           fetch-depth: 0
           submodules: true
           persist-credentials: false
+      - name: Select Xcode
+        run: sudo xcode-select -s "/Applications/Xcode_$XCODE_VERSION.app"
 
       - name: Restore Wine
         id: wine
@@ -231,7 +238,7 @@ jobs:
           export PATH="$PWD/toolchains/llvm-mingw/bin:$PATH"
           arm64ec-w64-mingw32-gcc --version | head -1
           meson setup build --cross-file build-arm64ec.txt --buildtype release --strip --prefix "$PWD/install" \
-            -Dwine_install_path="$PWD/toolchains/wine" -Dnative_llvm_path="$PWD/toolchains/llvm"
+            -Dwine_install_path="$PWD/toolchains/wine" -Dnative_llvm_path=toolchains/llvm
           meson compile -C build
           meson install -C build --quiet
       - name: The four DLLs are there
@@ -242,7 +249,7 @@ jobs:
 
   tests:
     name: Native tests
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 30
     env:
       GW2_TEST_DIR: ${{ github.workspace }}/gw2-tests
@@ -251,12 +258,20 @@ jobs:
         with:
           ref: ${{ env.COMMIT }}
           persist-credentials: false
-      - name: Metal device
-        run: system_profiler SPDisplaysDataType
+      - name: Select Xcode
+        run: sudo xcode-select -s "/Applications/Xcode_$XCODE_VERSION.app"
       - name: Pure tests
         run: tests/gw2/run.zsh pure
       - name: Metal tests
-        run: tests/gw2/run.zsh metal
+        run: |
+          status=0
+          tests/gw2/run.zsh metal | tee "$RUNNER_TEMP/metal.txt" || status=$?
+          # each skipped test's own reason, and the device it saw
+          awk '$1 == "skip" { print $2 }' "$RUNNER_TEMP/metal.txt" | while read -r t; do
+            echo "== $t"
+            grep -i -E 'skip|device' "$GW2_TEST_DIR/$t.log" | head -4 || true
+          done
+          exit "$status"
 
   lint:
     name: Lint

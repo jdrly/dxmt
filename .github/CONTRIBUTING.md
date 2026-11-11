@@ -90,8 +90,11 @@ If two sources conflict, report the conflict instead of silently choosing one.
 
 ## Definition of Done
 
-- [ ] **Clean build.** `scripts/build-dxmt.zsh` (GW2 on Mac) builds x86_64 and i386 from the
-      branch without new warnings, and installs it into the engine.
+- [ ] **Clean build.** The `GW2` workflow (`.github/workflows/gw2.yml`) is green on the pull
+      request. It builds x86_64 and i386 the way `scripts/build-dxmt.zsh` (GW2 on Mac) does,
+      without new warnings, builds ARM64EC and runs the native tests. That run is the build gate.
+      A local build is only for installing and playing, and the run's artifact can replace it
+      ([CI](../docs/gw2/README.md#ci)).
 - [ ] **Logged and switchable.** The change writes a log line when it acts (once, or on each
       state change, never per draw), and a behaviour change has a `DXMT_*` off-switch that
       restores the base behaviour. Both are in [docs/gw2/README.md](../docs/gw2/README.md).
