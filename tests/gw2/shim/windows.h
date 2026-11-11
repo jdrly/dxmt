@@ -22,6 +22,7 @@ inline std::map<DWORD, PFLS_CALLBACK_FUNCTION> slots;
 inline DWORD next_slot = 1;
 inline bool fail_alloc = false; // FlsAlloc returns FLS_OUT_OF_INDEXES
 inline bool fail_set = false;   // FlsSetValue fails
+inline uint64_t qpc_reads = 0;  // gw2 (#150): QueryPerformanceCounter calls, for counting clock reads
 inline void
 exitThread() {
   for (auto &[slot, value] : fls[tid])
@@ -91,6 +92,7 @@ QueryPerformanceFrequency(LARGE_INTEGER *f) {
 }
 inline BOOL
 QueryPerformanceCounter(LARGE_INTEGER *c) {
+  fake::qpc_reads++;
   c->QuadPart = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
                     .count() /
                 100;

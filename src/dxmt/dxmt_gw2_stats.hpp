@@ -6,9 +6,11 @@
 //   ("k=v ..."); the swapchain logs each non-empty one as its own line, "<NAME> <text>", after
 //   STATS. A feature adds its numbers without touching the STATS line.
 // - API time: time inside DXMT's entry points (Present, Map, Flush, Create*, Draw*, Dispatch*).
-//   Draw and Dispatch each time one call in 16 of their own and scale it; all calls are counted.
-//   The 1 in 16 is a per-thread pseudo-random draw (sampleDraw), not a fixed position: a counter
-//   aliases with call patterns that repeat (Map/Unmap alternate) and times only part of them.
+//   Draw and Dispatch each time one call in 16 of their own and scale it, Map and Unmap one in 64
+//   (#150, with DXMT_MAP_FAST); all calls are counted. The sample is a per-thread pseudo-random draw
+//   (sampleDraw), not a fixed position: a counter aliases with call patterns that repeat (Map/Unmap
+//   alternate) and times only part of them. gw2 (#150): every timed interval loses the clock's own
+//   cost (clockFloorNs), so an empty call reads 0 on average.
 //   Nested entry points (Flush -> Flush1) count once. A thread that presents keeps its time per
 //   Present-to-Present interval (takeThreadInterval); every other thread's time is pooled
 //   (otherDrain), so worker threads never land in the render thread's numbers.
@@ -56,11 +58,12 @@ extern const char *const kApiNames[kApiCount];
 
 struct ApiTotals {
   uint64_t calls[kApiCount] = {};
-  uint64_t ns[kApiCount] = {}; // sampled categories already scaled
+  int64_t ns[kApiCount] = {}; // sampled categories already scaled; gw2 (#150): signed, as an interval
+                              // less the clock's floor can be a little below 0
 };
 
 // The calling thread's time (a presenting thread's) or the pool of the other threads'.
-void apiAdd(Api api, uint64_t ns);
+void apiAdd(Api api, int64_t ns);
 void apiCall(Api api);
 
 // Render-thread waits, kept with the presenting thread's interval (they overlap the API time of
@@ -80,9 +83,16 @@ ThreadInterval takeThreadInterval();
 // The other threads' API time since the last drain.
 ApiTotals otherDrain();
 
-// The calling thread's next pseudo-random value (xorshift32, never 0). A sampler takes its 1 in 16
-// from the top 4 bits: `(draw >> 28) == k`; ApiScope uses k = 0.
+// The calling thread's next pseudo-random value (xorshift32, never 0). A sampler takes its 1 in 2^bits
+// from the top bits: `(draw >> (32 - bits)) == 0`.
 uint32_t sampleDraw();
+
+// gw2 (#150): a sampled ApiScope times 1 call in 2^sampleBits and scales it by that: Map and Unmap 1 in
+// 64 (about 300 timed calls a frame of 19,000), the others 1 in 16
+constexpr unsigned
+sampleBits(Api api) {
+  return api == Api::Map ? 6 : 4;
+}
 
 // gw2 (#28): one thread's API-time state; the free functions above act on the calling thread's.
 // A thread takes a block on its first lookup and releases it when it exits (a fiber-local slot's
@@ -99,7 +109,7 @@ struct ApiThread {
 
   uint32_t draw();
   void call(Api api);
-  void add(Api api, uint64_t ns);
+  void add(Api api, int64_t ns);
   void reset();
 };
 
@@ -144,8 +154,7 @@ public:
   ApiScope &operator=(const ApiScope &) = delete;
 
   // gw2 (#25): the sampleDraw() this scope decided with, 0 if it didn't draw (not sampled, nested,
-  // stats off). Another sampler of the same call can reuse it with another k, so the two never time
-  // the same call.
+  // stats off)
   uint32_t
   draw() const {
     return draw_;
@@ -156,6 +165,16 @@ public:
   newDraw() const {
     return thread_->draw();
   }
+  // gw2 (#150): how this scope scales its timed call (1, or 2^sampleBits sampled), 0 if it doesn't
+  // time it
+  uint32_t
+  scale() const {
+    return scale_;
+  }
+  // gw2 (#150): ends the interval of a scope that times its call (scale() != 0) and returns it,
+  // unscaled, less the clock's floor. The destructor adds that one to PACE without reading the clock
+  // again, so another sampler of the call (MapScope) takes the same interval.
+  int64_t stop();
 
 private:
   void begin(bool sampled, ApiThreadCache *cache);
@@ -164,9 +183,11 @@ private:
   ApiThread *thread_ = nullptr; // null: stats off
   Api api_;
   int64_t t0_ = 0;
+  int64_t ns_ = 0;     // the interval, once stopped
   uint32_t scale_ = 0; // 0: not timed
   uint32_t draw_ = 0;
   bool outer_ = false;
+  bool stopped_ = false;
 };
 
 #define GW2_API_SCOPE(cat) ::dxmt::gw2::ApiScope gw2_api_scope_(::dxmt::gw2::Api::cat, false)
@@ -176,6 +197,18 @@ private:
 #define GW2_API_SAMPLED_IN(cat, cache) ::dxmt::gw2::ApiScope gw2_api_scope_(::dxmt::gw2::Api::cat, true, &(cache))
 
 int64_t nowNs();
+// gw2 (#150): the clock's own cost, what an empty interval of two nowNs() reads measures: about 52 ns
+// for QueryPerformanceCounter in Wine. Measured on first use (the first timed scope), once per process:
+// the median of 9 batches' mean of 256 back-to-back reads. A mean, not a median of single reads: the
+// clock steps 100 ns, so a single empty interval reads 0 or 100 and only their mean is its cost.
+int64_t clockFloorNs();
+// gw2 (#150): a timed interval, from t0 (a nowNs() reading) to now, less clockFloorNs(). An empty one
+// reads 0 on average, a single one may be a little below 0.
+inline int64_t
+sinceNs(int64_t t0) {
+  int64_t t1 = nowNs();
+  return t1 - t0 - clockFloorNs();
+}
 
 struct GpuFrame {
   uint64_t frame;

@@ -66,6 +66,23 @@ nowNs() {
   return c.QuadPart / qpc.freq * 1'000'000'000 + c.QuadPart % qpc.freq * 1'000'000'000 / qpc.freq;
 }
 
+int64_t
+clockFloorNs() {
+  static const int64_t ns = [] {
+    constexpr int kBatches = 9, kReads = 256;
+    int64_t mean[kBatches];
+    for (auto &m : mean) {
+      int64_t t0 = nowNs(), t = t0;
+      for (int i = 0; i < kReads; i++)
+        t = nowNs();
+      m = (t - t0 + kReads / 2) / kReads;
+    }
+    std::nth_element(mean, mean + kBatches / 2, mean + kBatches); // a preempted batch doesn't count
+    return mean[kBatches / 2];
+  }();
+  return ns;
+}
+
 // --- sections
 
 namespace {
@@ -107,8 +124,7 @@ const char *const kApiNames[kApiCount] = {"present", "map", "flush", "create", "
 
 namespace {
 std::atomic<uint64_t> g_other_calls[kApiCount];
-std::atomic<uint64_t> g_other_ns[kApiCount];
-constexpr uint32_t kSampleEvery = 16;
+std::atomic<int64_t> g_other_ns[kApiCount];
 
 // gw2 (#28): ApiThread ownership. A thread takes a block on its first lookup and keeps it in a
 // fiber-local slot whose callback releases it when the thread exits. A released block has tid 0, so
@@ -209,7 +225,7 @@ ApiThread::call(Api api) {
 }
 
 void
-ApiThread::add(Api api, uint64_t ns) {
+ApiThread::add(Api api, int64_t ns) {
   if (presenter)
     interval.api.ns[(unsigned)api] += ns;
   else
@@ -270,7 +286,7 @@ sampleDraw() {
 }
 
 void
-apiAdd(Api api, uint64_t ns) {
+apiAdd(Api api, int64_t ns) {
   apiThread().add(api, ns);
 }
 
@@ -315,13 +331,21 @@ ApiScope::begin(bool sampled, ApiThreadCache *cache) {
     return; // nested: the outer scope counts
   outer_ = true;
   t.call(api_);
+  unsigned bits = sampleBits(api_);
   if (sampled) {
     draw_ = t.draw();
-    if ((draw_ >> 28) != 0)
+    if ((draw_ >> (32 - bits)) != 0)
       return;
   }
-  scale_ = sampled ? kSampleEvery : 1;
+  scale_ = sampled ? 1u << bits : 1;
   t0_ = nowNs();
+}
+
+int64_t
+ApiScope::stop() {
+  ns_ = sinceNs(t0_);
+  stopped_ = true;
+  return ns_;
 }
 
 void
@@ -329,7 +353,9 @@ ApiScope::end() {
   thread_->depth--;
   if (!outer_ || !scale_)
     return;
-  thread_->add(api_, uint64_t(nowNs() - t0_) * scale_);
+  if (!stopped_)
+    stop();
+  thread_->add(api_, ns_ * scale_);
 }
 
 // --- GPU spans

@@ -1130,6 +1130,7 @@ public:
         {
             {"cpus", std::format("{}", GetActiveProcessorCount(ALL_PROCESSOR_GROUPS))},
             {"refresh", std::format("{}", refresh)},
+            {"clockfloor", std::format("{}", gw2::clockFloorNs())}, // gw2 (#150): ns, off every timed interval
         }
     ));
   }
@@ -1541,8 +1542,8 @@ public:
   }
 
   // gw2 (#3): the game's own Present-to-Present interval on its render thread, the render
-  // thread's time inside DXMT in those intervals (Draw/Dispatch sampled 1 in 16 and scaled; Map
-  // includes its waits), and the other threads' time inside DXMT.
+  // thread's time inside DXMT in those intervals (Draw/Dispatch sampled 1 in 16 and scaled, Map 1 in
+  // 64; Map includes its waits), and the other threads' time inside DXMT.
   void LogPace() {
     std::vector<PaceRecord> records;
     {

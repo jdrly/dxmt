@@ -235,7 +235,7 @@ public:
   // no-overwrite update of a buffer with a DynamicBuffer) runs here under one device lock:
   // MapBufferFast, then the copy, without the virtual Map and Unmap, their scopes and locks, or a
   // reference count on the DynamicBuffer. MAP and PACE still count one Map and one Unmap per update
-  // (gw2::UpdateScope), timed from after the lock to before the copy: what Map and Unmap timed.
+  // (gw2::UpdateScope), timed from after the lock to before the copy.
   void
   STDMETHODCALLTYPE
   UpdateSubresource1(ID3D11Resource *pDstResource, UINT DstSubresource, const D3D11_BOX *pDstBox,
@@ -288,8 +288,8 @@ public:
   STDMETHODCALLTYPE
   Map(ID3D11Resource *pResource, UINT Subresource, D3D11_MAP MapType, UINT MapFlags,
       D3D11_MAPPED_SUBRESOURCE *pMappedResource) override {
-    // gw2 (#25): DXMT_MAP_FAST times Map and Unmap 1 call in 16, as Draw is (each timed call is two
-    // clock syscalls in Wine)
+    // gw2 (#25): DXMT_MAP_FAST times Map and Unmap 1 call in 64 (#150), as Draw is 1 in 16 (each timed
+    // call is two clock syscalls in Wine); MAP takes the same interval (gw2::MapScope)
     gw2::ApiScope gw2_api_scope_(gw2::Api::Map, gw2_map_fast_, &gw2_api_thread_);
     std::lock_guard<d3d11_device_mutex> lock(mutex);
 

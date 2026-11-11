@@ -4,13 +4,15 @@
 // dxmt_gw2_stats.hpp), and the DXMT_MAP_FAST switch.
 //
 // The immediate context counts every Map and Unmap in its bucket (kind x op). It times every call on
-// a resource that isn't a dynamic or default-usage buffer, and one buffer call in 16, scaled by 16:
-// a timed call costs two clock reads, and in Wine a clock read (QueryPerformanceCounter, see nowNs)
-// is a syscall. The 1 in 16 is pseudo-random (sampleDraw), so it doesn't alias with repeating sequences
-// (Map/Unmap, kinds, periodic renames); it reuses the call's ApiScope draw when there is one, with
-// another value, so MAP and PACE never time the same call and neither's clock reads land in the
-// other's window. Counting is plain increments on the render thread; publish() hands the totals over once
-// per chunk with relaxed atomic adds, as FrontCounters does. With DXMT_STATS=0 nothing is counted.
+// a resource that isn't a dynamic or default-usage buffer, and a buffer call when the call's ApiScope
+// times it (1 in 64 with DXMT_MAP_FAST, sampleBits), scaled as PACE scales it: a timed call costs two
+// clock reads, and in Wine a clock read (QueryPerformanceCounter, see nowNs) is a syscall.
+// gw2 (#150): when the ApiScope times the call, MAP takes its interval (ApiScope::stop), from before
+// the device lock, instead of timing the call again; only a call the ApiScope doesn't time (a
+// texture's or staging map the sampler skipped, or a nested Map) reads the clock for MAP alone, from
+// after the lock. Every interval loses the clock's floor (sinceNs). Counting is plain increments under
+// the device lock; publish() hands the totals over once per chunk with relaxed atomic adds, as
+// FrontCounters does. With DXMT_STATS=0 nothing is counted.
 
 #include "dxmt_gw2_stats.hpp"
 #include <cstdint>
@@ -65,7 +67,7 @@ struct MapCounters {
   bool on = statsEnabled(); // DXMT_STATS, cached: off, nothing is counted
   bool dirty = false;
   uint32_t calls[kMapKindCount][kMapOpCount] = {};
-  uint64_t ns[kMapKindCount][kMapOpCount] = {};
+  int64_t ns[kMapKindCount][kMapOpCount] = {}; // gw2 (#150): signed, as ApiTotals::ns
   uint32_t renames = 0; // a dynamic buffer took a new allocation (its page was used up)
   uint32_t created = 0; // ... and it was a new Metal buffer (none was free)
   uint32_t grown = 0;   // ... and DXMT_MAP_FAST doubled the buffer's page
@@ -74,25 +76,28 @@ struct MapCounters {
   void publish();
 };
 
-// One Map or Unmap: counts it in the bucket set last, timing it as the header says.
+// One Map or Unmap: counts it in the bucket set last, timing it as the header says. Destroyed before
+// its ApiScope, under the device lock.
 class MapScope {
 public:
-  // api: the same call's ApiScope (its draw, if it made one, decides this scope's sample too)
-  MapScope(MapCounters &counters, MapKind kind, MapOp op, const ApiScope &api) :
+  // api: the same call's ApiScope (if it times the call, this scope takes its interval)
+  MapScope(MapCounters &counters, MapKind kind, MapOp op, ApiScope &api) :
       c_(counters),
+      api_(api),
       kind_(kind),
       op_(op) {
     if (!c_.on)
       return;
-    if (!isBufferKind(kind)) {
-      scale_ = 1;
-    } else {
-      uint32_t draw = api.draw();
-      if (!draw)
-        draw = api.newDraw(); // gw2 (#28): the scope's thread, without a TLS lookup
-      if ((draw >> 28) == 8) // ApiScope times the calls whose draw has 0 there
-        scale_ = 16;
+    unsigned bits = sampleBits(Api::Map);
+    if (api.scale()) {
+      shared_ = true; // gw2 (#150)
+      scale_ = isBufferKind(kind) ? api.scale() : 1;
+      return;
     }
+    if (!isBufferKind(kind))
+      scale_ = 1;
+    else if (!api.draw() && (api.newDraw() >> (32 - bits)) == 0) // nested: the ApiScope didn't draw
+      scale_ = 1u << bits;
     if (scale_)
       t0_ = nowNs();
   }
@@ -102,7 +107,7 @@ public:
     c_.dirty = true;
     c_.calls[(unsigned)kind_][(unsigned)op_]++;
     if (scale_)
-      c_.ns[(unsigned)kind_][(unsigned)op_] += uint64_t(nowNs() - t0_) * scale_;
+      c_.ns[(unsigned)kind_][(unsigned)op_] += (shared_ ? api_.stop() : sinceNs(t0_)) * scale_;
   }
   void
   set(MapKind kind) {
@@ -117,17 +122,19 @@ public:
 
 private:
   MapCounters &c_;
+  ApiScope &api_;
   MapKind kind_;
   MapOp op_;
   uint32_t scale_ = 0; // 0: not timed
+  bool shared_ = false; // the ApiScope's interval (gw2 #150)
   int64_t t0_ = 0;
 };
 
 // gw2 (#145): one UpdateSubresource of a buffer that DXMT_UPDATE_ONE_CALL handles without its Map and
 // Unmap. It counts both in MAP (`op`, then unmap) and PACE (`map`, twice), as their MapScopes and
 // ApiScopes did, and PACE leaves them to an outer scope as a nested ApiScope does. One draw decides
-// whether it times the update (1 in 16, ApiScope's k, scaled); both lines take that interval, MAP on
-// `op`'s bucket. With stats off it does nothing.
+// whether it times the update (as ApiScope samples Map: 1 in 64 since #150, scaled); both lines take
+// that interval, less the clock's floor, MAP on `op`'s bucket. With stats off it does nothing.
 class UpdateScope {
 public:
   UpdateScope(MapCounters &counters, MapKind kind, MapOp op, ApiThreadCache &cache) :
@@ -137,7 +144,7 @@ public:
     if (!c_.on)
       return;
     thread_ = &cache.get();
-    if ((thread_->draw() >> 28) == 0) {
+    if ((thread_->draw() >> (32 - sampleBits(Api::Map))) == 0) {
       timed_ = true;
       t0_ = nowNs();
     }
@@ -145,7 +152,7 @@ public:
   ~UpdateScope() {
     if (!thread_)
       return;
-    uint64_t ns = timed_ ? uint64_t(nowNs() - t0_) * 16 : 0;
+    int64_t ns = timed_ ? sinceNs(t0_) * (1 << sampleBits(Api::Map)) : 0;
     c_.dirty = true;
     c_.calls[(unsigned)kind_][(unsigned)op_]++;
     c_.calls[(unsigned)kind_][(unsigned)MapOp::Unmap]++;
