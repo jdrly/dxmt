@@ -1041,6 +1041,13 @@ declaredPromoteReleased() {
               got.c_str());
 }
 
+// Waits until `n` jobs are at the gate (each on its own worker); false after 10 s.
+static bool
+waitGated(Gate &gate, size_t n) {
+  std::unique_lock<std::mutex> l(gate.m);
+  return gate.cv.wait_for(l, std::chrono::seconds(10), [&] { return gate.gated.size() >= n; });
+}
+
 // gw2 (#152): with each DXMT_COMPILE_PRIORITY setting and either policy, every worker, the first two
 // and those a submit adds, applies Options::priority once, on itself, before it runs a job; the jobs
 // all complete.
@@ -1070,11 +1077,13 @@ workerPriority() {
         // two jobs for the first two workers, then one at a time while every worker is busy: each adds one
         sched.submit(sc.jobs[0].get());
         sched.submit(sc.jobs[1].get());
+        bool gated = true;
         for (size_t i = 2; i < 4; i++) {
-          waitQuiescent(gate, i, std::chrono::milliseconds(200), std::chrono::seconds(10));
+          gated = waitGated(gate, i) && gated;
           sched.submit(sc.jobs[i].get());
         }
-        waitQuiescent(gate, 4, std::chrono::milliseconds(200), std::chrono::seconds(10));
+        gated = waitGated(gate, 4) && gated;
+        CHECK(gated, "%s, %s: the workers didn't all reach the gate in 10 s", mode_name, policy_name);
         for (auto &j : sc.jobs)
           releaseJob(gate, j->id);
         for (auto &j : sc.jobs)
