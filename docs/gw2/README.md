@@ -292,7 +292,9 @@ Present falls into the window in which its sleep ended.
 `PSO builds= mru= lookups= equal= depth=avg/max new= topokept= lock=wait/held` (jdrly/dxmt #6):
 the pipeline lookup on the render thread. Counts are per frame (encode-thread frames of the
 window) unless noted; all contexts and all three pipeline caches (plain, geometry,
-tessellation) together. Omitted when nothing was looked up.
+tessellation) together. Omitted when nothing was looked up. Each context counts `builds`, `mru`
+and `topokept` with plain increments and hands them over once per chunk, a deferred context at
+`FinishCommandList` (#149).
 
 | Field | Meaning |
 |---|---|
@@ -306,7 +308,7 @@ tessellation) together. Omitted when nothing was looked up.
 | `lock` | The caches' lock: time waiting for it / holding it (unlock included), ms per frame, one lookup in 16 timed and scaled |
 
 With all three switches off the numbers measure the upstream lookup: `mru=0`, `topokept=0`,
-`lookups` = `builds`.
+`lookups` = `builds` (give or take the chunk in flight at the window's edge).
 
 ### RING
 

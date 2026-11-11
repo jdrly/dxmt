@@ -445,7 +445,7 @@ public:
         auto t1 = clock::now();
         statistics.sync_count++;
         statistics.sync_interval += (t1 - t0);
-        if (gw2::statsEnabled()) // gw2 (#3): HITCH's sync, with the render thread's interval
+        if (gw2_api_thread_.stats()) // gw2 (#3): HITCH's sync, with the render thread's interval
           gw2::waitAdd(gw2::Wait::Sync, std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
         current_seq_id = cmd_queue.CurrentSeqId();
         coherent_seq_id = cmd_queue.CoherentSeqId();
@@ -841,6 +841,7 @@ public:
     ctx_state.has_dirty_op_since_last_event = false;
     gw2_front_.publish(); // gw2 (#4): once per chunk
     gw2_map_.publish();   // gw2 (#25)
+    gw2_pso_.publish();   // gw2 (#149)
   };
 
   HRESULT STDMETHODCALLTYPE Signal(ID3D11Fence *pFence, UINT64 Value) override {

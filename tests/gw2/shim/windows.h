@@ -35,6 +35,13 @@ inline DWORD
 GetCurrentThreadId() {
   return fake::tid;
 }
+// gw2 (#149): src/util/thread.hpp reads the thread id from the TEB; here, the simulated thread's
+namespace dxmt::this_thread {
+inline uint32_t
+get_id() {
+  return uint32_t(fake::tid);
+}
+} // namespace dxmt::this_thread
 inline DWORD
 FlsAlloc(PFLS_CALLBACK_FUNCTION cb) {
   if (fake::fail_alloc)

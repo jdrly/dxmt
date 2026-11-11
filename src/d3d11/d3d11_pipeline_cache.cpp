@@ -29,19 +29,35 @@ namespace dxmt {
 // gw2 (#6): the pipeline lookup's switches and its PSO section.
 namespace gw2 {
 
+std::atomic<bool> g_pso_blend_hash = false;
+
 const PsoSettings &
 psoSettings() {
-  static const PsoSettings settings = {
-      .blend_hash = env::getEnvVar("DXMT_PSO_BLEND_HASH") != "0",
-      .mru = env::getEnvVar("DXMT_PSO_MRU") != "0",
-      .topology_keep = env::getEnvVar("DXMT_PSO_TOPOLOGY_KEEP") != "0",
-  };
+  static const PsoSettings settings = [] {
+    PsoSettings s = {
+        .blend_hash = env::getEnvVar("DXMT_PSO_BLEND_HASH") != "0",
+        .mru = env::getEnvVar("DXMT_PSO_MRU") != "0",
+        .topology_keep = env::getEnvVar("DXMT_PSO_TOPOLOGY_KEEP") != "0",
+    };
+    g_pso_blend_hash.store(s.blend_hash, std::memory_order_relaxed); // gw2 (#149)
+    return s;
+  }();
   return settings;
 }
 
 std::atomic<uint64_t> g_pso_counters[(unsigned)PsoCounter::Count];
 
 namespace {
+
+// gw2 (#149): DXMT_STATS for the caches' counters (Lookup, New, Equal), a load instead of a call.
+// Each PipelineCache sets it in its constructor, before its first lookup.
+std::atomic<bool> g_pso_stats = false;
+
+void
+psoCount(PsoCounter c) {
+  if (g_pso_stats.load(std::memory_order_relaxed))
+    g_pso_counters[(unsigned)c].fetch_add(1, std::memory_order_relaxed);
+}
 
 // Sampled lookups (one in 16, like Draw in PACE): bucket depth and lock time. gw2 (#28): the
 // counter is the cache's (shared by its lookups on every thread), not a `thread_local`: emulated TLS
@@ -63,7 +79,7 @@ drain(std::atomic<uint64_t> &v) {
 class PsoLookupSample {
 public:
   explicit PsoLookupSample(std::atomic<uint32_t> &counter) {
-    if (!statsEnabled())
+    if (!g_pso_stats.load(std::memory_order_relaxed))
       return;
     stats_ = true;
     if ((counter.fetch_add(1, std::memory_order_relaxed) % kPsoSampleEvery) == 0)
@@ -812,8 +828,9 @@ public:
       blend_states(pDevice),
       so_layouts(pDevice) {
     // gw2 (#6): the effective pipeline lookup settings, once per device (the log is rewritten
-    // per device).
+    // per device). gw2 (#149): this first read also sets the key's g_pso_blend_hash.
     auto &pso = gw2::psoSettings();
+    gw2::g_pso_stats.store(gw2::statsEnabled(), std::memory_order_relaxed); // gw2 (#149)
     Logger::info(std::format(
         "PSO: blend hash {} (DXMT_PSO_BLEND_HASH), MRU {} (DXMT_PSO_MRU), topology keep {} (DXMT_PSO_TOPOLOGY_KEEP)",
         pso.blend_hash ? "on" : "off", pso.mru ? "on, 4 entries" : "off", pso.topology_keep ? "on" : "off"

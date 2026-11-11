@@ -12,6 +12,7 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
 #include <functional>
 #include <mutex>
 #include <shared_mutex>
@@ -154,7 +155,19 @@ private:
 namespace this_thread {
 inline void yield() { SwitchToThread(); }
 
-inline uint32_t get_id() { return uint32_t(GetCurrentThreadId()); }
+// gw2 (#149): the thread id read from the TEB inline, as kernel32's GetCurrentThreadId reads it,
+// without the call through its import. NtCurrentTeb() is the SDK's per-architecture inline (gs, fs,
+// x18); the TEB starts with the NT_TIB, EnvironmentPointer and ClientId (UniqueProcess, UniqueThread).
+inline uint32_t get_id() {
+  struct TebHead {
+    NT_TIB tib;
+    void *environment;
+    void *process;
+    void *thread;
+  };
+  static_assert(offsetof(TebHead, thread) == (sizeof(void *) == 8 ? 0x48 : 0x24));
+  return uint32_t(uintptr_t(reinterpret_cast<const TebHead *>(NtCurrentTeb())->thread));
+}
 
 bool isInModuleDetachment();
 } // namespace this_thread

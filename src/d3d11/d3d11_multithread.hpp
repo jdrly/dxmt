@@ -1,13 +1,31 @@
 #pragma once
 #include "d3d11_4.h"
+#include "thread.hpp"
+#include "util_likely.hpp"
 #include <atomic>
 
 namespace dxmt {
 
 class d3d11_device_mutex {
 public:
-  void lock();
-  void unlock() noexcept;
+  // gw2 (#149): inline up to an uncontended acquire, the thread id read from the TEB; the spin on
+  // a lock another thread holds is out of line
+  void lock() {
+    if (!forced_ && !protected_) // gw2 (#4): forced_
+      return;
+    uint32_t tid = this_thread::get_id();
+    uint32_t expected = 0;
+    if (!owner_.compare_exchange_weak(expected, tid, std::memory_order_acquire) && expected != tid)
+      lock_contended(tid);
+    counter_++;
+  }
+  void unlock() noexcept {
+    if (!forced_ && !protected_) // gw2 (#4): forced_
+      return;
+    counter_--;
+    if (likely(counter_ == 0))
+      owner_.store(0, std::memory_order_release);
+  }
 
   bool set_protected(bool Protected);
   bool get_protected();
@@ -18,6 +36,8 @@ public:
   void force_locking() { forced_ = true; }
 
 private:
+  void lock_contended(uint32_t tid);
+
   bool protected_ = false;
   bool forced_ = false; // gw2 (#4)
   std::atomic_uint32_t owner_ = 0;
