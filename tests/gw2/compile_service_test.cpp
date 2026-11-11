@@ -45,6 +45,9 @@ namespace {
 std::atomic<bool> g_timing{false};
 std::atomic<int64_t> g_queue{0};
 std::atomic<int64_t> g_now{1};
+// #159: how far each compileNowNs read advances the fake clock (a speculative run spans at least one
+// read, so a tick of kSpeculativeSlowNs or more makes every run slow)
+std::atomic<int64_t> g_tick{1};
 std::mutex g_threads_mutex;
 std::vector<uint64_t> g_threads; // every compileThreads value, in order
 struct WaitRecord {
@@ -80,7 +83,7 @@ compileTiming() {
 }
 int64_t
 compileNowNs() {
-  return g_now.fetch_add(1);
+  return g_now.fetch_add(g_tick.load());
 }
 CompileWaitScope::CompileWaitScope(const compile::JobRecord *job) {
   std::lock_guard<std::mutex> l(g_waits_mutex);
@@ -132,7 +135,6 @@ struct FakeJob {
   bool fail_early = false;     // geometry/tessellation: a done but failed dependency fails the job at once
   bool fails = false;          // its own build fails (done, with no result)
   int lie_once = -1;           // returns deps[lie_once] once although it is done (spurious dependency)
-  int64_t cost = 0;            // #159: added to the fake clock (compileNowNs) while it runs: its build time
   Gate *gate = nullptr;
   std::atomic_bool ready{false};
   std::atomic<int> done_count{0};
@@ -195,8 +197,6 @@ FakeJob::run() {
     return this;
   }
   gate->enter(id);
-  if (cost)
-    g_now += cost;
   for (size_t i = 0; i < deps.size(); i++) {
     auto *d = deps[i];
     if (int(i) == lie_once) {
@@ -1060,8 +1060,9 @@ waitGated(Gate &gate, size_t n) {
   return gate.cv.wait_for(l, std::chrono::seconds(10), [&] { return gate.gated.size() >= n; });
 }
 
-// gw2 (#159): Options::speculative_jobs (DXMT_WARM_JOBS). Slowness comes from the fake clock: a job's
-// `cost` is added to it while the job runs, so no real time decides admission.
+// gw2 (#159): Options::speculative_jobs (DXMT_WARM_JOBS). Slowness comes from the fake clock, whose
+// tick (g_tick) each case sets, so no real time decides admission. FakeJob is the base's: the
+// parity cases run exactly the job they always ran.
 static void
 declaredSpeculativeJobs() {
   constexpr int64_t kSlow = 5 * compile::kSpeculativeSlowNs;
@@ -1071,10 +1072,11 @@ declaredSpeculativeJobs() {
     return o;
   };
   // one at a time while the runs are fast (N = 3), and with N = 1 while they are slow (today's rule)
-  for (auto [jobs, cost, what] : {std::tuple{3u, int64_t(0), "N=3, fast runs"}, std::tuple{1u, kSlow, "N=1, slow runs"}}) {
+  for (auto [jobs, tick, what] : {std::tuple{3u, int64_t(1), "N=3, fast runs"}, std::tuple{1u, kSlow, "N=1, slow runs"}}) {
+    g_tick = tick;
     Scenario sc;
     for (int i = 0; i < 3; i++)
-      sc.add()->cost = cost;
+      sc.add();
     Gate gate;
     for (auto &j : sc.jobs)
       j->gate = &gate;
@@ -1090,11 +1092,12 @@ declaredSpeculativeJobs() {
     }
   }
   // N = 3, slow runs: three at once; a demand still goes first
+  g_tick = kSlow;
   gw2::g_speculative_peak = 0;
   Scenario sc;
   for (int i = 0; i < 6; i++)
-    sc.add()->cost = kSlow; // 0-5: speculative
-  auto *n6 = sc.add();      // 6: normal, demanded
+    sc.add(); // 0-5: speculative
+  auto *n6 = sc.add(); // 6: normal, demanded
   Gate gate;
   for (auto &j : sc.jobs)
     j->gate = &gate;
@@ -1144,6 +1147,7 @@ declaredSpeculativeJobs() {
     for (int i : {2, 3, 4})
       releaseJob(gate, i);
   }
+  g_tick = 1;
   bool once = std::all_of(sc.jobs.begin(), sc.jobs.end(), [](auto &j) { return j->done_count.load() == 1; });
   CHECK(once, "N=3: every job completed once");
   std::printf("%s declared, DXMT_WARM_JOBS: one at a time while fast or N=1, up to N while slow, demands first\n",
