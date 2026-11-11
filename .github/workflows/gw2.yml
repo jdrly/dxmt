@@ -457,7 +457,8 @@ jobs:
           [[ $digest == sha256:* ]]
           # what anyone downloads by URL is what GitHub reports, and, when this run uploaded it, this archive
           url="https://github.com/$GH_REPO/releases/download/$RELEASE/$NAME"
-          curl -fsSL --retry 3 -o "$RUNNER_TEMP/download.tar.xz" "$url"
+          # --retry-all-errors: a 404 too, in case the URL lags behind the upload
+          curl -fsSL --retry 5 --retry-all-errors -o "$RUNNER_TEMP/download.tar.xz" "$url"
           [[ $digest == "sha256:$(sha256sum "$RUNNER_TEMP/download.tar.xz" | cut -d' ' -f1)" ]]
           (( !uploaded )) || cmp "$RUNNER_TEMP/download.tar.xz" "$NAME"
           echo "$url" | tee -a "$GITHUB_STEP_SUMMARY"
