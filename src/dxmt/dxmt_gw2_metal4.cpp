@@ -41,7 +41,7 @@ sw::Switch<bool> kMetalfxSpatialSwapchain{
     "DXMT_METALFX_SPATIAL_SWAPCHAIN", false, sw::legacy::exactlyOne, sw::Line::Unlisted
 };
 // gw2 (#154)
-sw::Switch<bool> kMtl4TimestampReuse{"DXMT_MTL4_TIMESTAMP_REUSE", true, sw::legacy::notZero};
+sw::Switch<bool> kMtl4TimestampReuse{"DXMT_MTL4_TIMESTAMP_REUSE", false, sw::legacy::exactlyOne};
 } // namespace
 
 bool
