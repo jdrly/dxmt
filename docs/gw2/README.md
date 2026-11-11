@@ -447,7 +447,7 @@ Counts are **totals in the 2 s window**; the `COMPILE frame=` line below has the
 | `gen`, `published`, `excluded`, `missexcl` | (#75) Only with `DXMT_PSO_GENERATIONS=1`: the generation loaded at start, then the last one published; pipelines in this session's shard of that publish; adds refused since start because their key is an excluded failing shape; the window's lookup misses of an excluded shape (not counted in `new` or `known`) |
 
 **`COMPILE frame=N wait=Nx ms/max queue=Q variants= air=hit/miss pso=hit/miss built= failed=
-build=shader:ms pipeline:ms cause=queued:N,variantq:N,variant:N,building:N,other:N longest=<cause>
+build=shader:ms pipeline:ms created=N/min/max cause=queued:N,variantq:N,variant:N,building:N,other:N longest=<cause>
 lead:ms queue:ms parked:ms build:ms varq:ms varc:ms depth:N archq:N [dropped=D]`** (with
 `DXMT_STATS`): a frame whose encode-thread
 waits in `GetPipeline` added up to at least `DXMT_COMPILE_WAIT_MS` (2 ms): their count, total
@@ -459,6 +459,15 @@ game; the counts say what was compiling during the hitch, not which draw asked f
 most one line per 200 ms; `dropped` = qualifying frames since the last line that weren't logged
 (`slow` in the section counts them all). The line is written when the encode thread starts the
 next frame. Nothing is skipped: the draw still waits for its pipeline.
+
+`created` (#160): the shaders whose first variant was made while the encode thread was on this
+frame (counted like `variants`), and the shortest and longest time, ms, from each one's creation to
+that first variant: how much earlier its compile could have started if it began at `CreateShader`
+instead of at the first draw that needs it. A shader is created once per device and bytecode (a
+later `CreateShader` of the same bytecode gets the same shader), after DXBC parsing. A variant
+taken from the shared results (`DXMT_WARM`) counts too. `created=0` when there were none. The
+other half of that question, what a Metal 4 specialization of a pipeline built without its color
+state costs, is `tests/gw2/mtl4_specialize_test.m`'s benchmark.
 
 `cause` and `longest` (#46): the frame's waits by cause (as `waitcause`), and the timeline of its
 longest wait's pipeline task, ms, `-` where not known:
@@ -1211,7 +1220,8 @@ so only the first run after a version change builds LLVM (about 25 minutes per a
   nothing (#174). The runner's GPU is an Apple Paravirtual device
   with Metal 3 and no Metal 4. There, `commit_record_metal_test`, `pso_archive_test` and
   `shared_event_listener_test` pass. `chunk_submission_test` and `mtl4fx_test` run their Metal 3 half and
-  skip, while `mtl4_bridge_test`, `mtl4_queue_test` and `paired_replay_test` skip outright (no Metal 4).
+  skip, while `mtl4_bridge_test`, `mtl4_queue_test`, `mtl4_specialize_test` and `paired_replay_test` skip
+  outright (no Metal 4).
   `pso_archive_tool_test` skips without the AIR copy from my Mac (`GW2_AIR_DB`). `thread_priority_test` skips
   because the runner's jobs run clamped to the utility band (maximum priority 20). A skip shows as `skip`
   with the test's reason. It never counts as a pass. The Metal 4 paths are still tested only on my Mac.

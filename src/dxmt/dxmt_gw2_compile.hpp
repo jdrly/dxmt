@@ -27,6 +27,9 @@ namespace dxmt::gw2 {
 
 // Render thread / any thread.
 void compileVariantNew();
+// gw2 (#160): a shader's first variant was just made; `created` is compileClock() when the shader was
+// created (CreateShader, after SM50Initialize). Nothing without DXMT_STATS (created = 0).
+void compileFirstVariant(int64_t created);
 void compilePipelineLookup(bool hit);
 // Compile workers. compileClock() is the start of a build (0, no clock read, without DXMT_STATS);
 // the *Built calls take it. compilePipelineBuilt also counts for the archive flushes.

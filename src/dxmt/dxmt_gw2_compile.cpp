@@ -58,6 +58,10 @@ bump(std::atomic<uint64_t> Counts::*field, uint64_t v = 1) {
   (g_frame.*field).fetch_add(v, std::memory_order_relaxed);
 }
 
+// gw2 (#160): the frame's first variants (frame line only): count, and the shortest and longest time
+// from their shader's creation
+std::atomic<uint64_t> g_first_n{0}, g_first_min_ns{~0ull}, g_first_max_ns{0};
+
 std::atomic<uint64_t> g_shader_max_ns, g_pso_max_ns;
 std::atomic<uint64_t> g_wait_max_ns, g_slow_frames; // wait count and time: the per-cause counters (#46)
 
@@ -116,6 +120,9 @@ finishFrame() {
   uint64_t variants = x(&Counts::variants), air_hit = x(&Counts::air_hit), air_miss = x(&Counts::air_miss),
            pso_hit = x(&Counts::pso_hit), pso_miss = x(&Counts::pso_miss), built = x(&Counts::built),
            failed = x(&Counts::failed), shader_ns = x(&Counts::shader_ns), pso_ns = x(&Counts::pso_ns);
+  uint64_t first_n = g_first_n.exchange(0, std::memory_order_relaxed),
+           first_min = g_first_min_ns.exchange(~0ull, std::memory_order_relaxed),
+           first_max = g_first_max_ns.exchange(0, std::memory_order_relaxed);
   if (t_frame == ~0ull || !t_wait_n)
     return;
   double threshold = waitLineMs();
@@ -126,9 +133,10 @@ finishFrame() {
     if (now - t_last_line_ns >= kLineIntervalNs) {
       Logger::info(std::format(
           "COMPILE frame={} wait={}x {:.1f}/{:.1f} queue={} variants={} air={}/{} pso={}/{} built={} failed={} "
-          "build=shader:{:.0f} pipeline:{:.0f}{}{}",
+          "build=shader:{:.0f} pipeline:{:.0f} created={}{}{}",
           t_frame, t_wait_n, ms, t_wait_max_ns / 1e6, std::max<int64_t>(0, g_queue.load(std::memory_order_relaxed)),
           variants, air_hit, air_miss, pso_hit, pso_miss, built, failed, shader_ns / 1e6, pso_ns / 1e6,
+          first_n ? std::format("{}/{:.1f}/{:.1f}", first_n, first_min / 1e6, first_max / 1e6) : std::string("0"),
           frameCauses(), t_dropped ? std::format(" dropped={}", t_dropped) : std::string()
       ));
       t_last_line_ns = now;
@@ -327,6 +335,18 @@ void
 compileVariantNew() {
   if (statsEnabled())
     bump(&Counts::variants);
+}
+
+void
+compileFirstVariant(int64_t created) {
+  if (!created)
+    return;
+  uint64_t ns = uint64_t(std::max<int64_t>(0, nowNs() - created));
+  g_first_n.fetch_add(1, std::memory_order_relaxed);
+  atomicMax(g_first_max_ns, ns);
+  auto cur = g_first_min_ns.load(std::memory_order_relaxed);
+  while (ns < cur && !g_first_min_ns.compare_exchange_weak(cur, ns, std::memory_order_relaxed)) {
+  }
 }
 
 void
