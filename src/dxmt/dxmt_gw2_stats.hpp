@@ -110,23 +110,36 @@ ApiThread &apiThread();
 void apiThreadsDetach();
 
 // gw2 (#28): the last ApiThread that used an object (a device context), so its entry points find
-// the calling thread's block with GetCurrentThreadId and a compare instead of a TLS lookup. Safe to
+// the calling thread's block with the thread id and a compare instead of a TLS lookup. Safe to
 // share between threads: a block's tid matches only its live owner (0 once released, and a new
 // owner sets its own), so a stale or racing pointer only costs a miss. Not covered: a thread killed
 // by TerminateThread (no exit callback) keeps its block, and a thread that reuses its id would hit it.
 class ApiThreadCache {
 public:
   ApiThread &get();
+  // gw2 (#149): DXMT_STATS, cached when the object is made, so its scopes don't call statsEnabled()
+  bool
+  stats() const {
+    return stats_;
+  }
 
 private:
+  bool stats_ = statsEnabled();
   std::atomic<ApiThread *> last_ = nullptr;
 };
 
 class ApiScope {
 public:
-  // cache: where the entry point keeps its last ApiThread (nullptr: look the thread up)
-  ApiScope(Api api, bool sampled, ApiThreadCache *cache = nullptr);
-  ~ApiScope();
+  // cache: where the entry point keeps its last ApiThread and DXMT_STATS (nullptr: look the thread
+  // up, call statsEnabled). gw2 (#149): the stats check is inline, the rest out of line.
+  ApiScope(Api api, bool sampled, ApiThreadCache *cache = nullptr) : api_(api) {
+    if (cache ? cache->stats() : statsEnabled())
+      begin(sampled, cache);
+  }
+  ~ApiScope() {
+    if (thread_)
+      end();
+  }
   ApiScope(const ApiScope &) = delete;
   ApiScope &operator=(const ApiScope &) = delete;
 
@@ -145,6 +158,9 @@ public:
   }
 
 private:
+  void begin(bool sampled, ApiThreadCache *cache);
+  void end();
+
   ApiThread *thread_ = nullptr; // null: stats off
   Api api_;
   int64_t t0_ = 0;

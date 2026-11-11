@@ -2058,7 +2058,7 @@ public:
       bool keep = KeepsRenderPipelineAcrossTopology(state_.InputAssembler.Topology, Topology);
       state_.InputAssembler.Topology = Topology;
       if (keep)
-        gw2::psoCount(gw2::PsoCounter::TopologyKept);
+        gw2_pso_.count(gw2::PsoCounter::TopologyKept);
       else
         InvalidateRenderPipeline();
     }
@@ -4352,6 +4352,9 @@ public:
   // gw2 (#28): the last thread that entered this context, for its PACE scopes (no TLS per call)
   gw2::ApiThreadCache gw2_api_thread_;
 
+  // gw2 (#149): this context's share of the PSO section, published once a chunk
+  gw2::PsoContextCounters gw2_pso_;
+
   // gw2 (#4): the speculative commit's bookkeeping, for CMDS and DXMT_PROMOTE_FLUSH_MIN. The
   // immediate context publishes gw2_front_ at each commit; a deferred context's never is.
   gw2::FrontCounters gw2_front_;
@@ -5083,7 +5086,7 @@ public:
   template <bool IndexedDraw>
   void
   InitializeGraphicsPipelineDesc(MTL_GRAPHICS_PIPELINE_DESC &Desc) {
-    gw2::psoCount(gw2::PsoCounter::Build); // gw2 (#6)
+    gw2_pso_.count(gw2::PsoCounter::Build); // gw2 (#6, #149)
     // TODO: reduce branching
     auto PS = GetManagedShader<PipelineStage::Pixel>();
     auto GS = GetManagedShader<PipelineStage::Geometry>();
@@ -5290,7 +5293,7 @@ public:
 
     // gw2 (#6): the context's MRU first, then the device's pipeline cache.
     if (pso_mru_enabled_ && LookupPipelineMru(pipelineDesc, &pipeline)) {
-      gw2::psoCount(gw2::PsoCounter::MruHit);
+      gw2_pso_.count(gw2::PsoCounter::MruHit);
     } else {
       device->CreateGraphicsPipeline(&pipelineDesc, &pipeline);
       if (pso_mru_enabled_)

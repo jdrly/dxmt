@@ -38,14 +38,38 @@ struct PsoSettings {
   bool topology_keep; // DXMT_PSO_TOPOLOGY_KEEP: keep the pipeline across topologies of one class
 };
 const PsoSettings &psoSettings();
+// gw2 (#149): psoSettings().blend_hash for the pipeline key's hash and compare, a load instead of a
+// call. psoSettings() sets it when it first reads the switches; every PipelineCache calls it in its
+// constructor, before any key is hashed or compared.
+extern std::atomic<bool> g_pso_blend_hash;
+inline bool
+psoBlendHash() {
+  return g_pso_blend_hash.load(std::memory_order_relaxed);
+}
 
 enum class PsoCounter : unsigned { Build, MruHit, TopologyKept, Lookup, New, Equal, Count };
 extern std::atomic<uint64_t> g_pso_counters[(unsigned)PsoCounter::Count];
-inline void
-psoCount(PsoCounter c) {
-  if (statsEnabled())
-    g_pso_counters[(unsigned)c].fetch_add(1, std::memory_order_relaxed);
-}
+
+// gw2 (#149): a context's PSO counters (Build, MruHit, TopologyKept): plain increments, added to
+// g_pso_counters once a chunk (the immediate context's commit, a deferred context's
+// FinishCommandList), as MapCounters does.
+struct PsoContextCounters {
+  bool on = statsEnabled(); // DXMT_STATS, cached: off, nothing is counted
+  uint32_t n[(unsigned)PsoCounter::Count] = {};
+  void
+  count(PsoCounter c) {
+    if (on)
+      n[(unsigned)c]++;
+  }
+  void
+  publish() {
+    for (unsigned i = 0; i < (unsigned)PsoCounter::Count; i++) {
+      if (n[i])
+        g_pso_counters[i].fetch_add(n[i], std::memory_order_relaxed);
+      n[i] = 0;
+    }
+  }
+};
 } // namespace dxmt::gw2
 
 struct MTL_COMPUTE_PIPELINE_DESC {
@@ -81,7 +105,7 @@ template <> struct hash<MTL_GRAPHICS_PIPELINE_DESC> {
     // gw2 (#6): not the pointer (equal_to compares blend states by content), but the blend
     // state's fingerprint of what equal_to compares, plus RasterizationEnabled, which it also
     // compares. Without them, pipelines that differ only there share a bucket and a full hash.
-    if (dxmt::gw2::psoSettings().blend_hash) {
+    if (dxmt::gw2::psoBlendHash()) {
       state.add(v.BlendState->PipelineBlendHash(v.NumColorAttachments));
       state.add((size_t)v.RasterizationEnabled);
     }
@@ -110,7 +134,7 @@ template <> struct equal_to<MTL_GRAPHICS_PIPELINE_DESC> {
     }
     if (x.BlendState != y.BlendState) {
       // gw2 (#6): different fingerprints mean a field below differs; skip the two GetDesc1.
-      if (dxmt::gw2::psoSettings().blend_hash &&
+      if (dxmt::gw2::psoBlendHash() &&
           x.BlendState->PipelineBlendHash(x.NumColorAttachments) !=
               y.BlendState->PipelineBlendHash(y.NumColorAttachments))
         return false;

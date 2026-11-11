@@ -423,6 +423,7 @@ public:
 
     *ppCommandList = std::move(ctx_state.current_cmdlist);
     device->CreateCommandList((ID3D11CommandList **)&ctx_state.current_cmdlist);
+    gw2_pso_.publish(); // gw2 (#149)
 
     if (RestoreDeferredContextState)
       RestoreEncodingContextState();
