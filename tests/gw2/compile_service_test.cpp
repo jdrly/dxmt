@@ -52,6 +52,15 @@ struct WaitRecord {
 };
 std::mutex g_waits_mutex;
 std::vector<WaitRecord> g_waits;
+// gw2 (#152): every compileWorkerPriority call: its thread, the mode, whether that thread had run a job
+struct PriorityCall {
+  std::thread::id thread;
+  gw2::ThreadPriority mode;
+  bool after_a_job;
+};
+std::mutex g_priority_mutex;
+std::vector<PriorityCall> g_priority_calls;
+thread_local bool t_ran_a_job = false;
 } // namespace
 
 namespace dxmt::gw2 {
@@ -85,6 +94,11 @@ compileDemand() {
 void
 compilePromoted() {
   g_promoted_count++;
+}
+void
+compileWorkerPriority(ThreadPriority mode) {
+  std::lock_guard<std::mutex> l(g_priority_mutex);
+  g_priority_calls.push_back({std::this_thread::get_id(), mode, t_ran_a_job});
 }
 } // namespace dxmt::gw2
 
@@ -155,6 +169,7 @@ std::atomic<uint64_t> g_parks{0}, g_early_runs{0};
 
 FakeJob *
 FakeJob::run() {
+  t_ran_a_job = true;
   if (!gate) {
     // ungated (stress): a declared job must find every dependency done when it starts
     if (std::any_of(deps.begin(), deps.end(), [](FakeJob *d) { return !d->GetIsDone(); }))
@@ -1026,6 +1041,61 @@ declaredPromoteReleased() {
               got.c_str());
 }
 
+// gw2 (#152): with each DXMT_COMPILE_PRIORITY setting and either policy, every worker, the first two
+// and those a submit adds, applies Options::priority once, on itself, before it runs a job; the jobs
+// all complete.
+static void
+workerPriority() {
+  using gw2::ThreadPriority;
+  const std::pair<ThreadPriority, const char *> modes[] = {
+      {ThreadPriority::Critical, "critical"}, {ThreadPriority::Normal, "normal"}, {ThreadPriority::Utility, "utility"}};
+  for (auto [mode, mode_name] : modes)
+    for (auto policy : {compile::Policy::Legacy, compile::Policy::Declared}) {
+      const char *policy_name = policy == compile::Policy::Legacy ? "legacy" : "declared";
+      {
+        std::lock_guard<std::mutex> l(g_priority_mutex);
+        g_priority_calls.clear();
+      }
+      Scenario sc;
+      Gate gate;
+      for (int i = 0; i < 4; i++)
+        sc.add()->gate = &gate;
+      {
+        compile::Options o;
+        o.initial_workers = 2;
+        o.max_workers = 4;
+        o.priority = mode;
+        o.policy = policy;
+        compile::Service<FakeJob *> sched(o);
+        // two jobs for the first two workers, then one at a time while every worker is busy: each adds one
+        sched.submit(sc.jobs[0].get());
+        sched.submit(sc.jobs[1].get());
+        for (size_t i = 2; i < 4; i++) {
+          waitQuiescent(gate, i, std::chrono::milliseconds(200), std::chrono::seconds(10));
+          sched.submit(sc.jobs[i].get());
+        }
+        waitQuiescent(gate, 4, std::chrono::milliseconds(200), std::chrono::seconds(10));
+        for (auto &j : sc.jobs)
+          releaseJob(gate, j->id);
+        for (auto &j : sc.jobs)
+          j->ready.wait(false);
+      } // workers joined
+      bool all_done = std::all_of(sc.jobs.begin(), sc.jobs.end(), [](auto &j) { return j->done_count.load() == 1; });
+      std::lock_guard<std::mutex> l(g_priority_mutex);
+      std::set<std::thread::id> threads;
+      bool right = true;
+      for (auto &c : g_priority_calls) {
+        threads.insert(c.thread);
+        right = right && c.mode == mode && !c.after_a_job;
+      }
+      bool ok = all_done && g_priority_calls.size() == 4 && threads.size() == 4 && right;
+      CHECK(ok, "%s, %s: %zu calls on %zu threads, mode and order %s, jobs %s", mode_name, policy_name,
+            g_priority_calls.size(), threads.size(), right ? "right" : "wrong", all_done ? "done once" : "not done once");
+      std::printf("%s worker priority %s, %s: 4 workers, each applied it once before its first job\n",
+                  ok ? "ok  " : "FAIL", mode_name, policy_name);
+    }
+}
+
 int
 main() {
   parity("chain", chain);
@@ -1050,6 +1120,7 @@ main() {
   declaredSpeculativeResume();
   declaredPromoteReleased();
   declaredStress();
+  workerPriority();
   std::printf(failures ? "%d FAILED\n" : "all passed\n", failures);
   return failures ? 1 : 0;
 }
