@@ -29,6 +29,7 @@ CompileWaitScope::CompileWaitScope(const compile::JobRecord *) {}
 CompileWaitScope::~CompileWaitScope() {}
 void compilePromoted() {} // C2
 void compileWorkerPriority(ThreadPriority) {} // #152
+void warmJobsRunning(uint32_t) {} // #159
 } // namespace dxmt::gw2
 
 struct Job {

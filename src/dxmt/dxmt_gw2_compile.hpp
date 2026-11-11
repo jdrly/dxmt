@@ -46,6 +46,9 @@ void compilePipelineBuilt(int64_t t0, bool ok);
 // The compile scheduler: a task was submitted (+1) or completed (-1); its worker count.
 void compileQueue(int64_t delta);
 void compileThreads(uint64_t threads);
+// gw2 (#159): the speculative jobs running now, at each change (the WARM section's jobs=; it is defined
+// there, in dxmt_gw2_warm.cpp)
+void warmJobsRunning(uint32_t running);
 
 // The encode thread (or whichever thread encodes chunks), before encoding a chunk of `frame`.
 void compileEncodeFrame(uint64_t frame);

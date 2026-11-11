@@ -358,6 +358,9 @@ jobs:
         run: sudo xcode-select -s "/Applications/Xcode_$XCODE_VERSION.app"
       - name: Pure tests
         run: tests/gw2/run.zsh pure
+      # it runs on the Mac, with the game's recipes and AIR; here it only has to build (#159)
+      - name: Cold-cache benchmark builds
+        run: clang -x objective-c -fobjc-arc -O1 -Wall -arch x86_64 tests/gw2/stagecache_bench.m -framework Metal -framework Foundation -lsqlite3 -o "$RUNNER_TEMP/stagecache"
       - name: Metal tests
         run: |
           status=0

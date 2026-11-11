@@ -12,7 +12,8 @@
 // Results go into the compile service's shared tables (C4), keyed by stable key, which the live
 // variant and pipeline jobs consult first: one build per key per process, whoever comes first, and a
 // live job that finds a warm job building its key parks on it (a demand promotes it). Speculative
-// jobs run one at a time and never while a demand waits (C2). Warming needs the declared policy, so
+// jobs run one at a time (#159: up to DXMT_WARM_JOBS while their builds are slow) and never while a
+// demand waits (C2). Warming needs the declared policy, so
 // it turns it on.
 //
 // This file: the switches, the plan (pure: tests/gw2/warm_test.cpp) and the WARM section's counters.
@@ -34,6 +35,9 @@ enum class WarmMode : uint8_t { Off, Functions, All };
 // DXMT_WARM: "functions", "all"; anything else (unset) is off. Parsed once per process.
 WarmMode warmMode();
 const char *warmModeName(WarmMode mode);
+// gw2 (#159) DXMT_WARM_JOBS: speculative jobs the compile service runs at once while the warm builds
+// are slow (1 to 8, default 1: one at a time). Parsed once per process.
+uint32_t warmJobs();
 // DXMT_WARM_MAX: recipes planned at most (default 8192 since #124). Parsed once per process.
 uint32_t warmMax();
 // gw2 (#124) DXMT_WARM_ORDER: "use" (the default) plans the recipes used most recently and most often
