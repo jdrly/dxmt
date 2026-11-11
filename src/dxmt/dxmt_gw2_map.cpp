@@ -5,6 +5,7 @@
 #include <atomic>
 #include <format>
 #include <string>
+#include <type_traits>
 
 namespace dxmt::gw2 {
 
@@ -51,17 +52,19 @@ namespace {
 using counter = std::atomic<uint64_t>;
 
 counter g_calls[kMapKindCount][kMapOpCount];
-counter g_ns[kMapKindCount][kMapOpCount];
+std::atomic<int64_t> g_ns[kMapKindCount][kMapOpCount]; // gw2 (#150): signed, as ApiTotals::ns
 counter g_renames, g_created, g_grown, g_dropped;
 
+template <typename T>
 inline void
-add(counter &total, uint64_t value) {
+add(std::atomic<T> &total, std::type_identity_t<T> value) {
   if (value)
     total.fetch_add(value, std::memory_order_relaxed);
 }
 
-inline uint64_t
-take(counter &total) {
+template <typename T>
+inline T
+take(std::atomic<T> &total) {
   return total.exchange(0, std::memory_order_relaxed);
 }
 
@@ -70,8 +73,8 @@ mapSection(double, uint32_t frames) {
   if (!frames)
     return {};
   double f = frames;
-  uint64_t calls[kMapKindCount][kMapOpCount], ns[kMapKindCount][kMapOpCount];
-  uint64_t total_calls = 0, total_ns = 0;
+  uint64_t calls[kMapKindCount][kMapOpCount], total_calls = 0;
+  int64_t ns[kMapKindCount][kMapOpCount], total_ns = 0;
   for (unsigned k = 0; k < kMapKindCount; k++) {
     for (unsigned o = 0; o < kMapOpCount; o++) {
       calls[k][o] = take(g_calls[k][o]);

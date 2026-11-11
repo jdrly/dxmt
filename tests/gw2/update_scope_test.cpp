@@ -4,14 +4,17 @@
 // gw2 (#145): host-side test of gw2::UpdateScope, the counting of an UpdateSubresource that
 // DXMT_UPDATE_ONE_CALL handles without its Map and Unmap. MAP and PACE must count what the two calls'
 // MapScopes and ApiScopes counted (the issue's acceptance: dcb.discard and dcb.unmap keep their counts
-// with the switch on and off), and both lines must take the one timed interval. Simulated Win32 threads
-// (shim/windows.h). Run it on the Mac:
+// with the switch on and off), and both lines must take the one timed interval. gw2 (#150): a Map's
+// MapScope takes its ApiScope's interval (two clock reads a timed call), and the clock's floor makes an
+// empty interval read 0 on average. Simulated Win32 threads (shim/windows.h). Run it on the Mac:
 //
 //   clang++ -std=c++20 -Itests/gw2/shim -Isrc/dxmt tests/gw2/update_scope_test.cpp \
 //     src/dxmt/dxmt_gw2_stats.cpp src/dxmt/dxmt_gw2_switches.cpp -o /tmp/update_scope_test && /tmp/update_scope_test
 
 #include "dxmt_gw2_map.hpp"
 #include <windows.h>
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -30,6 +33,7 @@ constexpr unsigned kDefCb = (unsigned)MapKind::DefCb;
 constexpr unsigned kDiscard = (unsigned)MapOp::Discard;
 constexpr unsigned kNoOverwrite = (unsigned)MapOp::NoOverwrite;
 constexpr unsigned kUnmap = (unsigned)MapOp::Unmap;
+constexpr unsigned kMap = (unsigned)Api::Map;
 
 // The nested path DXMT_UPDATE_ONE_CALL=0 keeps: UpdateSubresource1 calls Map, then Unmap, each with
 // its own ApiScope and MapScope (d3d11_context_imm.cpp).
@@ -97,8 +101,8 @@ main() {
     CHECK(apiThread().depth == 0);
   }
 
-  // Time: 1 in 16 timed and scaled by 16, so the estimate lands near the true total; MAP and PACE
-  // take the same interval.
+  // Time: 1 in 64 timed and scaled by 64 (#150), so the estimate lands near the true total; MAP and
+  // PACE take the same interval.
   {
     ApiThreadCache cache;
     MapCounters one;
@@ -111,13 +115,84 @@ main() {
       spinNs(kSpin);
     }
     double wall = double(nowNs() - t0);
-    uint64_t pace_ns = otherDrain().ns[(unsigned)Api::Map];
-    uint64_t map_ns = one.ns[kDefCb][kDiscard];
+    int64_t pace_ns = otherDrain().ns[kMap];
+    int64_t map_ns = one.ns[kDefCb][kDiscard];
     CHECK(pace_ns == map_ns);
     CHECK(map_ns > 0.6 * kUpdates * kSpin);
     CHECK(map_ns < 1.6 * wall);
     std::printf("timed estimate %.2f ms, spun %.2f ms, wall %.2f ms\n", map_ns / 1e6, kUpdates * kSpin / 1e6,
                 wall / 1e6);
+  }
+
+  // gw2 (#150): the clock's floor is its own cost. An empty interval reads 0 on average, though the
+  // clock steps 100 ns (a single one reads 0 or 100, less the floor). The median of 9 groups' means,
+  // so a preempted group doesn't count.
+  {
+    int64_t floor_ns = clockFloorNs();
+    CHECK(floor_ns > 0 && floor_ns < 1000);
+    double mean[9];
+    for (auto &m : mean) {
+      int64_t sum = 0;
+      for (int i = 0; i < 1000; i++) {
+        int64_t t0 = nowNs();
+        sum += sinceNs(t0);
+      }
+      m = sum / 1000.0;
+    }
+    std::nth_element(mean, mean + 4, mean + 9);
+    CHECK(std::fabs(mean[4]) < 10);
+    std::printf("clock floor %lld ns, empty interval %.2f ns\n", (long long)floor_ns, mean[4]);
+  }
+
+  // gw2 (#150): a buffer's Map, sampled 1 in 64: MAP takes the ApiScope's interval, so both lines read
+  // the same time and a timed call reads the clock twice. Before, PACE and MAP each timed 1 in 16 with
+  // their own two reads: kCalls / 4 reads.
+  {
+    ApiThreadCache cache;
+    MapCounters c;
+    otherDrain();
+    clockFloorNs();
+    constexpr int kCalls = 64 * 256;
+    uint64_t reads0 = fake::qpc_reads;
+    for (int i = 0; i < kCalls; i++) {
+      ApiScope api(Api::Map, true, &cache);
+      MapScope map(c, MapKind::DefCb, MapOp::Discard, api);
+    }
+    uint64_t reads = fake::qpc_reads - reads0;
+    ApiTotals t = otherDrain();
+    CHECK(t.calls[kMap] == kCalls);
+    CHECK(c.calls[kDefCb][kDiscard] == kCalls);
+    CHECK(t.ns[kMap] == c.ns[kDefCb][kDiscard]);
+    CHECK(reads % 2 == 0);
+    CHECK(reads > kCalls / 64 && reads < kCalls / 16); // about 2 x 256
+    std::printf("buffer maps: %d calls, %llu clock reads\n", kCalls, (unsigned long long)reads);
+  }
+
+  // A texture's Map is timed on every call, at scale 1: on the ApiScope's interval when it times the
+  // call, else on MAP's own. Two reads a call either way, and the total stays within the wall time
+  // (the ApiScope's scale, 64, on its timed calls would double it).
+  {
+    ApiThreadCache cache;
+    MapCounters c;
+    otherDrain();
+    constexpr int kCalls = 1024;
+    uint64_t reads0 = fake::qpc_reads;
+    for (int i = 0; i < kCalls; i++) {
+      ApiScope api(Api::Map, true, &cache);
+      MapScope map(c, MapKind::Tex, MapOp::Write, api);
+    }
+    CHECK(fake::qpc_reads - reads0 == 2 * kCalls);
+    MapCounters spun;
+    int64_t t0 = nowNs();
+    for (int i = 0; i < kCalls; i++) {
+      ApiScope api(Api::Map, true, &cache);
+      MapScope map(spun, MapKind::Tex, MapOp::Write, api);
+      spinNs(1000);
+    }
+    int64_t wall = nowNs() - t0;
+    int64_t ns = spun.ns[(unsigned)MapKind::Tex][(unsigned)MapOp::Write];
+    CHECK(ns > 0.8 * kCalls * 1000 && ns <= wall);
+    otherDrain();
   }
 
   if (failures) {
