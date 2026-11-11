@@ -60,6 +60,11 @@
 // - no command buffer reports an error; Metal 4: two commits (frame, present), no unsupported packet,
 //   no dropped UseResource, no Set*Bytes overflow, the bytes arena refilled at least once inside the rows
 //   pass's replay, and the replays put allocations into the chunk's residency set.
+// - gw2 (#154): Metal 4 chunks end as flushCommands ends them with timestamp queries pending (GW2 always
+//   has some): openForTimestamps, then the commit. The frame still makes two commits, not a third, empty
+//   one after the present, and the present's commit has a GPU end for the queries to read. A chunk with
+//   no encoder gets one command buffer for its queries; with DXMT_MTL4_TIMESTAMP_REUSE=0 a chunk whose
+//   last buffer is committed gets another.
 //
 // How much it sees (measured 2026-11-04 on an M5 Max by mutating a scratch copy of mtl4.c, arm64): each
 // of these made the run fail: Set*BufferOffset ignoring its offset, a Set*Bytes overflow skipped instead
@@ -805,6 +810,7 @@ struct Metal4Target {
   }
   void
   end() {
+    encoding.openForTimestamps(false); // gw2 (#154): with timestamp queries pending
     encoding.commitOpen();
   }
 };
@@ -1053,9 +1059,10 @@ waitMetal3(std::vector<WMT::CommandBuffer> &committed, size_t expected, const ch
   }
 }
 
-// the chunk's commits completed without an error; then it retires (its slot's residency set emptied)
+// the chunk's commits completed without an error; then it retires (its slot's residency set emptied).
+// `times`: the last commit has a GPU end, which exact timestamp queries read (gw2 #154).
 static void
-waitMetal4(Mtl4Queue &queue, uint64_t seq, size_t expected, const char *what) {
+waitMetal4(Mtl4Queue &queue, uint64_t seq, size_t expected, const char *what, bool times = false) {
   const auto &commits = queue.wait(seq);
   CHECK(commits.size() == expected, "%s: %zu commits, expected %zu", what, commits.size(), expected);
   for (auto *commit : commits) {
@@ -1063,6 +1070,8 @@ waitMetal4(Mtl4Queue &queue, uint64_t seq, size_t expected, const char *what) {
     WMT::Error error = commit->error();
     CHECK(!error, "%s: commit error %s", what, error ? error.description().getUTF8String().c_str() : "");
   }
+  if (times && !commits.empty())
+    CHECK(commits.back()->gpuEndNs() > 0, "%s: the last commit has no GPU end for the timestamps", what);
   queue.retire(seq);
 }
 
@@ -1179,7 +1188,20 @@ main() {
       CHECK(state.use_resource_dropped == 0, "Metal 4: %u UseResource dropped", state.use_resource_dropped);
       CHECK(state.bytes_overflow == 0, "Metal 4: %u Set*Bytes overflowed", state.bytes_overflow);
       CHECK(state.residency_adds > 0, "Metal 4: nothing went into the chunk's residency set");
-      waitMetal4(queue, seq, run4.presented ? 2 : 1, "Metal 4 frame");
+      waitMetal4(queue, seq, run4.presented ? 2 : 1, "Metal 4 frame", true);
+      // gw2 (#154): a chunk with timestamp queries and no encoder (ring slot 0 again, the load retired)
+      {
+        Mtl4Encoding encoding(queue, 2, bytes);
+        encoding.openForTimestamps(false);
+        CHECK(encoding.segments().size() == 1, "Metal 4: a chunk with no command buffer got none for its timestamps");
+        encoding.commitOpen();
+        encoding.openForTimestamps(false);
+        CHECK(encoding.segments().size() == 1, "Metal 4: another command buffer after the chunk's last was committed");
+        encoding.openForTimestamps(true); // DXMT_MTL4_TIMESTAMP_REUSE=0
+        CHECK(encoding.segments().size() == 2, "Metal 4: DXMT_MTL4_TIMESTAMP_REUSE=0 began no command buffer");
+        encoding.commitOpen();
+      }
+      waitMetal4(queue, 2, 2, "Metal 4 chunk without encoders");
       queue.waitIdle();
     }
 

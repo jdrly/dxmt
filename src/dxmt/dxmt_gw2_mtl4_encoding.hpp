@@ -78,6 +78,11 @@ public:
   Mtl4Commit &open();
   // commits the open command buffer, if any
   void commitOpen();
+  // gw2 (#154): at the chunk's end, for its timestamp readbacks (they read segments()): begins a
+  // command buffer only if the chunk has none, so queries after the present read the present's.
+  // `extra` (DXMT_MTL4_TIMESTAMP_REUSE=0): as open(), so a chunk whose last buffer is committed
+  // commits an empty one after it, as before #154.
+  void openForTimestamps(bool extra);
 
   // each command buffer begun, with the position it began at (timestamp estimates)
   struct Segment {

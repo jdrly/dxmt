@@ -39,6 +39,12 @@ Mtl4Encoding::commitOpen() {
 }
 
 void
+Mtl4Encoding::openForTimestamps(bool extra) {
+  if (extra || segments_.empty())
+    open();
+}
+
+void
 Mtl4Encoding::prepare(Kind kind, uint32_t flags) {
   // a new encoder binds nothing yet (as on Metal 3): no buffer for a Set*BufferOffset to move in
   std::memset(state_.buffer_base, 0, sizeof(state_.buffer_base));

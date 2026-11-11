@@ -203,6 +203,14 @@ CommandQueue::CommandQueue(WMT::Device device) :
       // gw2 (#184): the queue holds only the device's set; a queue takes at most 32
       Logger::info("Metal 4: drawables stay resident through their layer's residency set, used by each present's "
                    "command buffer; the queue holds no layer's set");
+      // gw2 (#154)
+      Logger::info(
+          gw2::mtl4TimestampReuse()
+              ? "Metal 4: timestamp queries read the chunk's last command buffer, the present's after a present "
+                "(DXMT_MTL4_TIMESTAMP_REUSE=1)"
+              : "Metal 4: a chunk with timestamp queries commits an empty command buffer for them after its last one "
+                "(DXMT_MTL4_TIMESTAMP_REUSE=0)"
+      );
     }
   }
   // gw2 (#78): Metal 3, unless the queue is on Metal 4
