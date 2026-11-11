@@ -1974,7 +1974,18 @@ public:
   IASetInputLayout(ID3D11InputLayout *pInputLayout) override {
     std::lock_guard<mutex_t> lock(mutex);
 
-    if (auto expected = com_cast<IMTLD3D11InputLayout>(pInputLayout)) {
+    // gw2 (#146): the bound layout again (or null again) changes nothing the pipeline is built from.
+    // Every ID3D11InputLayout a DXMT device makes is its IMTLD3D11InputLayout at the same address
+    // (single inheritance, one implementation; D3D10 passes the D3D11 object), so a pointer compare
+    // finds it and a static_cast replaces the QueryInterface. The state keeps its own reference.
+    if (pInputLayout == state_.InputAssembler.InputLayout.ptr()) {
+      gw2_pso_.count(gw2::PsoCounter::LayoutSame);
+      if (gw2_skip_same_state_)
+        return;
+    }
+    if (gw2_skip_same_state_) {
+      state_.InputAssembler.InputLayout = static_cast<IMTLD3D11InputLayout *>(pInputLayout);
+    } else if (auto expected = com_cast<IMTLD3D11InputLayout>(pInputLayout)) {
       state_.InputAssembler.InputLayout = std::move(expected);
     } else {
       state_.InputAssembler.InputLayout = nullptr;
@@ -2020,7 +2031,18 @@ public:
     std::lock_guard<mutex_t> lock(mutex);
 
     auto pBuffer = GetResourceCommon(pIndexBuffer);
-    if (pBuffer && (pBuffer->bindFlags() & D3D11_BIND_INDEX_BUFFER) && ValidateIAHazard(pBuffer)) {
+    bool valid = pBuffer && (pBuffer->bindFlags() & D3D11_BIND_INDEX_BUFFER) && ValidateIAHazard(pBuffer);
+    // gw2 (#146): the buffer this call would bind (none if refused), format and offset all as they
+    // are: the state is unchanged, and the encode thread already holds that buffer (every write to
+    // IndexBuffer emits its bind, and a DISCARD rename swaps the allocation inside the same Buffer,
+    // which the draw reads when it encodes)
+    if ((valid ? pBuffer : nullptr) == state_.InputAssembler.IndexBuffer.ptr() &&
+        Format == state_.InputAssembler.IndexBufferFormat && Offset == state_.InputAssembler.IndexBufferOffset) {
+      gw2_pso_.count(gw2::PsoCounter::IndexBufferSame);
+      if (gw2_skip_same_state_)
+        return;
+    }
+    if (valid) {
       state_.InputAssembler.IndexBuffer = pBuffer;
       EmitST([buffer = state_.InputAssembler.IndexBuffer->buffer()](ArgumentEncodingContext &enc) mutable {
         enc.bindIndexBuffer(forward_rc(buffer));
@@ -3470,6 +3492,12 @@ public:
       } else {
         D3D11_ASSERT(0 && "unexpected shader object");
       }
+    } else if (!ShaderStage.Shader) {
+      // gw2 (#146): null on an empty stage changes nothing (with class instances, the error below
+      // still logs)
+      gw2_pso_.count(gw2::PsoCounter::NullShaderEmpty);
+      if (gw2_skip_same_state_ && !NumClassInstances)
+        return;
     } else {
       ShaderStage.Shader = nullptr;
     }
@@ -3794,13 +3822,25 @@ public:
         bool replaced = false;
         auto &entry = VertexBuffers.bind(slot, {pVertexBuffer}, replaced, !pVertexBuffer->hazardsFree());
         if (!replaced) {
+          bool changed = false;
           if (pStrides && pStrides[slot - StartSlot] != entry.Stride) {
             VertexBuffers.set_dirty(slot);
             entry.Stride = pStrides[slot - StartSlot];
+            changed = true;
           }
           if (pOffsets && pOffsets[slot - StartSlot] != entry.Offset) {
             VertexBuffers.set_dirty(slot);
             entry.Offset = pOffsets[slot - StartSlot];
+            changed = true;
+          }
+          // gw2 (#146): the same buffer, stride and offset: the encode thread's slot already holds
+          // them (every write to a slot's buffer, stride or offset emits a command that sets them,
+          // and a DISCARD rename swaps the allocation inside the same Buffer, which the draw reads
+          // when it encodes), so this command would set what is there
+          if (!changed) {
+            gw2_pso_.count(gw2::PsoCounter::VertexBufferSame);
+            if (gw2_skip_same_state_)
+              continue;
           }
           EmitST([=, offset = entry.Offset,
                 stride = entry.Stride](ArgumentEncodingContext &enc) mutable {
@@ -5612,6 +5652,7 @@ protected:
   uint32_t pso_mru_next_ = 0;
   bool pso_mru_enabled_ = gw2::psoSettings().mru;
   bool pso_topology_keep_ = gw2::psoSettings().topology_keep;
+  const bool gw2_skip_same_state_ = gw2::skipSameState(); // gw2 (#146): DXMT_SKIP_SAME_STATE, cached
 
 public:
   enum class DirtyState {
