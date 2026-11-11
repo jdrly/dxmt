@@ -403,28 +403,20 @@ bench(id<MTLDevice> device, id<MTL4Compiler> compiler, const char *recipes, cons
       other[0] = other_blend(r.color[0]);
       third[0] = third_blend(r.color[0], &r.color[0], &other[0]);
 
+      // the descriptors are made before any timing starts, as stagecache's: each interval is the compiler call only
+      MTL4RenderPipelineDescriptor *desc[NSTAGE] = {
+          describe(fd[0], fd[1], &r, r.color), describe(fd[0], fd[1], &r, other), describe(fd[0], fd[1], &r, NULL),
+          describe(fd[0], fd[1], &r, third)};
       double ms[NSTAGE];
       id<MTLRenderPipelineState> pso[NSTAGE] = {nil};
       NSError *err = nil;
       for (int s = 0; s < NSTAGE && (s == 0 || pso[s - 1]); s++) {
         err = nil;
         double t0 = now_ms();
-        switch (s) {
-        case FULL:
-          pso[s] = [compiler newRenderPipelineStateWithDescriptor:describe(fd[0], fd[1], &r, r.color) compilerTaskOptions:nil error:&err];
-          break;
-        case OTHER:
-          pso[s] = [compiler newRenderPipelineStateWithDescriptor:describe(fd[0], fd[1], &r, other) compilerTaskOptions:nil error:&err];
-          break;
-        case UNSPEC:
-          pso[s] = [compiler newRenderPipelineStateWithDescriptor:describe(fd[0], fd[1], &r, NULL) compilerTaskOptions:nil error:&err];
-          break;
-        case SPEC:
-          pso[s] = [compiler newRenderPipelineStateBySpecializationWithDescriptor:describe(fd[0], fd[1], &r, third)
-                                                                         pipeline:pso[UNSPEC]
-                                                                            error:&err];
-          break;
-        }
+        if (s == SPEC)
+          pso[s] = [compiler newRenderPipelineStateBySpecializationWithDescriptor:desc[s] pipeline:pso[UNSPEC] error:&err];
+        else
+          pso[s] = [compiler newRenderPipelineStateWithDescriptor:desc[s] compilerTaskOptions:nil error:&err];
         ms[s] = now_ms() - t0;
         if (!pso[s] && !first_error[0])
           snprintf(first_error, sizeof(first_error), "row %d, %s: %s", row - 1, names[s],

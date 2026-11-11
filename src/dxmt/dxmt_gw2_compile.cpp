@@ -59,8 +59,13 @@ bump(std::atomic<uint64_t> Counts::*field, uint64_t v = 1) {
 }
 
 // gw2 (#160): the frame's first variants (frame line only): count, and the shortest and longest time
-// from their shader's creation
-std::atomic<uint64_t> g_first_n{0}, g_first_min_ns{~0ull}, g_first_max_ns{0};
+// from their shader's creation, published and drained together (once per new shader, and a drain
+// per frame, with DXMT_STATS only)
+struct FirstVariants {
+  dxmt::mutex mutex;
+  uint64_t n = 0, min_ns = ~0ull, max_ns = 0; // mutex
+};
+FirstVariants g_first;
 
 std::atomic<uint64_t> g_shader_max_ns, g_pso_max_ns;
 std::atomic<uint64_t> g_wait_max_ns, g_slow_frames; // wait count and time: the per-cause counters (#46)
@@ -120,9 +125,13 @@ finishFrame() {
   uint64_t variants = x(&Counts::variants), air_hit = x(&Counts::air_hit), air_miss = x(&Counts::air_miss),
            pso_hit = x(&Counts::pso_hit), pso_miss = x(&Counts::pso_miss), built = x(&Counts::built),
            failed = x(&Counts::failed), shader_ns = x(&Counts::shader_ns), pso_ns = x(&Counts::pso_ns);
-  uint64_t first_n = g_first_n.exchange(0, std::memory_order_relaxed),
-           first_min = g_first_min_ns.exchange(~0ull, std::memory_order_relaxed),
-           first_max = g_first_max_ns.exchange(0, std::memory_order_relaxed);
+  uint64_t first_n, first_min, first_max;
+  {
+    std::lock_guard<dxmt::mutex> lock(g_first.mutex);
+    first_n = std::exchange(g_first.n, 0);
+    first_min = std::exchange(g_first.min_ns, ~0ull);
+    first_max = std::exchange(g_first.max_ns, 0);
+  }
   if (t_frame == ~0ull || !t_wait_n)
     return;
   double threshold = waitLineMs();
@@ -342,11 +351,10 @@ compileFirstVariant(int64_t created) {
   if (!created)
     return;
   uint64_t ns = uint64_t(std::max<int64_t>(0, nowNs() - created));
-  g_first_n.fetch_add(1, std::memory_order_relaxed);
-  atomicMax(g_first_max_ns, ns);
-  auto cur = g_first_min_ns.load(std::memory_order_relaxed);
-  while (ns < cur && !g_first_min_ns.compare_exchange_weak(cur, ns, std::memory_order_relaxed)) {
-  }
+  std::lock_guard<dxmt::mutex> lock(g_first.mutex);
+  g_first.n++;
+  g_first.min_ns = std::min(g_first.min_ns, ns);
+  g_first.max_ns = std::max(g_first.max_ns, ns);
 }
 
 void
