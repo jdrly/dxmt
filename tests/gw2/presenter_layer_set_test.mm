@@ -58,7 +58,8 @@
 // the check's LIFECHECK section must count 0. It runs with DXMT_LIFETIME_CHECK=1, once per value of
 // the switch.
 //
-// What the test provides in place of DXMT: the statistics hooks (off) and clock, the lifetime check
+// What the test provides in place of DXMT: the statistics hooks (off) and clock, DXMT_PRESENT_QUEUE
+// (default), the lifetime check
 // (off) and DXMT_PRESENTER_FREE (set per phase) outside the lifetime-check build, the device set's
 // commit hook (its set here is fixed), Forget_sRGB for the formats used here, and the internal
 // command library, compiled at run time from src/dxmt/dxmt_command.metal (the build makes a metallib
@@ -72,6 +73,7 @@
 #include "dxmt_gw2_lifetime.hpp"
 #include "dxmt_gw2_mtl4_encoding.hpp"
 #include "dxmt_gw2_mtl4_queue.hpp"
+#include "dxmt_gw2_present.hpp"
 #include "dxmt_gw2_stats.hpp"
 #include <chrono>
 #include <cstdio>
@@ -115,6 +117,11 @@ residencyBeforeCommit() {}
 bool
 mtl4DeviceResidencyRequested() {
   return false;
+}
+// gw2 (#157): DXMT_PRESENT_QUEUE unset (the default path: the layer keeps its drawable count)
+PresentQueue
+presentQueue() {
+  return PresentQueue::Default;
 }
 #ifndef DXMT_GW2_LIFETIME_CHECK
 namespace lifetime {
