@@ -1131,7 +1131,8 @@ main() {
         return 1;
       CAMetalLayer *layer = newLayer(fx.device);
       WMT::MetalLayer wmt_layer{H(layer)};
-      // as the presenter: the layer's own set keeps the drawables resident
+      // the layer's own set keeps the drawables resident (one layer, so on the queue here; the
+      // presenter names it on the present's command buffer, #184)
       if (auto set = wmt_layer.residencySet())
         queue.queue().addResidencySet(WMT::ResidencySet{set.handle});
       std::vector<id<MTLBuffer>> arenas; // the bytes arenas, alive until the chunk retired

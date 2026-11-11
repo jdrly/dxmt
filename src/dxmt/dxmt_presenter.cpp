@@ -204,26 +204,17 @@ Presenter::encodeCommands(
   return drawable;
 }
 
-// gw2 (#32): the presenter goes only after every chunk that presented with it retired (the retirement
-// ledger holds it, #66), so the layer's set can leave the queue here
-Presenter::~Presenter() {
-  if (mtl4_queue_ && mtl4_layer_set_)
-    mtl4_queue_.removeResidencySet(WMT::ResidencySet{mtl4_layer_set_.handle});
-}
-
 WMT::MetalDrawable
 Presenter::encodeCommandsMetal4(
     gw2::Mtl4Encoding &encoding, WMT::Texture backbuffer, DXMTPresentMetadata metadata,
     std::function<void(WMT::MTL4RenderCommandEncoder)> &&wait_fences,
     std::function<void(WMT::MTL4RenderCommandEncoder)> &&update_fences
 ) {
-  if (!mtl4_queue_) {
+  if (!mtl4_layer_set_known_) {
     // the drawables' residency: the layer's own set (a driver-owned set would pin them, d9mt)
-    mtl4_queue_ = encoding.queue().queue();
+    mtl4_layer_set_known_ = true;
     mtl4_layer_set_ = layer_.residencySet();
-    if (mtl4_layer_set_)
-      mtl4_queue_.addResidencySet(WMT::ResidencySet{mtl4_layer_set_.handle});
-    else
+    if (!mtl4_layer_set_)
       WARN("Metal 4: the layer has no residency set; drawables may not be resident");
   }
   // gw2 (#3): nextDrawable alone for STATS2, only with DXMT_STATS on
@@ -241,6 +232,11 @@ Presenter::encodeCommandsMetal4(
   info.colors[0].load_action = WMTLoadActionDontCare;
   info.colors[0].store_action = WMTStoreActionStore;
   info.colors[0].texture = drawable.texture();
+  // gw2 (#184): the layer's set on the present pass's command buffer (the only one that touches the
+  // drawable), not on the queue: a queue takes at most 32 sets, and a program may make any number of
+  // swap chains
+  if (mtl4_layer_set_)
+    encoding.open().cmdbuf.useResidencySet(WMT::ResidencySet{mtl4_layer_set_.handle});
   auto encoder = encoding.renderCommandEncoder(info, WMT_MTL4_NO_ATTACHMENT_RESIDENCY);
   wait_fences(encoder);
   encoder.setFragmentTexture(backbuffer, 0);
