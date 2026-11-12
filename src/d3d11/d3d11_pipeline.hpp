@@ -50,6 +50,8 @@ psoBlendHash() {
 // gw2 (#146): DXMT_SKIP_SAME_STATE (default on): IASetInputLayout with the bound layout, a null
 // shader on an empty stage, and vertex and index buffer binds that change nothing return before
 // they invalidate the pipeline or emit a command. Read once per process.
+// gw2 (#206): so does XXSetShader with the pointer the stage was last given while it still holds
+// that shader, before its QueryInterface.
 bool skipSameState();
 
 // gw2 (#147): DXMT_SKIP_SAME_SRV (default off): XXSetShaderResources keeps a slot's hazard bit set
@@ -65,6 +67,7 @@ bool skipEmptySlots();
 
 // gw2 (#146): LayoutSame, NullShaderEmpty, VertexBufferSame and IndexBufferSame count those setter
 // calls (a vertex buffer per slot), with the switch on or off.
+// gw2 (#206): ShaderSame counts those XXSetShader calls, with the switch on or off.
 // gw2 (#147): Srv* and Sampler* count XXSetShaderResources and XXSetSamplers calls, their slots,
 // the slots the switch leaves (SrvSame: the bound view again, hazard bit clear; not counted for
 // samplers) and the slots
@@ -79,6 +82,7 @@ enum class PsoCounter : unsigned {
   Equal,
   LayoutSame,
   NullShaderEmpty,
+  ShaderSame,
   VertexBufferSame,
   IndexBufferSame,
   SrvCall,

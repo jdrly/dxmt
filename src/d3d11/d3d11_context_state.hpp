@@ -77,6 +77,17 @@ struct D3D11ShaderStageState {
   SamplerBindingSet Samplers;
   ConstantBufferBindingSet ConstantBuffers;
   Com<IMTLD3D11Shader> Shader;
+  // gw2 (#206): read where SetShader binds Shader, so a draw makes no virtual call for them:
+  // Shader's ManagedShader and its reflection (both null for a stream-output layout's geometry
+  // shader, which has none), and the pointer SetShader was given. The ManagedShader and its
+  // reflection belong to the device's pipeline cache and outlive Shader. ShaderRawPointer is
+  // Shader's own object or the stream-output layout that owns it, so Shader's reference keeps it
+  // alive. Only SetShader writes them, always together with Shader; a copy, move or reset of the
+  // whole state takes them along. Read them only while Shader is set: a moved-from state keeps
+  // stale ones.
+  const void *ShaderRawPointer = nullptr;
+  ManagedShader ShaderManaged = nullptr;
+  const MTL_SHADER_REFLECTION *ShaderReflection = nullptr;
 };
 
 struct VERTEX_BUFFER_B {
@@ -95,6 +106,9 @@ template <> struct redundant_binding_trait<VERTEX_BUFFER_B> {
 
 struct D3D11InputAssemblerStageState {
   Com<IMTLD3D11InputLayout> InputLayout;
+  // gw2 (#206): InputLayout's input slot mask, read where IASetInputLayout binds the layout (0
+  // without one), so UpdateVertexBuffer makes no virtual call for it
+  uint32_t InputSlotMask = 0;
   BindingSet<VERTEX_BUFFER_B, D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT> VertexBuffers;
   Com<D3D11ResourceCommon, false> IndexBuffer;
   /**

@@ -251,6 +251,16 @@ public:
     return S_OK;
   }
 
+  // gw2 (#206): the base's UpdateSubresource calls the base's UpdateSubresource1 directly, so this
+  // context overrides it to keep #145's path below, also without a virtual call
+  void
+  STDMETHODCALLTYPE
+  UpdateSubresource(ID3D11Resource *pDstResource, UINT DstSubresource, const D3D11_BOX *pDstBox,
+                    const void *pSrcData, UINT SrcRowPitch, UINT SrcDepthPitch) override {
+    MTLD3D11ImmediateContext::UpdateSubresource1(pDstResource, DstSubresource, pDstBox, pSrcData, SrcRowPitch,
+                                                 SrcDepthPitch, 0);
+  }
+
   // gw2 (#145): DXMT_UPDATE_ONE_CALL: UpdateSubresource's fast branch (the base's, for a discard or
   // no-overwrite update of a buffer with a DynamicBuffer) runs here under one device lock:
   // MapBufferFast, then the copy, without the virtual Map and Unmap, their scopes and locks, or a
