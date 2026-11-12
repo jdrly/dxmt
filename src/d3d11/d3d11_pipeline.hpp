@@ -58,6 +58,11 @@ bool skipSameState();
 // per process.
 bool skipSameSrv();
 
+// gw2 (#203): DXMT_SKIP_EMPTY_SLOTS (default on): XXSetShaderResources and XXSetSamplers visit only
+// the slots whose incoming entry isn't null or that are bound (calls of 1 to 64 slots); a null entry
+// for an empty slot changes nothing. Read once per process.
+bool skipEmptySlots();
+
 // gw2 (#146): LayoutSame, NullShaderEmpty, VertexBufferSame and IndexBufferSame count those setter
 // calls (a vertex buffer per slot), with the switch on or off.
 // gw2 (#147): Srv* and Sampler* count XXSetShaderResources and XXSetSamplers calls, their slots,

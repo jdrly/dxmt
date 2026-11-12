@@ -60,6 +60,17 @@ skipSameState() {
 }
 
 namespace {
+// gw2 (#203): on unless exactly "0"
+sw::Switch<bool> kSkipEmptySlots{"DXMT_SKIP_EMPTY_SLOTS", true, sw::legacy::notZero};
+} // namespace
+
+bool
+skipEmptySlots() {
+  static const bool on = kSkipEmptySlots();
+  return on;
+}
+
+namespace {
 // gw2 (#147): off unless exactly "1"
 sw::Switch<bool> kSkipSameSrv{"DXMT_SKIP_SAME_SRV", false, sw::legacy::exactlyOne};
 } // namespace
@@ -870,9 +881,10 @@ public:
     gw2::g_pso_stats.store(gw2::statsEnabled(), std::memory_order_relaxed); // gw2 (#149)
     Logger::info(std::format(
         "PSO: blend hash {} (DXMT_PSO_BLEND_HASH), MRU {} (DXMT_PSO_MRU), topology keep {} (DXMT_PSO_TOPOLOGY_KEEP), "
-        "skip same state {} (DXMT_SKIP_SAME_STATE), skip same srv {} (DXMT_SKIP_SAME_SRV)",
+        "skip same state {} (DXMT_SKIP_SAME_STATE), skip same srv {} (DXMT_SKIP_SAME_SRV), "
+        "skip empty slots {} (DXMT_SKIP_EMPTY_SLOTS)",
         pso.blend_hash ? "on" : "off", pso.mru ? "on, 4 entries" : "off", pso.topology_keep ? "on" : "off",
-        gw2::skipSameState() ? "on" : "off", gw2::skipSameSrv() ? "on" : "off"
+        gw2::skipSameState() ? "on" : "off", gw2::skipSameSrv() ? "on" : "off", gw2::skipEmptySlots() ? "on" : "off"
     ));
 
     // gw2 (#5): DXMT_PSO_ARCHIVE=1 loads earlier sessions' pipeline archives (once per process)

@@ -3675,7 +3675,8 @@ public:
     auto &ShaderStage = state_.ShaderStages[Stage];
     gw2_pso_.count(gw2::PsoCounter::SrvCall); // gw2 (#147)
     gw2_pso_.add(gw2::PsoCounter::SrvSlot, NumViews);
-    for (unsigned slot = StartSlot; slot < StartSlot + NumViews; slot++) {
+    // gw2 (#203): DXMT_SKIP_EMPTY_SLOTS visits only the slots this call can change
+    auto visit = [&](unsigned slot) {
       auto pView = static_cast<D3D11ShaderResourceView *>(ppShaderResourceViews[slot - StartSlot]);
       // gw2 (#147): the view this slot already holds (its private reference keeps the address from
       // being reused), with a clear hazard bit. With the switch on, every bound view that can be an
@@ -3687,7 +3688,7 @@ public:
           ShaderStage.SRVs.at(slot).RawPointer == pView) {
         gw2_pso_.count(gw2::PsoCounter::SrvSame);
         if (gw2_skip_same_srv_)
-          continue;
+          return;
       }
       if (pView && ValidateSRVHazard<Stage>(pView)) {
         bool replaced = false;
@@ -3697,7 +3698,7 @@ public:
         bool missed = hazard && ShaderStage.SRVs.test_bound(slot) && !ShaderStage.SRVs.test_hazard(slot);
         auto &entry = ShaderStage.SRVs.bind(slot, {pView}, replaced, hazard);
         if (!replaced)
-          continue;
+          return;
         if (missed) {
           gw2_pso_.count(gw2::PsoCounter::SrvHazardMissed);
           if (gw2_skip_same_srv_)
@@ -3724,7 +3725,8 @@ public:
           });
         }
       }
-    }
+    };
+    visit_settable_slots(ShaderStage.SRVs, StartSlot, NumViews, ppShaderResourceViews, gw2_skip_empty_slots_, visit);
   }
 
   template <PipelineStage Stage>
@@ -3753,13 +3755,14 @@ public:
     auto &ShaderStage = state_.ShaderStages[Stage];
     gw2_pso_.count(gw2::PsoCounter::SamplerCall); // gw2 (#147): counted only; bind() compares first
     gw2_pso_.add(gw2::PsoCounter::SamplerSlot, NumSamplers);
-    for (unsigned Slot = StartSlot; Slot < StartSlot + NumSamplers; Slot++) {
+    // gw2 (#203): DXMT_SKIP_EMPTY_SLOTS visits only the slots this call can change
+    auto visit = [&](unsigned Slot) {
       auto pSampler = static_cast<D3D11SamplerState *>(ppSamplers[Slot - StartSlot]);
       if (pSampler) {
         bool replaced = false;
         auto &entry = ShaderStage.Samplers.bind(Slot, {pSampler}, replaced);
         if (!replaced)
-          continue;
+          return;
         gw2_pso_.count(gw2::PsoCounter::SamplerSet); // gw2 (#147)
         entry.Sampler = pSampler;
         EmitST([=, sampler = pSampler->sampler()](ArgumentEncodingContext &enc) mutable {
@@ -3774,7 +3777,8 @@ public:
           });
         }
       }
-    }
+    };
+    visit_settable_slots(ShaderStage.Samplers, StartSlot, NumSamplers, ppSamplers, gw2_skip_empty_slots_, visit);
   }
 
   template <PipelineStage Stage>
@@ -5689,6 +5693,7 @@ protected:
   bool pso_topology_keep_ = gw2::psoSettings().topology_keep;
   const bool gw2_skip_same_state_ = gw2::skipSameState(); // gw2 (#146): DXMT_SKIP_SAME_STATE, cached
   const bool gw2_skip_same_srv_ = gw2::skipSameSrv();     // gw2 (#147): DXMT_SKIP_SAME_SRV, cached
+  const bool gw2_skip_empty_slots_ = gw2::skipEmptySlots(); // gw2 (#203): DXMT_SKIP_EMPTY_SLOTS, cached
 
 public:
   enum class DirtyState {
