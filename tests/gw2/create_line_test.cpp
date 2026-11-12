@@ -125,7 +125,8 @@ pure() {
   CHECK(textureBytes(64, 64, 1, 1, 1, 0, false) == 0);           // unknown format
   CHECK(textureBytes(1, 1, 1, 1, 100, 4, false) == 32 * 4);      // a bad mip count is capped
 
-  // depth formats: MTLGetTexelSize has none, so CREATE takes gw2DepthTexelSize. The Metal formats are
+  // depth formats: MTLGetTexelSize has no stencil or depth-stencil format, so CREATE takes
+  // gw2DepthTexelSize when it returns 0. The Metal formats are
   // MTLQueryDXGIFormat's for the DXGI formats named.
   using dxmt::gw2DepthTexelSize;
   CHECK(gw2DepthTexelSize(WMTPixelFormatDepth32Float_Stencil8) == 8); // R24G8_TYPELESS, D24_UNORM_S8_UINT,
