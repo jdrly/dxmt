@@ -63,6 +63,29 @@ int32_t MTLQueryDXGIFormat(WMT::Device device, uint32_t format, MTL_DXGI_FORMAT_
 
 uint32_t MTLGetTexelSize(WMTPixelFormat format);
 
+// gw2 (#202): a depth or stencil format's bytes per texel, which MTLGetTexelSize leaves at 0 (its
+// callers copy and initialize color data). For the CREATE line's texture bytes only; 0 for any other
+// format. Depth32Float_Stencil8 (D24S8 and D32S8 here) takes 8 bytes, a 32-bit depth and 8-bit stencil
+// padded.
+inline uint32_t
+gw2DepthTexelSize(WMTPixelFormat format) {
+  switch (ORIGINAL_FORMAT(format)) {
+  case WMTPixelFormatStencil8:
+    return 1;
+  case WMTPixelFormatDepth16Unorm:
+    return 2;
+  case WMTPixelFormatDepth32Float:
+  case WMTPixelFormatDepth24Unorm_Stencil8:
+  case WMTPixelFormatX24_Stencil8:
+    return 4;
+  case WMTPixelFormatDepth32Float_Stencil8:
+  case WMTPixelFormatX32_Stencil8:
+    return 8;
+  default:
+    return 0;
+  }
+}
+
 WMTPixelFormat MTLGetUnsignedIntegerFormat(WMTPixelFormat format);
 
 bool IsUnorm8RenderTargetFormat(WMTPixelFormat format);

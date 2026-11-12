@@ -118,7 +118,7 @@ All are written right after `STATS`, from the same window.
 | `CREATE` | | PACE's `create` by what the call made (#202), written right after `PACE` from the same window and frames, only in a window with a create. The presenting thread's fields come first and hold the same calls and time as `dxmt`'s `create`. The other threads' follow with an `other.` prefix (only if they had a create) and match `other`'s `create`, except a create in flight on another thread when the line is written, which can fall into the next window. A nested `Create*` (`CreateTexture2D` calling `CreateTexture2D1`) counts once, under the outer call. With `DXMT_STATS=0` nothing is counted and no clock is read |
 | | `calls`, `ms`, `total` | All creates per frame, their time (ms per frame), and the window's count of creates |
 | | `<kind>` | A kind that had a create: calls/ms per frame. Kinds: `buffer`, `texture` (1D, 2D, 3D), `view` (shader-resource, unordered-access, render-target, depth-stencil), `shader` (every stage, stream output included), `state` (blend, depth-stencil, rasterizer, sampler, input layout), `query` (queries and predicates) |
-| | `buffer.kb`, `texture.kb` | KB (1024 bytes) created per frame: a buffer's `ByteWidth`; a texture estimated from its description, as `RESIDENCY`'s `mb` (every mip, layer and sample, uncompressed; BC by 4×4 block) |
+| | `buffer.kb`, `texture.kb` | KB (1024 bytes) created per frame: a buffer's `ByteWidth`; a texture estimated from its description, as `RESIDENCY`'s `mb` (every mip, layer and sample, uncompressed; BC by 4×4 block), except that depth formats count at Metal's size (8 bytes a texel for D24S8 and D32S8, 4 for D32, 2 for D16), where `RESIDENCY` counts them as 0 |
 | | `buffer.init`, `texture.init` | Creates per frame with initial data |
 | | `buffer.size`, `texture.size` | Creates per frame by size: `<64k`, `<1m` (64 KB to 1 MB), `<=16m` (1 to 16 MB), `>16m` |
 | | `buffer.usage` | Buffer creates per frame by usage: `default`, `immutable`, `dynamic`, `staging` |
@@ -1425,7 +1425,7 @@ a texture's `Map` is still timed on every call at scale 1.
 
 `create_line_test.cpp` (pure, #202) checks the `CREATE` line's counting: the size classes at their
 edges, the buffer usage split, the render and depth targets, and the texture bytes estimate (mip
-chains, BC blocks, 3D, layers). The kinds' calls and time must equal `PACE`'s `create` on the
+chains, BC blocks, 3D, layers, and the depth formats' bytes on the Metal formats D3D11's depth formats map to). The kinds' calls and time must equal `PACE`'s `create` on the
 presenting thread's interval and in the other threads' pool; a nested `Create*` counts once, under the
 outer call's kind and description, and a `Create*` inside another entry point counts in neither. It
 runs a second time with `DXMT_STATS=0`, where a create must read no clock and leave every counter at 0.

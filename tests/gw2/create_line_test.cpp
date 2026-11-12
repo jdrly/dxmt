@@ -1,5 +1,5 @@
 // gw2-test: pure
-// gw2-build: clang++ -std=c++20 -Wall -Wextra -DGW2_TEST_REAL_ENV -Itests/gw2/shim -Isrc/dxmt tests/gw2/create_line_test.cpp src/dxmt/dxmt_gw2_stats.cpp src/dxmt/dxmt_gw2_switches.cpp -o $OUT
+// gw2-build: clang++ -std=c++20 -Wall -Wextra -DGW2_TEST_REAL_ENV -Itests/gw2/shim -Isrc/dxmt -Isrc/util -Isrc/winemetal tests/gw2/create_line_test.cpp src/dxmt/dxmt_gw2_stats.cpp src/dxmt/dxmt_gw2_switches.cpp -o $OUT
 // gw2-run: env -u DXMT_STATS "$OUT" on
 // gw2-run: DXMT_STATS=0 "$OUT" off
 //
@@ -8,7 +8,9 @@
 // environment (GW2_TEST_REAL_ENV), so it runs twice:
 //
 // - on: the size classes at their edges, the buffer usage split, the render and depth targets, the
-//   texture bytes estimate (mip chains, BC blocks, 3D, layers). The kinds' calls and time equal PACE's
+//   texture bytes estimate (mip chains, BC blocks, 3D, layers), and the depth formats' texel bytes
+//   (gw2DepthTexelSize, src/dxmt/dxmt_format.hpp) on the Metal formats MTLQueryDXGIFormat gives D3D11's
+//   depth formats (dxmt_format.cpp needs dxgi.h, so the mapping itself isn't built here). The kinds' calls and time equal PACE's
 //   `create` on both paths, the presenting thread's interval and the other threads' pool; a nested
 //   Create* counts once, under the outer call's kind and description; a Create* inside another entry
 //   point counts in neither. A create still reads the clock twice. The line's fields and its absence
@@ -17,6 +19,7 @@
 //
 // Run: tests/gw2/run.zsh pure, or the commands above with $OUT set.
 
+#include "dxmt_format.hpp"
 #include "dxmt_gw2_stats.hpp"
 #include <windows.h>
 #include <cstdio>
@@ -121,6 +124,22 @@ pure() {
   CHECK(textureBytes(64, 64, 1, 0, 1, 4, false) == 64 * 64 * 4); // 0 layers: one
   CHECK(textureBytes(64, 64, 1, 1, 1, 0, false) == 0);           // unknown format
   CHECK(textureBytes(1, 1, 1, 1, 100, 4, false) == 32 * 4);      // a bad mip count is capped
+
+  // depth formats: MTLGetTexelSize has none, so CREATE takes gw2DepthTexelSize. The Metal formats are
+  // MTLQueryDXGIFormat's for the DXGI formats named.
+  using dxmt::gw2DepthTexelSize;
+  CHECK(gw2DepthTexelSize(WMTPixelFormatDepth32Float_Stencil8) == 8); // R24G8_TYPELESS, D24_UNORM_S8_UINT,
+                                                                       // R32G8X24_TYPELESS, D32_FLOAT_S8X24_UINT
+  CHECK(gw2DepthTexelSize(WMTPixelFormatR32X8X32) == 8);    // R24_UNORM_X8_TYPELESS, R32_FLOAT_X8X24_TYPELESS
+  CHECK(gw2DepthTexelSize(WMTPixelFormatX32G8X32) == 8);    // X24_TYPELESS_G8_UINT, X32_TYPELESS_G8X24_UINT
+  CHECK(gw2DepthTexelSize(WMTPixelFormatDepth32Float) == 4); // D32_FLOAT
+  CHECK(gw2DepthTexelSize(WMTPixelFormatDepth16Unorm) == 2); // D16_UNORM
+  CHECK(gw2DepthTexelSize(WMTPixelFormatDepth24Unorm_Stencil8) == 4);
+  CHECK(gw2DepthTexelSize(WMTPixelFormatStencil8) == 1);
+  CHECK(gw2DepthTexelSize(WMTPixelFormatRGBA8Unorm) == 0); // color formats: MTLGetTexelSize's
+  // GW2's 4K depth target (R24G8_TYPELESS): 66 MB, over 16 MB, not 0 bytes under 64 KB
+  uint64_t depth4k = textureBytes(3840, 2160, 1, 1, 1, gw2DepthTexelSize(WMTPixelFormatDepth32Float_Stencil8), false);
+  CHECK(depth4k == 3840ull * 2160 * 8 && sizeClass(depth4k) == 3);
 
   // the usage split and the targets, from calls
   CreateTotals t;

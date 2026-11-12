@@ -98,7 +98,10 @@ public:
       return;
     MTL_DXGI_FORMAT_DESC desc;
     MTLQueryDXGIFormat(GetMTLDevice(), format, desc); // on failure PixelFormat is Invalid: 0 bytes
-    uint64_t bytes = gw2::textureBytes(width, height, depth, layers, mips, MTLGetTexelSize(desc.PixelFormat),
+    uint32_t unit = MTLGetTexelSize(desc.PixelFormat);
+    if (!unit) // depth and stencil formats
+      unit = gw2DepthTexelSize(desc.PixelFormat);
+    uint64_t bytes = gw2::textureBytes(width, height, depth, layers, mips, unit,
                                        IsBlockCompressionFormat(desc.PixelFormat));
     scope.resource(bytes, usage, bind, init != nullptr);
   }
