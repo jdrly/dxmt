@@ -2,8 +2,11 @@
 # with winemetal.dll's own command (compile_commands.json, without -marm64x, so an ARM64X build shows its
 # ARM64EC half) and prints NSObject_retain's call. The call has to be <callee>(__wine_unixlib_handle,
 # ...). With <llvm-objdump> it also disassembles #NSObject_retain, the ARM64EC code, from the build's
-# unstripped winemetal.dll, which has to branch straight to #__wine_unix_call_arm64ec and make no
-# indirect call.
+# unstripped winemetal.dll, which has to make no indirect call and branch straight to an address that
+# is winecrt0's ARM64EC __wine_unix_call_arm64ec: llvm-nm names that address so, the image's CHPE code
+# map puts it in an ARM64EC range (a native function of the same name would be in an ARM64 one), and
+# the routine ends in winecrt0's br x16. llvm-nm and llvm-readobj are taken from llvm-objdump's
+# directory.
 #
 #   python3 -I unix-call.py <build dir> <callee> [<llvm-objdump>]
 import json
@@ -46,6 +49,38 @@ if objdump:
         syms = subprocess.run([objdump, "-t", dll], capture_output=True, text=True).stdout
         print("\n".join(l for l in syms.splitlines() if "NSObject_retain" in l))
         sys.exit("FAIL  no #NSObject_retain in winemetal.dll's symbol table")
-    if not re.search(r"\sbl?\s+0x[0-9a-f]+ <#__wine_unix_call_arm64ec>", body) or re.search(r"\sblr\s", body):
-        sys.exit("FAIL  #NSObject_retain doesn't branch straight to #__wine_unix_call_arm64ec")
-    print("ok    #NSObject_retain branches straight to #__wine_unix_call_arm64ec")
+    if re.search(r"\sblr\s", body):
+        sys.exit("FAIL  #NSObject_retain makes an indirect call")
+    targets = re.findall(r"\sbl?\s+0x([0-9a-f]+) <", body)
+    if len(targets) != 1:
+        sys.exit(f"FAIL  #NSObject_retain has {len(targets)} direct branches, expected the one call")
+    target = int(targets[0], 16)
+
+    # the names at that address (llvm-nm prints virtual addresses for an image)
+    tools = os.path.dirname(objdump)
+    nm = subprocess.run([os.path.join(tools, "llvm-nm"), dll], check=True, capture_output=True, text=True).stdout
+    names = sorted({m.group(2) for m in (re.match(r"([0-9a-fA-F]+) \S (\S+)$", l) for l in nm.splitlines())
+                    if m and int(m.group(1), 16) == target})
+    print(f"      the call's target {target:#x}: {names}")
+    if not {"__wine_unix_call_arm64ec", "#__wine_unix_call_arm64ec"} & set(names):
+        sys.exit("FAIL  the call's target isn't __wine_unix_call_arm64ec")
+
+    # its kind of code, from the CHPE code map (RVA ranges; the hybrid view repeats the map)
+    readobj = os.path.join(tools, "llvm-readobj")
+    headers = subprocess.run([readobj, "--file-headers", dll], check=True, capture_output=True, text=True).stdout
+    rva = target - int(re.search(r"ImageBase: (0x[0-9A-Fa-f]+)", headers).group(1), 16)
+    config = subprocess.run([readobj, "--coff-load-config", dll], check=True, capture_output=True, text=True).stdout
+    config = config.split("HybridObject")[0]
+    kinds = [k for s, e, k in re.findall(r"(0x[0-9A-Fa-f]+) - (0x[0-9A-Fa-f]+)  (\S+)", config)
+             if int(s, 16) <= rva < int(e, 16)]
+    print(f"      RVA {rva:#x} in the code map: {kinds}")
+    if kinds != ["ARM64EC"]:
+        sys.exit("FAIL  the call's target isn't ARM64EC code")
+
+    # winecrt0's routine: adrp/ldr x16 of its dispatcher pointer, then br x16
+    stub = subprocess.run([objdump, "-d", f"--start-address={target:#x}", f"--stop-address={target + 12:#x}", dll],
+                          check=True, capture_output=True, text=True).stdout
+    print("\n".join(l for l in stub.splitlines() if re.match(r"\s*[0-9a-f]+:", l)))
+    if not re.search(r"\sbr\s+x16\b", stub):
+        sys.exit("FAIL  the call's target doesn't end in winecrt0's br x16")
+    print("ok    #NSObject_retain branches straight to winecrt0's ARM64EC __wine_unix_call_arm64ec")

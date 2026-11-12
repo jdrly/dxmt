@@ -1239,7 +1239,10 @@ so only the first run after a version change builds LLVM (about 25 minutes per a
   requires the script to fail on exactly those five checks. Before that, `.github/gw2/unix-call.py`
   shows what a bridge thunk calls in each tree: the ARM64EC half has to preprocess to
   `__wine_unix_call_arm64ec`, and `#NSObject_retain`, disassembled from the unstripped
-  `winemetal.dll`, has to branch straight to `#__wine_unix_call_arm64ec` with no indirect call. The
+  `winemetal.dll`, has to make no indirect call and branch straight to winecrt0's ARM64EC routine.
+  The script checks the target's address three ways: `llvm-nm` names it `__wine_unix_call_arm64ec`,
+  the image's CHPE code map puts it in an ARM64EC range (a native function of the same name would sit
+  in an ARM64 one), and the routine ends in winecrt0's `br x16`. The
   i386 tree keeps `__wine_unix_call_dispatcher`. The engine's table has the 10 entries in the order `winemetal_unix.c` declares,
   and its window data the same first four fields (athei/wine `53def892`,
   `dlls/winemac.drv/window.c`, which asserts both). No warnings list for this job yet: llvm-mingw's clang
