@@ -6,13 +6,14 @@
 #   $MACOSX_DEPLOYMENT_TARGET. A compiler warning that .github/gw2/warnings-<arch>.txt doesn't
 #   list fails it. Wine's import libraries, winebuild and winemac.so come from 3Shain's Wine
 #   $WINE_VERSION, as in upstream's CI, since the CrossOver engine I build against locally isn't
-#   downloadable.
+#   downloadable. .github/gw2/unix-call.py shows what a bridge thunk calls (#205).
 # arm64 (#182): the build for GW2 on Mac 0.2's engine, Mach9 $MACH9_VERSION, the way Mach9 builds its
 #   DXMT: one ARM64X tree (build-arm64ec.txt, so the arm64 winemetal.so too) and one i386 tree, with
 #   llvm-mingw $LLVM_MINGW_VERSION (Mach9's pin), linked against the engine's own Wine files from its
-#   release tarball. Then .github/gw2/check-mach9.zsh compares the result with the engine's DXMT
-#   without running anything. Artifact dxmt-mach9-<commit>: aarch64-windows, i386-windows,
-#   aarch64-unix, VERSION, kept 7 days.
+#   release tarball. unix-call.py checks that the ARM64EC thunks call winecrt0's
+#   __wine_unix_call_arm64ec directly (#205). Then .github/gw2/check-mach9.zsh compares the result
+#   with the engine's DXMT and ntdll.dll without running anything. Artifact dxmt-mach9-<commit>:
+#   aarch64-windows, i386-windows, aarch64-unix, VERSION, kept 7 days.
 # tests: zsh -n for the zsh scripts and warnings.zsh's self-check, then tests/gw2/run.zsh pure,
 #   and metal on the runner's Metal device.
 # lint: actionlint for the workflows.
@@ -148,6 +149,10 @@ jobs:
           meson setup build --cross-file ${{ matrix.cross }} --buildtype release --strip \
             --prefix "$PWD/install" -Dwine_install_path="$PWD/toolchains/wine" -Ddxmt_debug=false "${llvm[@]}"
           meson compile -C build 2>&1 | tee build.log
+      - name: What a bridge thunk calls
+        run: |
+          { echo '```'; python3 -I .github/gw2/unix-call.py build __wine_unix_call_dispatcher; echo '```'; } |
+            tee -a "$GITHUB_STEP_SUMMARY"
       - name: No new warnings
         run: .github/gw2/warnings.zsh build.log .github/gw2/warnings-${{ matrix.arch }}.txt
       - name: Meson tests (gw2 suite without Metal)
@@ -199,13 +204,13 @@ jobs:
         run: sudo xcode-select -s "/Applications/Xcode_$XCODE_VERSION.app"
 
       # What the build links against and what the checks compare with: the engine's winemac.so and
-      # ntdll.so, its import libraries for both arches and its own DXMT (the tree and the
-      # winemetal.so the tree links to). Read, never run.
+      # ntdll.so, its ntdll.dll and import libraries for both arches and its own DXMT (the tree and
+      # the winemetal.so the tree links to). Read, never run.
       - name: Restore Mach9
         id: mach9
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          key: mach9-${{ env.MACH9_VERSION }}
+          key: mach9-${{ env.MACH9_VERSION }}-ntdll
           path: toolchains/mach9
       - name: Download Mach9
         if: steps.mach9.outputs.cache-hit != 'true'
@@ -216,13 +221,14 @@ jobs:
             "$MACH9_SHA256" toolchains/mach9 --strip-components 1 \
             $w/aarch64-unix/winemac.so $w/aarch64-unix/ntdll.so $w/aarch64-unix/winemetal.so $w/dxgi/dxmt \
             $w/aarch64-windows/libwinecrt0.a $w/aarch64-windows/libntdll.a $w/aarch64-windows/libdbghelp.a \
-            $w/i386-windows/libwinecrt0.a $w/i386-windows/libntdll.a $w/i386-windows/libdbghelp.a
+            $w/i386-windows/libwinecrt0.a $w/i386-windows/libntdll.a $w/i386-windows/libdbghelp.a \
+            $w/aarch64-windows/ntdll.dll $w/i386-windows/ntdll.dll
           find toolchains/mach9 | sort
       - name: Save Mach9
         if: steps.mach9.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          key: mach9-${{ env.MACH9_VERSION }}
+          key: mach9-${{ env.MACH9_VERSION }}-ntdll
           path: toolchains/mach9
 
       - name: Restore Wine
@@ -292,6 +298,16 @@ jobs:
             -Dwine_install_path=toolchains/mach9
           meson compile -C build-i386
           meson install -C build-i386 --quiet
+      - name: What a bridge thunk calls
+        run: |
+          export PATH="$PATH:$PWD/toolchains/llvm-mingw/bin"
+          # the build trees' winemetal.dll still has its symbols; meson install stripped the copies
+          {
+            echo '```'
+            python3 -I .github/gw2/unix-call.py build-arm64 __wine_unix_call_arm64ec toolchains/llvm-mingw/bin/llvm-objdump
+            python3 -I .github/gw2/unix-call.py build-i386 __wine_unix_call_dispatcher
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Stage
         run: |
           rm -f install/*/*.dll.a
@@ -313,15 +329,18 @@ jobs:
         run: .github/gw2/check-mach9.zsh dist toolchains/mach9 toolchains/llvm-mingw/bin/llvm-readobj | tee -a "$GITHUB_STEP_SUMMARY"
       - name: The checks fail on a broken copy
         run: |
-          # an export without an address in each tree, and an i386 DLL where an ARM64X one belongs
+          # an export without an address in each tree, an i386 DLL where an ARM64X one belongs, and an
+          # import from ntdll.dll that the engine's doesn't export (the name renamed in place)
           cp -R dist "$RUNNER_TEMP/broken"
           python3 -I .github/gw2/zero-export.py "$RUNNER_TEMP/broken/aarch64-windows/d3d11.dll" D3D11CreateDevice
           python3 -I .github/gw2/zero-export.py "$RUNNER_TEMP/broken/i386-windows/dxgi.dll" CreateDXGIFactory
           cp "$RUNNER_TEMP/broken/i386-windows/d3d10core.dll" "$RUNNER_TEMP/broken/aarch64-windows/d3d10core.dll"
+          perl -0777 -pi -e 's/NtQueryVirtualMemory\0/NtQueryVirtualMemorz\0/' "$RUNNER_TEMP/broken/i386-windows/winemetal.dll"
           status=0
           .github/gw2/check-mach9.zsh "$RUNNER_TEMP/broken" toolchains/mach9 toolchains/llvm-mingw/bin/llvm-readobj >"$RUNNER_TEMP/broken.txt" || status=$?
           grep FAIL "$RUNNER_TEMP/broken.txt"
-          [[ $status == 1 ]] && [[ $(grep -c '^FAIL' "$RUNNER_TEMP/broken.txt") == 4 ]]
+          [[ $status == 1 ]] && [[ $(grep -c '^FAIL' "$RUNNER_TEMP/broken.txt") == 5 ]]
+          grep -q '^FAIL  i386-windows/winemetal.dll imports from ntdll.dll' "$RUNNER_TEMP/broken.txt"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dxmt-mach9-${{ env.COMMIT }}

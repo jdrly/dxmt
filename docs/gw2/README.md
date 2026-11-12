@@ -1234,7 +1234,8 @@ so only the first run after a version change builds LLVM (about 25 minutes per a
   and message without the line, so moved code keeps its warnings, and a second warning of the same kind
   in the same file gets through. The job prints the build's whole list. When a change removes a warning,
   or has to keep a new one, that list replaces the file. x86_64 also runs the meson `gw2` suite without
-  `gw2-metal`.
+  `gw2-metal`. `.github/gw2/unix-call.py` preprocesses `winemetal_thunks.c` with the build's own command
+  and requires `NSObject_retain`'s call to go through `__wine_unix_call_dispatcher` (#205).
 - **Build arm64 (Mach9)** (#182): the build for GW2 on Mac 0.2's engine, Mach9 0.3.1, made the way
   Mach9's `bin/build-dxmt.sh` makes its own DXMT. One meson tree with `build-arm64ec.txt` builds the
   ARM64X DLLs and the arm64 `winemetal.so`, a second with `build-win32.txt` the i386 DLLs, both with
@@ -1244,9 +1245,19 @@ so only the first run after a version change builds LLVM (about 25 minutes per a
   result with the engine's DXMT, without Wine: every DLL's machine (ARM64X or i386, as the engine's) and
   builtin marker, every export of the engine's DLL of the same name in each view, `winemetal.so`'s
   architecture, macOS floor and libraries, every symbol it imports from `winemac.so` and `ntdll.so`, and
-  `macdrv_functions`. An export counts only with an address. The job then breaks a copy
-  (`.github/gw2/zero-export.py` clears two exports' addresses, and an i386 DLL takes an ARM64X one's
-  place) and requires the script to fail on exactly those four checks. The engine's table has the 10 entries in the order `winemetal_unix.c` declares,
+  `macdrv_functions`. It also compares `winemetal.dll` with the engine's `ntdll.dll`, per view: every
+  name it imports from it, and `__wine_unix_call_dispatcher`, which winecrt0 looks up at the first unix
+  call (#205). An export counts only with an address. The job then breaks a copy
+  (`.github/gw2/zero-export.py` clears two exports' addresses, an i386 DLL takes an ARM64X one's
+  place, and the i386 `winemetal.dll`'s import of `NtQueryVirtualMemory` gets another name) and
+  requires the script to fail on exactly those five checks. Before that, `.github/gw2/unix-call.py`
+  shows what a bridge thunk calls in each tree: the ARM64EC half has to preprocess to
+  `__wine_unix_call_arm64ec`, and `#NSObject_retain`, disassembled from the unstripped
+  `winemetal.dll`, has to make no indirect call and branch straight to winecrt0's ARM64EC routine.
+  The script checks the target's address three ways: `llvm-nm` names it `__wine_unix_call_arm64ec`,
+  the image's CHPE code map puts it in an ARM64EC range (a native function of the same name would sit
+  in an ARM64 one), and the routine ends in winecrt0's `br x16`. The
+  i386 tree keeps `__wine_unix_call_dispatcher`. The engine's table has the 10 entries in the order `winemetal_unix.c` declares,
   and its window data the same first four fields (athei/wine `53def892`,
   `dlls/winemac.drv/window.c`, which asserts both). No warnings list for this job yet: llvm-mingw's clang
   warns differently from GCC.
