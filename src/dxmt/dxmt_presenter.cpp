@@ -3,6 +3,7 @@
 #include "Metal.hpp"
 #include "dxmt_format.hpp"
 #include "dxmt_presenter.hpp"
+#include "dxmt_gw2_layer_set.hpp"
 #include "dxmt_gw2_lifetime.hpp"
 #include "dxmt_gw2_present.hpp"
 #include "dxmt_gw2_stats.hpp"
@@ -17,7 +18,35 @@ namespace {
 // gw2 (#156): how often Present asks the bridge for the layer's screen values, in ms (0: every Present)
 sw::Switch<uint32_t> kLayerPropsPollMs{"DXMT_LAYER_PROPS_POLL_MS", 250, sw::legacy::strtoul32};
 std::atomic<uint32_t> g_alive = 0; // gw2 (#185)
+// gw2 (#226): DXMT_MTL4_LAYER_SET (dxmt_gw2_layer_set.hpp), and the places on the queue that
+// presenters hold with `queue`
+sw::Switch<std::string> kLayerSet{gw2::kLayerSetSwitch, gw2::kLayerSetDefault, gw2::layerSetValue};
+std::atomic<uint32_t> g_queue_sets = 0;
+std::atomic_flag g_queue_sets_full_warned = ATOMIC_FLAG_INIT;
+
+// one more place on the queue, unless kLayerSetQueuePlaces are taken
+bool
+claimQueuePlace() {
+  uint32_t held = g_queue_sets.load(std::memory_order_relaxed);
+  do {
+    if (held >= gw2::kLayerSetQueuePlaces)
+      return false;
+  } while (!g_queue_sets.compare_exchange_weak(held, held + 1, std::memory_order_relaxed));
+  return true;
+}
 } // namespace
+
+gw2::LayerSet
+gw2::mtl4LayerSet() {
+  static const LayerSet value = [] {
+    auto raw = kLayerSet.requested();
+    auto text = kLayerSet.parse(raw);
+    if (!raw.empty() && raw != text)
+      Logger::warn(str::format("Metal 4: DXMT_MTL4_LAYER_SET=", raw, " is neither buffer nor queue; using buffer"));
+    return text == "queue" ? LayerSet::Queue : LayerSet::Buffer;
+  }();
+  return value;
+}
 
 Presenter::Presenter(WMT::Device device, WMT::MetalLayer layer, InternalCommandLibrary &lib, float scale_factor, uint8_t sample_count) :
     device_(device),
@@ -52,6 +81,12 @@ Presenter::Presenter(WMT::Device device, WMT::MetalLayer layer, InternalCommandL
 }
 
 Presenter::~Presenter() {
+  // gw2 (#226): DXMT_MTL4_LAYER_SET=queue. The last reference goes only after every chunk that
+  // presented with this presenter retired (#185), so no committed command buffer still needs the set
+  if (mtl4_set_queue_) {
+    mtl4_set_queue_.removeResidencySet(WMT::ResidencySet{mtl4_queue_set_.handle});
+    g_queue_sets.fetch_sub(1, std::memory_order_relaxed);
+  }
   auto alive = g_alive.fetch_sub(1, std::memory_order_relaxed) - 1;
   Logger::info(str::format("Presenter: freed, ", alive, " alive"));
 }
@@ -70,6 +105,11 @@ Presenter::decRef() {
 uint32_t
 Presenter::alive() {
   return g_alive.load(std::memory_order_relaxed);
+}
+
+uint32_t
+Presenter::layerSetsOnQueue() {
+  return g_queue_sets.load(std::memory_order_relaxed);
 }
 
 bool
@@ -269,6 +309,20 @@ Presenter::encodeCommandsMetal4(
     mtl4_layer_set_ = layer_.residencySet();
     if (!mtl4_layer_set_)
       WARN("Metal 4: the layer has no residency set; drawables may not be resident");
+    else if (gw2::mtl4LayerSet() == gw2::LayerSet::Queue) {
+      // gw2 (#226): as before #184, on the queue for the presenter's life. The set is retained while
+      // it is there: the swap chain lets go of the layer before the presenter
+      if (claimQueuePlace()) {
+        mtl4_queue_set_ = mtl4_layer_set_;
+        mtl4_set_queue_ = encoding.queue().queue();
+        mtl4_set_queue_.addResidencySet(WMT::ResidencySet{mtl4_queue_set_.handle});
+      } else if (!g_queue_sets_full_warned.test_and_set()) {
+        Logger::warn(str::format(
+            "Metal 4: ", gw2::kLayerSetQueuePlaces, " layers' residency sets are on the queue already "
+            "(DXMT_MTL4_LAYER_SET=queue); the present passes of later swap chains use their layer's set"
+        ));
+      }
+    }
   }
   // gw2 (#3): nextDrawable alone for STATS2, only with DXMT_STATS on
   bool stats = gw2::statsEnabled();
@@ -287,8 +341,8 @@ Presenter::encodeCommandsMetal4(
   info.colors[0].texture = drawable.texture();
   // gw2 (#184): the layer's set on the present pass's command buffer (the only one that touches the
   // drawable), not on the queue: a queue takes at most 32 sets, and a program may make any number of
-  // swap chains
-  if (mtl4_layer_set_)
+  // swap chains. gw2 (#226): not with DXMT_MTL4_LAYER_SET=queue and a place on the queue
+  if (mtl4_layer_set_ && !mtl4_set_queue_)
     encoding.open().cmdbuf.useResidencySet(WMT::ResidencySet{mtl4_layer_set_.handle});
   auto encoder = encoding.renderCommandEncoder(info, WMT_MTL4_NO_ATTACHMENT_RESIDENCY);
   wait_fences(encoder);

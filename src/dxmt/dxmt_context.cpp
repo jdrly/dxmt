@@ -1488,8 +1488,12 @@ ArgumentEncodingContext::flushCommandsImpl(CommandBuffer &cmdbuf, uint64_t seqId
         bool stats = gw2::statsEnabled();
         if (stats)
           currentFrameStatistics().next_drawable_interval += data->presenter->lastNextDrawable();
-        if (stats)
+        if (stats) {
           gw2::presentTrack(drawable.handle, frame_id_);
+          // gw2 (#224): the present pass is in the open command buffer, the chunk's last one begun. With
+          // DXMT_MTL4_PRESENT=mtl3 it is in the Metal 3 buffer, whose record follows every commit (#227)
+          readbacks.present_commit = mtl3 ? gw2::kPresentLastCommit : uint32_t(cmdbuf.segments().size() - 1);
+        }
         if (gw2::presentPaceOn()) // gw2 (#157): pace answers this block
           gw2::presentPaceBlocked(
               std::chrono::duration_cast<std::chrono::nanoseconds>(data->presenter->lastNextDrawable()).count(), frame_id_
@@ -1563,9 +1567,12 @@ ArgumentEncodingContext::flushCommandsImpl(CommandBuffer &cmdbuf, uint64_t seqId
         bool stats = gw2::statsEnabled();
         if (stats)
           currentFrameStatistics().next_drawable_interval += data->presenter->lastNextDrawable();
-        // gw2 (#7): when the drawable reaches the screen, for the PRESENT section
-        if (stats)
+        // gw2 (#7): when the drawable reaches the screen, for the PRESENT section. gw2 (#224): the
+        // present pass is in the chunk's last command buffer
+        if (stats) {
           gw2::presentTrack(drawable.handle, frame_id_);
+          readbacks.present_commit = gw2::kPresentLastCommit;
+        }
         if (gw2::presentPaceOn()) // gw2 (#157): pace answers this block
           gw2::presentPaceBlocked(
               std::chrono::duration_cast<std::chrono::nanoseconds>(data->presenter->lastNextDrawable()).count(), frame_id_

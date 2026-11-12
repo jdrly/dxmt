@@ -2,8 +2,8 @@
 
 // gw2 (#7): when frames reach the screen, for the PRESENT section. A presented handler on each
 // drawable (unix call 148, MTLDrawable_trackPresented) records the drawable's presentedTime and the
-// time its present was encoded; the encode thread collects the finished records at each present.
-// Off with DXMT_STATS=0, like all of the fork's measuring.
+// time its present was encoded, and (gw2 #224) the drawable's surface; the encode thread collects
+// the finished records at each present. Off with DXMT_STATS=0, like all of the fork's measuring.
 
 #include <cstdint>
 #include <string>
@@ -16,6 +16,11 @@ void presentTrack(uint64_t drawable, uint64_t frame);
 
 // Finish thread: a command buffer of `frame` ended on the GPU at gpu_end_ns (GPUEndTime, ns).
 void presentGpuEnd(uint64_t frame, uint64_t gpu_end_ns);
+
+// gw2 (#224), finish thread: `frame`'s present pass ran on the GPU from gpu_start_ns to gpu_end_ns
+// (0: unknown), for drawwait and early. Metal 3 and DXMT_MTL4_PRESENT=mtl3: the present buffer;
+// Metal 4: the pass's commit.
+void presentPassGpu(uint64_t frame, uint64_t gpu_start_ns, uint64_t gpu_end_ns);
 
 // Render thread, at each Present: the refresh period and how many refreshes a frame is meant to
 // stay on screen (1 = every vsync, 2 = a 30 fps cap on 60 Hz); 0 = no vsync grid (display sync

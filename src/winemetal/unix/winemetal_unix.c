@@ -1355,16 +1355,43 @@ _MTLCommandBuffer_presentDrawableWithDeadline(void *obj) {
 
 /* gw2 (#7): presentation times for the PRESENT statistics section. Presented handlers run on a
    Metal/Core Animation thread and push into this ring; the encode thread drains it with a trylock,
-   so it never waits for a handler. The handler block captures two integers and nothing else (Metal
-   copies it), so nothing it refers to can go away before it runs. */
+   so it never waits for a handler. The handler block captures integers and nothing else (Metal
+   copies it), so nothing it refers to can go away before it runs. gw2 (#224): the surface's id and
+   in-use flag are read before the handler is added, on the encode thread. */
 #define PRESENTED_RING 64
 static os_unfair_lock g_presented_lock = OS_UNFAIR_LOCK_INIT;
 static struct WMTPresentedRecord g_presented_ring[PRESENTED_RING];
 static uint32_t g_presented_head, g_presented_count;
 static uint64_t g_presented_lost;
 
+/* gw2 (#224): IOSurfaceGetID and IOSurfaceIsInUse, looked up once in the process (Metal has loaded
+   IOSurface.framework), so the unix side and the tests that link it need no framework more. Null if
+   absent: the record then says surface 0, not in use. */
+static uint32_t (*pfn_IOSurfaceGetID)(IOSurfaceRef);
+static Boolean (*pfn_IOSurfaceIsInUse)(IOSurfaceRef);
+
 static void
-presented_push(uint64_t frame, uint64_t encode_ns, uint64_t presented_ns) {
+presented_surface(id<MTLDrawable> drawable, uint64_t *surface, uint64_t *in_use) {
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    pfn_IOSurfaceGetID = dlsym(RTLD_DEFAULT, "IOSurfaceGetID");
+    pfn_IOSurfaceIsInUse = dlsym(RTLD_DEFAULT, "IOSurfaceIsInUse");
+  });
+  *surface = 0;
+  *in_use = 0;
+  if (![drawable respondsToSelector:@selector(texture)])
+    return;
+  IOSurfaceRef iosurface = ((id<CAMetalDrawable>)drawable).texture.iosurface;
+  if (!iosurface)
+    return;
+  if (pfn_IOSurfaceGetID)
+    *surface = pfn_IOSurfaceGetID(iosurface);
+  if (pfn_IOSurfaceIsInUse)
+    *in_use = pfn_IOSurfaceIsInUse(iosurface) ? 1 : 0;
+}
+
+static void
+presented_push(uint64_t frame, uint64_t encode_ns, uint64_t presented_ns, uint64_t surface, uint64_t in_use) {
   os_unfair_lock_lock(&g_presented_lock);
   if (g_presented_count == PRESENTED_RING) {
     /* full: drop the oldest */
@@ -1376,6 +1403,8 @@ presented_push(uint64_t frame, uint64_t encode_ns, uint64_t presented_ns) {
   r->frame = frame;
   r->encode_ns = encode_ns;
   r->presented_ns = presented_ns;
+  r->surface = surface;
+  r->in_use = in_use;
   g_presented_count++;
   os_unfair_lock_unlock(&g_presented_lock);
 }
@@ -1386,9 +1415,11 @@ _MTLDrawable_trackPresented(void *obj) {
   if (params->drawable) {
     uint64_t frame = params->frame;
     uint64_t encode_ns = (uint64_t)(CACurrentMediaTime() * 1e9);
+    uint64_t surface, in_use;
+    presented_surface((id<MTLDrawable>)params->drawable, &surface, &in_use);
     [(id<MTLDrawable>)params->drawable addPresentedHandler:^(id<MTLDrawable> drawable) {
       CFTimeInterval t = drawable.presentedTime;
-      presented_push(frame, encode_ns, t > 0 ? (uint64_t)(t * 1e9) : 0);
+      presented_push(frame, encode_ns, t > 0 ? (uint64_t)(t * 1e9) : 0, surface, in_use);
     }];
   }
   params->count = 0;

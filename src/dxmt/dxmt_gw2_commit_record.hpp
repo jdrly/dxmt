@@ -108,6 +108,24 @@ recordMetal4Commit(const Commit &commit, uint32_t ordinal, Record &out) {
   out.logs.clear();
 }
 
+// gw2 (#224): which of a chunk's records holds its present pass, for PRESENT's drawwait and early.
+// The encode thread notes it with DXMT_STATS: kPresentLastCommit on Metal 3 (the present buffer is the
+// chunk's last) and with DXMT_MTL4_PRESENT=mtl3 (the Metal 3 buffer's record follows every commit,
+// #227), the pass's commit ordinal on Metal 4 (an empty commit for timestamps may follow it).
+constexpr uint32_t kNoPresentCommit = UINT32_MAX;
+constexpr uint32_t kPresentLastCommit = UINT32_MAX - 1;
+
+// The record `present_commit` names, or null (none noted, or past the chunk's records)
+template <class Record>
+const Record *
+presentPassRecord(std::span<const Record> records, uint32_t present_commit) {
+  if (records.empty() || present_commit == kNoPresentCommit)
+    return nullptr;
+  if (present_commit == kPresentLastCommit)
+    return &records.back();
+  return present_commit < records.size() ? &records[present_commit] : nullptr;
+}
+
 // gw2 (#10, #32): whether a split buffer's GPU error gets its line: the first 8, then at most one a
 // second, each with the count of those not logged since the last line (a GPU fault tends to repeat
 // every frame). One per command queue.
