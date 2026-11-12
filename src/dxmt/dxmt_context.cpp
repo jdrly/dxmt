@@ -1448,12 +1448,21 @@ ArgumentEncodingContext::flushCommandsImpl(CommandBuffer &cmdbuf, uint64_t seqId
         // the Metal 4 queue's later commits run after the buffer. They replace the pass's fences, which
         // belong to the Metal 4 queue and aren't encoded. The layer's residency set isn't named: Metal 3
         // keeps the drawable resident.
-        const bool mtl3 = cmdbuf.queue().metal3Present();
+        bool mtl3 = cmdbuf.queue().metal3Present();
         WMT::CommandBuffer mtl3_present{};
         uint64_t mtl3_value = 0;
         if (mtl3) {
           mtl3_present = queue_.CreateCommandBuffer();
-          mtl3_value = cmdbuf.beginMetal3Present(mtl3_present); // commits the frame's work first
+          if (mtl3_present.handle) {
+            mtl3_value = cmdbuf.beginMetal3Present(mtl3_present); // commits the frame's work first
+          } else {
+            // no Metal 3 buffer: nothing waits for `shown`, and this frame presents the Metal 4 way
+            mtl3 = false;
+            static std::atomic<bool> s_logged{false};
+            if (!s_logged.exchange(true, std::memory_order_relaxed))
+              ERR("Metal 4: no Metal 3 command buffer for a present; it presents the Metal 4 way "
+                  "(DXMT_MTL4_PRESENT=mtl3; logged once)");
+          }
         }
         auto t0 = clock::now();
         auto drawable =

@@ -8,8 +8,7 @@
 // gw2-build:   clang++ -std=c++20 -fobjc-arc -Wall -arch $arch -mmacosx-version-min=26.0 -DDXMT_PAGE_SIZE=4096 -Itests/gw2/shim -Isrc/winemetal -Isrc/dxmt -Isrc/util -Iinclude tests/gw2/presenter_layer_set_test.mm src/dxmt/dxmt_presenter.cpp src/dxmt/dxmt_gw2_switches.cpp src/dxmt/dxmt_gw2_mtl4_queue.cpp src/dxmt/dxmt_gw2_mtl4_encoding.cpp $T/thunks_$arch.o $T/u_*_$arch.o $T/airconv_absent_$arch.o -framework Metal -framework MetalFX -framework QuartzCore -framework Foundation -framework CoreGraphics -framework ColorSync -framework Cocoa -lsqlite3 -o ${OUT}_$arch
 // gw2-build:   clang++ -std=c++20 -fobjc-arc -Wall -arch $arch -mmacosx-version-min=26.0 -DDXMT_PAGE_SIZE=4096 -DDXMT_GW2_LIFETIME_CHECK=1 -DGW2_TEST_REAL_ENV=1 -Itests/gw2/shim -Isrc/winemetal -Isrc/dxmt -Isrc/util -Iinclude tests/gw2/presenter_layer_set_test.mm src/dxmt/dxmt_presenter.cpp src/dxmt/dxmt_gw2_mtl4_queue.cpp src/dxmt/dxmt_gw2_mtl4_encoding.cpp src/dxmt/dxmt_gw2_lifetime.cpp src/dxmt/dxmt_gw2_switches.cpp $T/thunks_$arch.o $T/u_*_$arch.o $T/airconv_absent_$arch.o -framework Metal -framework MetalFX -framework QuartzCore -framework Foundation -framework CoreGraphics -framework ColorSync -framework Cocoa -lsqlite3 -o ${OUT}_check_$arch
 // gw2-build: done
-// gw2-run: ${OUT}_x86_64
-// gw2-run: MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 ${OUT}_arm64
+// gw2-run: for arch in x86_64 arm64; do ${OUT}_$arch; MTL_DEBUG_LAYER=1 ${OUT}_$arch; MTL_SHADER_VALIDATION=1 ${OUT}_$arch; done
 // gw2-run: for arch in x86_64 arm64; do for free in 0 1; do DXMT_LIFETIME_CHECK=1 DXMT_PRESENTER_FREE=$free ${OUT}_check_$arch; done; done
 //
 // gw2 (#184): a Metal 4 queue takes at most 32 residency sets. The presenter used to add its layer's
@@ -367,12 +366,13 @@ phases(Fixture &fx, bool free) {
   CHECK(left == (free ? 0 : kSwapChains), "%s: %u presenters left alive", mode, left);
 }
 
-// gw2 (#227): frame i's back buffer colour, BGRA8Unorm; neighbours differ in red
+// gw2 (#227): frame i's back buffer colour, BGRA8Unorm. Red cycles through three values 100 apart, so
+// a frame and the two after it (the chunks in flight) differ by far more than sameColour's tolerance
 static void
 colour(uint32_t i, uint8_t (&bgra)[4]) {
   bgra[0] = 160;
-  bgra[1] = uint8_t(32 + 64 * (i >> 8));
-  bgra[2] = uint8_t(i & 0xff);
+  bgra[1] = uint8_t(8 + 2 * ((i / 3) % 120));
+  bgra[2] = uint8_t(20 + 100 * (i % 3));
   bgra[3] = 255;
 }
 
@@ -480,9 +480,13 @@ colours(Fixture &fx, bool split) {
   uint32_t wrong = 0, next = 0;
   for (uint32_t i = 0; i < readbacks.size(); i++) {
     auto *pixels = static_cast<const uint8_t *>(readbacks[i].contents);
-    uint8_t own[4], following[4];
+    uint8_t own[4], following[4], after[4];
     colour(i, own);
     colour(i + 1, following);
+    colour(i + 2, after);
+    // the check itself: a drawable holding a later frame's colour must fail it
+    CHECK(!sameColour(following, own) && !sameColour(after, own), "%s: frame %u's colour matches a later frame's",
+          mode, i);
     uint32_t bad = 0, as_next = 0;
     for (uint32_t p = 0; p < kSize * kSize; p++) {
       if (!sameColour(pixels + p * 4, own)) {
