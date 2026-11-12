@@ -1270,8 +1270,9 @@ so only the first run after a version change builds LLVM (about 25 minutes per a
   sections, not only the code: the EC view's dynamic relocations, which patch instructions, sit in a
   data section. On the broken copy above the script now fails on seven checks: the five, and this one
   for the two ARM64X DLLs that no longer match their copies. A second copy with one changed byte in `d3d11.dll`'s `.text` has to fail
-  on that check alone. Last, `.github/gw2/symbolize.zsh` has to name `D3D11CreateDevice` at that
-  export's RVA in both views of the shipped `d3d11.dll`.
+  on that check alone. Last, `.github/gw2/symbolize.zsh` has to name `D3D11CreateDevice`, with its
+  source line, at the ARM64 view's export and at the ARM64EC function `#D3D11CreateDevice`. The EC
+  view's export points at lld's x64 export thunk (`EXP+#...`, in `.hexpthk`), which has no source.
 - **Native tests**: `zsh -n` on the zsh scripts and a self-check of `.github/gw2/warnings.zsh`, then
   `tests/gw2/run.zsh pure` and `metal`. The zsh checks run here because macOS has zsh, so they install
   nothing (#174). The runner's GPU is an Apple Paravirtual device
@@ -1325,7 +1326,9 @@ DLLs. To name them:
    directory.
 2. Run `vmmap <pid>` while the game runs. The DLL's base is the start of the first region mapped from
    its file (`.../aarch64-windows/d3d11.dll`). For `winemetal.so` it is the start of its `__TEXT`.
-3. The RVA is the sampled address minus that base.
+3. The RVA is the sampled address minus that base. An address in `.hexpthk` is one of lld's x64
+   export thunks, which the game's x64 code calls on its way into an ARM64EC function. The symbolizer
+   gives it the nearest symbol's name and no source line.
 4. `.github/gw2/symbolize.zsh <symbols dir> d3d11.dll 0x<rva>...` prints each RVA's function and
    source line, and the functions inlined there. It runs `llvm-symbolizer` from `$LLVM_SYMBOLIZER` or
    `PATH` (llvm-mingw has one).

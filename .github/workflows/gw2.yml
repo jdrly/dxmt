@@ -372,15 +372,20 @@ jobs:
           grep -q "^FAIL  symbols: d3d11.dll's sections differ" "$RUNNER_TEMP/code.txt"
       - name: The symbols name D3D11CreateDevice
         run: |
-          # its RVA in each view of the shipped d3d11.dll, which the symbols must name as that export
-          # read -a, not mapfile: the image's /bin/bash may be 3.2
-          read -r -a rvas <<<"$(toolchains/llvm-mingw/bin/llvm-readobj --coff-exports dist/aarch64-windows/d3d11.dll |
-            awk '$1 == "Name:" { n = $2 } $1 == "RVA:" && n == "D3D11CreateDevice" { printf "%s ", $2 }')"
-          echo "D3D11CreateDevice: ${rvas[*]}"
-          (( ${#rvas[@]} > 0 ))
-          LLVM_SYMBOLIZER=toolchains/llvm-mingw/bin/llvm-symbolizer \
-            .github/gw2/symbolize.zsh symbols d3d11.dll "${rvas[@]}" | tee "$RUNNER_TEMP/symbolized.txt"
-          [[ $(grep -c -E '^0x[0-9A-Fa-f]+: #?D3D11CreateDevice( at |$)' "$RUNNER_TEMP/symbolized.txt") == "${#rvas[@]}" ]]
+          # the ARM64 view's export, and the ARM64EC function #D3D11CreateDevice. The EC view's export
+          # points at lld's x64 export thunk (EXP+#..., in .hexpthk), which has no source of its own.
+          bin=toolchains/llvm-mingw/bin dll=dist/aarch64-windows/d3d11.dll
+          native=$("$bin/llvm-readobj" --coff-exports "$dll" |
+            awk '/^HybridObject/ { exit } $1 == "Name:" { n = $2 } $1 == "RVA:" && n == "D3D11CreateDevice" { print $2 }')
+          base=$("$bin/llvm-readobj" --file-headers "$dll" | awk '$1 == "ImageBase:" { print $2; exit }')
+          # llvm-nm prints an image's virtual addresses
+          ec=$("$bin/llvm-nm" symbols/aarch64-windows/d3d11.dll | awk '$3 == "#D3D11CreateDevice" { print "0x" $1; exit }')
+          [[ -n $native && -n $base && -n $ec ]]
+          ec=$(printf '0x%X' $((ec - base)))
+          echo "D3D11CreateDevice: ARM64 export $native, ARM64EC function $ec"
+          LLVM_SYMBOLIZER=$bin/llvm-symbolizer .github/gw2/symbolize.zsh symbols d3d11.dll "$native" "$ec" |
+            tee "$RUNNER_TEMP/symbolized.txt"
+          [[ $(grep -c -E '^0x[0-9A-Fa-f]+: #?D3D11CreateDevice at ' "$RUNNER_TEMP/symbolized.txt") == 2 ]]
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dxmt-arm64-${{ env.COMMIT }}
