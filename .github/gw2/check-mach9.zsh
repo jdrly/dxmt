@@ -12,6 +12,8 @@
 #   ARM64EC view, so a game's x64 process loads its ARM64EC half natively) or i386, and Wine's
 #   builtin marker
 # - every export of the engine's DLL, in each view of an ARM64X image, is exported by mine
+# - every name winemetal.dll imports from ntdll.dll is exported by the engine's ntdll.dll in the same
+#   view, and so is __wine_unix_call_dispatcher, which winecrt0 looks up at the first unix call (#205)
 # - winemetal.so is an arm64-only dylib, no newer macOS than the engine's own needs, and loads only
 #   the system's libraries and @rpath/winemac.so and @rpath/ntdll.so
 # - every symbol it imports from winemac.so and ntdll.so is exported by the engine's files, and so
@@ -46,6 +48,15 @@ pe_exports() {
          $1 == "RVA:" && name != "" && $2 !~ /^0x0+$/ { print (view ? view : "native"), name; name = "" }' |
     sort -u
 }
+# "<view> <name>" for every name $1 imports from the DLL $2 (lower case). llvm-readobj prints
+# "Symbol: <name> (<hint>)" for each, after the import's Name.
+pe_imports() {
+  "$readobj" --coff-imports "$1" |
+    awk -v dll="$2" '/^HybridObject/ { view = "ec" }
+         $1 == "Name:" { from = tolower($2) }
+         $1 == "Symbol:" && from == dll && NF > 2 { print (view ? view : "native"), $2 }' |
+    sort -u
+}
 
 for tree in aarch64-windows i386-windows; do
   for dll in $dlls; do
@@ -75,6 +86,30 @@ for tree in aarch64-windows i386-windows; do
       fail "$tree/$dll.dll lacks exports the engine's has:"$'\n'"      ${(pj:\n      :)${(f)missing}}"
     fi
   done
+
+  # winemetal.dll's unix call setup (winecrt0) and its few CRT functions come from ntdll.dll
+  mine=$mine_dxmt/$tree/winemetal.dll ntdll=$engine/lib/wine/$tree/ntdll.dll
+  if [[ ! -f $ntdll ]]; then
+    fail "the engine has no $tree/ntdll.dll to compare with"
+  elif [[ -f $mine ]]; then
+    imports=$(pe_imports "$mine" ntdll.dll) ntdll_exports=$(pe_exports "$ntdll")
+    views=(${(u)${${(f)imports}%% *}})
+    absent=$(comm -23 <(print -r -- "$imports") <(print -r -- "$ntdll_exports"))
+    if [[ -z $imports ]]; then
+      fail "$tree/winemetal.dll imports nothing from ntdll.dll"
+    elif [[ -n $absent ]]; then
+      fail "$tree/winemetal.dll imports from ntdll.dll what the engine's doesn't export:"$'\n'"      ${(pj:\n      :)${(f)absent}}"
+    else
+      ok "$tree/winemetal.dll imports ${#${(f)imports}} names from ntdll.dll (views: $views), all exported by the engine's"
+    fi
+    lookup=(${^views}" __wine_unix_call_dispatcher")
+    if strings -a "$mine" | grep -x __wine_unix_call_dispatcher >/dev/null && (( ${#views} )) &&
+      [[ -z $(comm -23 <(print -rl -- $lookup | sort) <(print -r -- "$ntdll_exports")) ]]; then
+      ok "$tree/winemetal.dll looks up __wine_unix_call_dispatcher, and the engine's ntdll.dll exports it (views: $views)"
+    else
+      fail "__wine_unix_call_dispatcher: not looked up by $tree/winemetal.dll, or not exported by the engine's ntdll.dll in each of its views"
+    fi
+  fi
 done
 
 # the engine's tree links its winemetal.so to the one in lib/wine/aarch64-unix

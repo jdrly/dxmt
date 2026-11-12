@@ -309,8 +309,19 @@ extern NTSTATUS(WINAPI *__wine_unix_call_dispatcher)(unixlib_handle_t,
                                                      unsigned int, void *);
 extern NTSTATUS WINAPI __wine_init_unix_call(void);
 
+/* gw2 (#205): as in Wine's own header, ARM64EC code calls winecrt0's __wine_unix_call_arm64ec
+   directly. A call through the pointer is an indirect call, and in ARM64EC code each one first runs
+   Wine's arm64x_check_call. Every other target, the ARM64X image's native half among them, keeps
+   the pointer. */
+#ifdef __arm64ec__
+NTSTATUS __wine_unix_call_arm64ec(unixlib_handle_t handle, unsigned int code,
+                                  void *args);
+#define WINE_UNIX_CALL(code, args)                                             \
+  __wine_unix_call_arm64ec(__wine_unixlib_handle, (code), (args))
+#else
 #define WINE_UNIX_CALL(code, args)                                             \
   __wine_unix_call_dispatcher(__wine_unixlib_handle, (code), (args))
+#endif
 
 #endif /* WINE_UNIX_LIB */
 
