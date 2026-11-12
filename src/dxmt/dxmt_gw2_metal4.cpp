@@ -1,5 +1,6 @@
 #include "dxmt_gw2_metal4.hpp"
 #include "dxmt_gw2_lifetime.hpp"
+#include "dxmt_gw2_present.hpp"
 #include "dxmt_gw2_residency.hpp"
 #include "dxmt_gw2_switches.hpp"
 #include "log/log.hpp"
@@ -42,6 +43,8 @@ sw::Switch<bool> kMetalfxSpatialSwapchain{
 };
 // gw2 (#154)
 sw::Switch<bool> kMtl4TimestampReuse{"DXMT_MTL4_TIMESTAMP_REUSE", false, sw::legacy::exactlyOne};
+// gw2 (#227): `mtl4` (the default) or `mtl3`
+sw::Switch<std::string> kMtl4Present{"DXMT_MTL4_PRESENT", "mtl4", mtl4PresentGrammar};
 } // namespace
 
 bool
@@ -52,6 +55,12 @@ metalfxSpatialSwapchain() {
 bool
 mtl4TimestampReuse() {
   static const bool on = kMtl4TimestampReuse();
+  return on;
+}
+
+bool
+mtl4PresentMetal3() {
+  static const bool on = kMtl4Present() == "mtl3";
   return on;
 }
 

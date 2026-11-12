@@ -6,6 +6,7 @@
 // Off with DXMT_STATS=0, like all of the fork's measuring.
 
 #include <cstdint>
+#include <string>
 
 namespace dxmt::gw2 {
 
@@ -30,6 +31,13 @@ enum class PresentQueue : uint8_t { Default, Two, Pace };
 PresentQueue presentQueue();
 // pace asked for and DXMT_STATS on: the encode thread counts skips per frame and reports its blocks
 bool presentPaceOn();
+
+// gw2 (#227): DXMT_MTL4_PRESENT's grammar: exactly `mtl3` presents through a Metal 3 command buffer on a
+// Metal 4 device; anything else, unset included, is the fallback, `mtl4` (today's Metal 4 present).
+inline std::string
+mtl4PresentGrammar(const std::string &raw, const std::string &fallback) {
+  return raw == "mtl3" ? raw : fallback;
+}
 
 // Encode thread, with presentPaceOn(): how long the nextDrawable of present `seq` blocked.
 void presentPaceBlocked(int64_t ns, uint64_t seq);

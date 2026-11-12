@@ -15,6 +15,7 @@
 //     src/dxmt/dxmt_gw2_switches.cpp -o /tmp/switches_test && /tmp/switches_test
 
 #include "dxmt_gw2_switches.hpp"
+#include "dxmt_gw2_present.hpp"
 #include <climits>
 #include <cstdio>
 #include <format>
@@ -620,8 +621,32 @@ testStartupLine() {
   CHECK(line.starts_with("DXMT_STATS=1 DXMT_HITCH_MS=50 "));
 }
 
+// gw2 (#227): DXMT_MTL4_PRESENT, declared as dxmt_gw2_metal4.cpp declares it, with its grammar from
+// dxmt_gw2_present.hpp: exactly `mtl3`, anything else `mtl4`; on the startup line by name
+static void
+testMtl4Present() {
+  Env env;
+  Migrated now(env);
+  sw::Switch<std::string> present{"DXMT_MTL4_PRESENT", "mtl4", gw2::mtl4PresentGrammar, sw::Line::Listed,
+                                  now.registry};
+  CHECK_EQ(present(), std::string("mtl4"), "unset");
+  for (const char *other : {"", "mtl4", "MTL3", "mtl3 ", " mtl3", "mtl", "3", "1", "metal3", "mtl33"}) {
+    env.vars["DXMT_MTL4_PRESENT"] = other;
+    CHECK_EQ(present(), std::string("mtl4"), std::string("\"") + other + "\"");
+  }
+  env.vars["DXMT_MTL4_PRESENT"] = "mtl3";
+  CHECK_EQ(present(), std::string("mtl3"), "mtl3");
+  CHECK_EQ(*now.registry.effective("DXMT_MTL4_PRESENT"), std::string("mtl3"), "line value");
+  LineValues defaults;
+  auto line = sw::startupLine(now.registry, generatedFields(defaults), generatedTail(defaults));
+  CHECK(line.find(" DXMT_MTL4_PRESENT=mtl3 ") != std::string::npos);
+  env.vars.erase("DXMT_MTL4_PRESENT");
+  CHECK_EQ(*now.registry.effective("DXMT_MTL4_PRESENT"), std::string("mtl4"), "line value, unset");
+}
+
 int
 main() {
+  testMtl4Present();
   testMigratedGrammars();
   testReadSequences();
   testRequestedVsEffective();

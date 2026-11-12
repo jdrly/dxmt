@@ -1441,16 +1441,48 @@ ArgumentEncodingContext::flushCommandsImpl(CommandBuffer &cmdbuf, uint64_t seqId
           cmdbuf.commitOpen(); // timestamps after this point read the present's buffer (segments)
           currentFrameStatistics().present_split_count++;
         }
+        // gw2 (#227): DXMT_MTL4_PRESENT=mtl3: Metal 3's present on this Metal 4 device. The frame's work
+        // stays on the Metal 4 queue; the pass, the present call and the wait for the drawable are Metal
+        // 3's, in a command buffer of the command queue's MTLCommandQueue. Two shared events order the
+        // queues (Mtl4Encoding::beginMetal3Present): the buffer runs after every commit before it, and
+        // the Metal 4 queue's later commits run after the buffer. They replace the pass's fences, which
+        // belong to the Metal 4 queue and aren't encoded. The layer's residency set isn't named: Metal 3
+        // keeps the drawable resident.
+        bool mtl3 = cmdbuf.queue().metal3Present();
+        WMT::CommandBuffer mtl3_present{};
+        uint64_t mtl3_value = 0;
+        if (mtl3) {
+          mtl3_present = queue_.CreateCommandBuffer();
+          if (mtl3_present.handle) {
+            mtl3_value = cmdbuf.beginMetal3Present(mtl3_present); // commits the frame's work first
+          } else {
+            // no Metal 3 buffer: nothing waits for `shown`, and this frame presents the Metal 4 way
+            mtl3 = false;
+            static std::atomic<bool> s_logged{false};
+            if (!s_logged.exchange(true, std::memory_order_relaxed))
+              ERR("Metal 4: no Metal 3 command buffer for a present; it presents the Metal 4 way "
+                  "(DXMT_MTL4_PRESENT=mtl3; logged once)");
+          }
+        }
         auto t0 = clock::now();
-        auto drawable = data->presenter->encodeCommandsMetal4(
-            cmdbuf, data->backbuffer, data->metadata,
-            [&](WMT::MTL4RenderCommandEncoder encoder) {
-              data->fence_wait.forEach([&](auto id) { encoder.waitForFence(fence_pool_[id], WMTRenderStageFragment); });
-            },
-            [&](WMT::MTL4RenderCommandEncoder encoder) {
-              data->fence_update.forEach([&](auto id) { encoder.updateFence(fence_pool_[id], WMTRenderStageFragment); });
-            }
-        );
+        auto drawable =
+            mtl3 ? data->presenter->encodeCommands(
+                       mtl3_present, data->backbuffer, data->metadata, [](WMT::RenderCommandEncoder) {},
+                       [](WMT::RenderCommandEncoder) {}
+                   )
+                 : data->presenter->encodeCommandsMetal4(
+                       cmdbuf, data->backbuffer, data->metadata,
+                       [&](WMT::MTL4RenderCommandEncoder encoder) {
+                         data->fence_wait.forEach([&](auto id) {
+                           encoder.waitForFence(fence_pool_[id], WMTRenderStageFragment);
+                         });
+                       },
+                       [&](WMT::MTL4RenderCommandEncoder encoder) {
+                         data->fence_update.forEach([&](auto id) {
+                           encoder.updateFence(fence_pool_[id], WMTRenderStageFragment);
+                         });
+                       }
+                   );
         auto t1 = clock::now();
         currentFrameStatistics().drawable_blocking_interval += (t1 - t0);
         bool stats = gw2::statsEnabled();
@@ -1462,20 +1494,34 @@ ArgumentEncodingContext::flushCommandsImpl(CommandBuffer &cmdbuf, uint64_t seqId
           gw2::presentPaceBlocked(
               std::chrono::duration_cast<std::chrono::nanoseconds>(data->presenter->lastNextDrawable()).count(), frame_id_
           );
-        cmdbuf.signalDrawable(drawable); // commits the present pass first
+        if (!mtl3)
+          cmdbuf.signalDrawable(drawable); // commits the present pass first
+        // gw2 (#227): with mtl3 the command buffer presents, as on Metal 3: Metal calls the drawable's
+        // present once it schedules the buffer
         if (data->after > 0) {
-          drawable.present(WMTDrawablePresentAfterMinimumDuration, data->after);
+          if (mtl3)
+            mtl3_present.presentDrawableAfterMinimumDuration(drawable, data->after);
+          else
+            drawable.present(WMTDrawablePresentAfterMinimumDuration, data->after);
           if (stats)
             currentFrameStatistics().present_after++;
         } else if (data->deadline > 0) {
-          drawable.present(WMTDrawablePresentWithDeadline, data->deadline);
+          if (mtl3)
+            mtl3_present.presentDrawableWithDeadline(drawable, data->deadline);
+          else
+            drawable.present(WMTDrawablePresentWithDeadline, data->deadline);
           if (stats)
             currentFrameStatistics().present_deadline++;
         } else {
-          drawable.present();
+          if (mtl3)
+            mtl3_present.presentDrawable(drawable);
+          else
+            drawable.present();
           if (stats)
             currentFrameStatistics().present_plain++;
         }
+        if (mtl3)
+          cmdbuf.commitMetal3Present(mtl3_present, mtl3_value); // the queue's next commits wait for it
         if (lt_on) { // gw2 (#31)
           lt(drawable, LtKind::Drawable);
           lt(drawable.texture(), LtKind::DrawableTexture);
