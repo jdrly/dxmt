@@ -50,6 +50,20 @@
 
 namespace dxmt {
 
+// gw2 (#206): checks that a value the state keeps equals the virtual call it replaces. Unlike
+// D3D11_ASSERT it is compiled in every build, so the release builds type-check it; it runs only
+// in a build without NDEBUG.
+#ifdef NDEBUG
+constexpr bool kGw2CheckCached = false;
+#else
+constexpr bool kGw2CheckCached = true;
+#endif
+#define GW2_CHECK_CACHED(expr)                                                                                         \
+  do {                                                                                                                 \
+    if (kGw2CheckCached && !(expr))                                                                                    \
+      _massert(#expr, __FILE__, __LINE__);                                                                             \
+  } while (0)
+
 template<typename Object> Rc<Object> forward_rc(Rc<Object>& obj);
 
 inline bool
@@ -1193,7 +1207,11 @@ public:
       ID3D11Resource *pDstResource, UINT DstSubresource, const D3D11_BOX *pDstBox, const void *pSrcData,
       UINT SrcRowPitch, UINT SrcDepthPitch
   ) override {
-    UpdateSubresource1(pDstResource, DstSubresource, pDstBox, pSrcData, SrcRowPitch, SrcDepthPitch, 0);
+    // gw2 (#206): a qualified call, so no virtual call. A context that overrides UpdateSubresource1
+    // overrides this too (the immediate context does, for #145).
+    MTLD3D11DeviceContextImplBase::UpdateSubresource1(
+        pDstResource, DstSubresource, pDstBox, pSrcData, SrcRowPitch, SrcDepthPitch, 0
+    );
   }
 
   void
@@ -1993,6 +2011,9 @@ public:
     } else {
       state_.InputAssembler.InputLayout = nullptr;
     }
+    // gw2 (#206): the only place the layout is bound; the draw path reads the mask from here
+    auto &layout = state_.InputAssembler.InputLayout;
+    state_.InputAssembler.InputSlotMask = layout ? layout->GetManagedInputLayout()->input_slot_mask() : 0;
     InvalidateRenderPipeline();
   }
   void
@@ -3382,8 +3403,11 @@ public:
     }
     auto &UAVBindingSet = stage == PipelineStage::Compute ? state_.ComputeStageUAV.UAVs : state_.OutputMerger.UAVs;
 
-    auto managed_shader = ShaderStage.Shader->GetManagedShader();
-    const MTL_SHADER_REFLECTION *reflection = &managed_shader->reflection();
+    // gw2 (#206): read by SetShader when it bound the shader
+    auto managed_shader = ShaderStage.ShaderManaged;
+    const MTL_SHADER_REFLECTION *reflection = ShaderStage.ShaderReflection;
+    GW2_CHECK_CACHED(managed_shader == ShaderStage.Shader->GetManagedShader());
+    GW2_CHECK_CACHED(!managed_shader || reflection == &managed_shader->reflection());
 
     bool dirty_cbuffer = ShaderStage.ConstantBuffers.any_dirty_masked(reflection->ConstantBufferSlotMask);
     bool dirty_sampler = ShaderStage.Samplers.any_dirty_masked(reflection->SamplerSlotMask);
@@ -3420,7 +3444,9 @@ public:
     if (!state_.InputAssembler.InputLayout)
       return;
 
-    uint32_t slot_mask = state_.InputAssembler.InputLayout->GetManagedInputLayout()->input_slot_mask();
+    // gw2 (#206): read by IASetInputLayout when it bound the layout
+    uint32_t slot_mask = state_.InputAssembler.InputSlotMask;
+    GW2_CHECK_CACHED(slot_mask == state_.InputAssembler.InputLayout->GetManagedInputLayout()->input_slot_mask());
     if (slot_mask == 0) // effectively empty input layout
       return;
 
@@ -3476,11 +3502,23 @@ public:
     auto &ShaderStage = state_.ShaderStages[stage];
 
     if (pShader) {
+      // gw2 (#206): the pointer this stage was last given, while the stage still holds the shader
+      // bound from it. Its reference keeps the object at that address alive, so it is the same
+      // object, and the QueryInterface below would find the bound shader and return.
+      if (ShaderStage.Shader && ShaderStage.ShaderRawPointer == pShader) {
+        gw2_pso_.count(gw2::PsoCounter::ShaderSame);
+        if (gw2_skip_same_state_)
+          return;
+      }
       if (auto expected = com_cast<IMTLD3D11Shader>(pShader)) {
         if (ShaderStage.Shader.ptr() == expected.ptr()) {
           return;
         }
         ShaderStage.Shader = std::move(expected);
+        ShaderStage.ShaderRawPointer = pShader;
+        ShaderStage.ShaderManaged = ShaderStage.Shader->GetManagedShader();
+        ShaderStage.ShaderReflection =
+            ShaderStage.ShaderManaged ? &ShaderStage.ShaderManaged->reflection() : nullptr;
         ShaderStage.ConstantBuffers.set_dirty();
         ShaderStage.SRVs.set_dirty();
         ShaderStage.Samplers.set_dirty();
@@ -3503,6 +3541,9 @@ public:
         return;
     } else {
       ShaderStage.Shader = nullptr;
+      ShaderStage.ShaderRawPointer = nullptr;
+      ShaderStage.ShaderManaged = nullptr;
+      ShaderStage.ShaderReflection = nullptr;
     }
 
     if (NumClassInstances)
