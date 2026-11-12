@@ -1261,6 +1261,15 @@ so only the first run after a version change builds LLVM (about 25 minutes per a
   and its window data the same first four fields (athei/wine `53def892`,
   `dlls/winemac.drv/window.c`, which asserts both). No warnings list for this job yet: llvm-mingw's clang
   warns differently from GCC.
+  The ARM64X tree builds with `-Ddebug=true` (#199): the compiler gets `-g`, and `meson.build` adds
+  `-gdwarf-4`. The buildtype stays `release`, so `-O3` and `NDEBUG` stay, and the install strips the
+  shipped files as before. The job copies the unstripped `d3d11.dll`, `dxgi.dll`, `d3d10core.dll`,
+  `winemetal.dll` and `winemetal.so` from the build tree into the symbols artifact. `check-mach9.zsh`
+  requires each ARM64X DLL's code sections to be its unstripped copy's byte for byte
+  (`.github/gw2/pe-code.py` hashes them), and the copy to have `.debug_info`. The broken copy also gets
+  one changed code byte in `d3d11.dll`, so there the script has to fail on six checks. Last,
+  `.github/gw2/symbolize.zsh` has to name `D3D11CreateDevice` at that export's RVA in both views of
+  the shipped `d3d11.dll`.
 - **Native tests**: `zsh -n` on the zsh scripts and a self-check of `.github/gw2/warnings.zsh`, then
   `tests/gw2/run.zsh pure` and `metal`. The zsh checks run here because macOS has zsh, so they install
   nothing (#174). The runner's GPU is an Apple Paravirtual device
@@ -1284,18 +1293,39 @@ so only the first run after a version change builds LLVM (about 25 minutes per a
   its SHA-256 and the Wine version its `ntdll.so` carries) and `toolchain:`. Kept 7 days. In the engine
   the tree's `aarch64-unix/winemetal.so` is a link to `lib/wine/aarch64-unix/winemetal.so`, which serves
   the i386 DLLs too.
+- **Artifact** `dxmt-mach9-symbols-<commit>` (#199): the unstripped files of the same build,
+  `aarch64-windows` (the four ARM64X DLLs, with DWARF) and `aarch64-unix/winemetal.so` (with its
+  symbol table), plus the same `VERSION` and the licenses. Kept 7 days. The i386 DLLs have no symbols:
+  nothing of the game runs in them.
 - **Publish** (#194): after every other job is green, packs `dxmt-mach9-<commit>` into
-  `dxmt-mach9-<commit>.tar.xz` (the same files at the archive's root, owner 0, directories and `.so`
-  755, the rest 644), checks that it unpacks to the artifact's files sha256 for sha256, and prints the
-  list and the archive's sha256. For a push to `gw2-on-mac` it adds the archive to the pre-release
-  `mach9-builds` of my fork, so a build stays downloadable past the artifact's 7 days, without a
-  token:
-  `https://github.com/jdrly/dxmt/releases/download/mach9-builds/dxmt-mach9-<sha>.tar.xz`, with the
-  full sha. GitHub reports each asset's sha256 as its `digest`
-  (`gh release view mach9-builds -R jdrly/dxmt --json assets`). One release, one asset per commit, the 30
-  newest kept. An asset that's there already is never replaced. The release is never marked latest, and
-  its tag is a lightweight one, which `git describe` and so `VERSION` skip. A run with a red job
-  publishes nothing. GW2 on Mac's dev build (jdrly/gw2-on-mac) takes its DXMT from this asset.
+  `dxmt-mach9-<commit>.tar.xz` and `dxmt-mach9-symbols-<commit>` into
+  `dxmt-mach9-symbols-<commit>.tar.xz` (the same files at the archive's root, owner 0, directories and
+  `.so` 755, the rest 644). It checks that each unpacks to its artifact's files sha256 for sha256, and
+  prints the lists and each archive's size and sha256. For a push to `gw2-on-mac` it adds both archives
+  to the pre-release `mach9-builds` of my fork, so a build stays downloadable past the artifact's 7
+  days, without a token:
+  `https://github.com/jdrly/dxmt/releases/download/mach9-builds/dxmt-mach9-<sha>.tar.xz`, and
+  `dxmt-mach9-symbols-<sha>.tar.xz` next to it, with the full sha. GitHub reports each asset's sha256
+  as its `digest` (`gh release view mach9-builds -R jdrly/dxmt --json assets`). One release, two assets
+  per commit, the 30 newest of each kept. An asset that's there already is never replaced. The release
+  is never marked latest, and its tag is a lightweight one, which `git describe` and so `VERSION`
+  skip. A run with a red job publishes nothing. GW2 on Mac's dev build (jdrly/gw2-on-mac) takes its
+  DXMT from the first asset.
+
+### Naming the functions in a sample of the arm64 build
+
+`sample` can't read the DLLs' symbols, so it shows bare addresses in `d3d11.dll` and the other ARM64X
+DLLs. To name them:
+
+1. Take the symbols of the build that ran. `VERSION`'s `commit:` line says which: the asset
+   `dxmt-mach9-symbols-<sha>.tar.xz` on `mach9-builds`, or the run's artifact. Unpack it into a
+   directory.
+2. Run `vmmap <pid>` while the game runs. The DLL's base is the start of the first region mapped from
+   its file (`.../aarch64-windows/d3d11.dll`). For `winemetal.so` it is the start of its `__TEXT`.
+3. The RVA is the sampled address minus that base.
+4. `.github/gw2/symbolize.zsh <symbols dir> d3d11.dll 0x<rva>...` prints each RVA's function and
+   source line, and the functions inlined there. It runs `llvm-symbolizer` from `$LLVM_SYMBOLIZER` or
+   `PATH` (llvm-mingw has one).
 
 ## Native tests
 

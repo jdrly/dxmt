@@ -2,11 +2,12 @@
 # gw2 (#182): the checks of my arm64 build for Mach9's engine that need no Wine. They read files
 # only (llvm-readobj, otool, nm, lipo); nothing of the engine runs.
 #
-#   check-mach9.zsh <dist> <engine> <llvm-readobj>
+#   check-mach9.zsh <dist> <engine> <llvm-readobj> <symbols>
 #
 # <dist> is the build in the engine's layout (aarch64-windows, i386-windows, aarch64-unix and
 # VERSION, as the arm64 job of .github/workflows/gw2.yml stages it). <engine> is the directory of
-# Mach9's engine that holds lib/wine (the release tarball's wine/). Checked:
+# Mach9's engine that holds lib/wine (the release tarball's wine/). <symbols> holds the unstripped
+# copies of the ARM64X DLLs, in aarch64-windows (#199). Checked:
 #
 # - every DLL has the machine of the engine's DLL of the same name: ARM64X (an ARM64 image with an
 #   ARM64EC view, so a game's x64 process loads its ARM64EC half natively) or i386, and Wine's
@@ -20,11 +21,13 @@
 #   is macdrv_functions, which it looks up at run time (the table's layout can't be read off a file;
 #   docs/gw2/README.md says where it was checked)
 # - d3d11.dll carries the version that VERSION names
+# - every ARM64X DLL's code sections are byte for byte those of its unstripped copy, and the copy has
+#   DWARF (.debug_info), so the symbols describe the code that runs
 emulate -L zsh
 setopt err_exit pipe_fail no_unset
 
-(( $# == 3 )) || { print -u2 "usage: check-mach9.zsh <dist> <engine> <llvm-readobj>"; exit 2 }
-dist=${1:A} engine=${2:A} readobj=$3
+(( $# == 4 )) || { print -u2 "usage: check-mach9.zsh <dist> <engine> <llvm-readobj> <symbols>"; exit 2 }
+dist=${1:A} engine=${2:A} readobj=$3 symbols=${4:A} here=${0:A:h}
 mine_dxmt=$dist engine_dxmt=$engine/lib/wine/dxgi/dxmt engine_unix=$engine/lib/wine/aarch64-unix
 dlls=(d3d11 dxgi d3d10core winemetal)
 integer failed=0
@@ -179,5 +182,23 @@ if [[ -n $version ]] && strings -a "$mine_dxmt/aarch64-windows/d3d11.dll" | grep
 else
   fail "d3d11.dll doesn't carry VERSION's first line (${version:-no VERSION})"
 fi
+
+for dll in $dlls; do
+  mine=$mine_dxmt/aarch64-windows/$dll.dll sym=$symbols/aarch64-windows/$dll.dll
+  [[ -f $mine ]] || continue
+  [[ -f $sym ]] || { fail "symbols: aarch64-windows/$dll.dll is missing"; continue }
+  # grep without -q, as above
+  if "$readobj" --sections "$sym" | grep -F 'Name: .debug_info ' >/dev/null; then
+    ok "symbols: $dll.dll has DWARF"
+  else
+    fail "symbols: $dll.dll has no .debug_info section"
+  fi
+  code=$(python3 -I "$here/pe-code.py" "$mine") sym_code=$(python3 -I "$here/pe-code.py" "$sym")
+  if [[ -n $code && $code == "$sym_code" ]]; then
+    ok "symbols: $dll.dll's code is its unstripped copy's, byte for byte (${(j:, :)${(@)${(@f)code}% *}})"
+  else
+    fail "symbols: $dll.dll's code sections (name, RVA, size, sha256) differ from its unstripped copy's:"$'\n'"      shipped  ${(pj:\n               :)${(f)code:-none}}"$'\n'"      symbols  ${(pj:\n               :)${(f)sym_code:-none}}"
+  fi
+done
 
 (( failed == 0 )) && print "all checks passed" || { print "$failed checks failed"; exit 1 }

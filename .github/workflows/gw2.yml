@@ -13,16 +13,20 @@
 #   release tarball. unix-call.py checks that the ARM64EC thunks call winecrt0's
 #   __wine_unix_call_arm64ec directly (#205). Then .github/gw2/check-mach9.zsh compares the result
 #   with the engine's DXMT and ntdll.dll without running anything. Artifact dxmt-mach9-<commit>:
-#   aarch64-windows, i386-windows, aarch64-unix, VERSION, kept 7 days.
+#   aarch64-windows, i386-windows, aarch64-unix, VERSION, kept 7 days. The ARM64X tree builds with
+#   debug information (#199), and the install strips it as before; artifact
+#   dxmt-mach9-symbols-<commit> keeps the unstripped ARM64X DLLs and winemetal.so for
+#   .github/gw2/symbolize.zsh.
 # tests: zsh -n for the zsh scripts and warnings.zsh's self-check, then tests/gw2/run.zsh pure,
 #   and metal on the runner's Metal device.
 # lint: actionlint for the workflows.
 # artifact: the installable build of the commit (as build-dxmt.zsh stages it: x86_64-windows,
 #   i386-windows, x86_64-unix, VERSION), kept 7 days, for scripts/dxmt-use.zsh save.
 # publish (#194): after every other job is green, packs dxmt-mach9-<commit> into
-#   dxmt-mach9-<commit>.tar.xz and prints its files and sha256. For a push to gw2-on-mac it adds the
-#   archive to the pre-release mach9-builds, the one release this workflow makes, never marked latest,
-#   never replaces an asset, and keeps the 30 newest. The only job with contents: write.
+#   dxmt-mach9-<commit>.tar.xz and dxmt-mach9-symbols-<commit> into dxmt-mach9-symbols-<commit>.tar.xz,
+#   and prints their files and sha256. For a push to gw2-on-mac it adds both archives to the
+#   pre-release mach9-builds, the one release this workflow makes, never marked latest, never replaces
+#   an asset, and keeps the 30 newest of each. The only job with contents: write.
 name: GW2
 
 on:
@@ -290,7 +294,9 @@ jobs:
           mkdir -p toolchains/mach9/bin
           ln -sf "$PWD/toolchains/wine/bin/winebuild" toolchains/mach9/bin/winebuild
           arm64ec-w64-mingw32-gcc --version | head -1
-          meson setup build-arm64 --cross-file build-arm64ec.txt --buildtype release --strip --prefix "$PWD/install" \
+          # -Ddebug=true (#199): -g, and meson.build's -gdwarf-4, for the symbols artifact. The buildtype
+          # stays release, so NDEBUG and -O3 stay; the install strips the shipped files as before.
+          meson setup build-arm64 --cross-file build-arm64ec.txt --buildtype release -Ddebug=true --strip --prefix "$PWD/install" \
             -Dwine_install_path=toolchains/mach9 -Dnative_llvm_path=toolchains/llvm
           meson compile -C build-arm64
           meson install -C build-arm64 --quiet
@@ -325,26 +331,59 @@ jobs:
           cp COPYING.LIB LICENSE dist/
           cat dist/VERSION
           find dist -type f | sort
+          # the symbols (#199): the files the install stripped, as the build tree has them
+          mkdir -p symbols/aarch64-windows symbols/aarch64-unix
+          cp build-arm64/src/d3d11/d3d11.dll build-arm64/src/dxgi/dxgi.dll build-arm64/src/d3d10/d3d10core.dll \
+            build-arm64/src/winemetal/winemetal.dll symbols/aarch64-windows/
+          cp build-arm64/src/winemetal/unix/winemetal.so symbols/aarch64-unix/
+          cp dist/VERSION COPYING.LIB LICENSE symbols/
+          find symbols -type f -exec ls -l {} +
       - name: Checks without Wine
-        run: .github/gw2/check-mach9.zsh dist toolchains/mach9 toolchains/llvm-mingw/bin/llvm-readobj | tee -a "$GITHUB_STEP_SUMMARY"
+        run: .github/gw2/check-mach9.zsh dist toolchains/mach9 toolchains/llvm-mingw/bin/llvm-readobj symbols | tee -a "$GITHUB_STEP_SUMMARY"
       - name: The checks fail on a broken copy
         run: |
-          # an export without an address in each tree, an i386 DLL where an ARM64X one belongs, and an
-          # import from ntdll.dll that the engine's doesn't export (the name renamed in place)
+          # an export without an address in each tree, an i386 DLL where an ARM64X one belongs, an
+          # import from ntdll.dll that the engine's doesn't export (the name renamed in place), and one
+          # changed code byte in d3d11.dll
           cp -R dist "$RUNNER_TEMP/broken"
           python3 -I .github/gw2/zero-export.py "$RUNNER_TEMP/broken/aarch64-windows/d3d11.dll" D3D11CreateDevice
           python3 -I .github/gw2/zero-export.py "$RUNNER_TEMP/broken/i386-windows/dxgi.dll" CreateDXGIFactory
           cp "$RUNNER_TEMP/broken/i386-windows/d3d10core.dll" "$RUNNER_TEMP/broken/aarch64-windows/d3d10core.dll"
           perl -0777 -pi -e 's/NtQueryVirtualMemory\0/NtQueryVirtualMemorz\0/' "$RUNNER_TEMP/broken/i386-windows/winemetal.dll"
+          f=$RUNNER_TEMP/broken/aarch64-windows/d3d11.dll
+          text=$(toolchains/llvm-mingw/bin/llvm-readobj --sections "$f" |
+            awk '$1 == "Name:" { n = $2 } $1 == "PointerToRawData:" && n == ".text" { print $2; exit }')
+          [[ -n $text ]]
+          python3 -I -c 'import sys; p, o = sys.argv[1], int(sys.argv[2]); d = bytearray(open(p, "rb").read()); d[o] ^= 1; open(p, "wb").write(d)' \
+            "$f" $((text + 64))
           status=0
-          .github/gw2/check-mach9.zsh "$RUNNER_TEMP/broken" toolchains/mach9 toolchains/llvm-mingw/bin/llvm-readobj >"$RUNNER_TEMP/broken.txt" || status=$?
+          .github/gw2/check-mach9.zsh "$RUNNER_TEMP/broken" toolchains/mach9 toolchains/llvm-mingw/bin/llvm-readobj symbols >"$RUNNER_TEMP/broken.txt" || status=$?
           grep FAIL "$RUNNER_TEMP/broken.txt"
-          [[ $status == 1 ]] && [[ $(grep -c '^FAIL' "$RUNNER_TEMP/broken.txt") == 5 ]]
+          # five FAILs from #213's fixtures, and the code check for d3d11.dll and the i386 d3d10core.dll
+          grep -q "^FAIL  symbols: d3d11.dll's code sections" "$RUNNER_TEMP/broken.txt"
+          [[ $status == 1 ]] && [[ $(grep -c '^FAIL' "$RUNNER_TEMP/broken.txt") == 7 ]]
           grep -q '^FAIL  i386-windows/winemetal.dll imports from ntdll.dll' "$RUNNER_TEMP/broken.txt"
+      - name: The symbols name D3D11CreateDevice
+        run: |
+          # its RVA in each view of the shipped d3d11.dll, which the symbols must name as that export
+          # read -a, not mapfile: the image's /bin/bash may be 3.2
+          read -r -a rvas <<<"$(toolchains/llvm-mingw/bin/llvm-readobj --coff-exports dist/aarch64-windows/d3d11.dll |
+            awk '$1 == "Name:" { n = $2 } $1 == "RVA:" && n == "D3D11CreateDevice" { printf "%s ", $2 }')"
+          echo "D3D11CreateDevice: ${rvas[*]}"
+          (( ${#rvas[@]} > 0 ))
+          LLVM_SYMBOLIZER=toolchains/llvm-mingw/bin/llvm-symbolizer \
+            .github/gw2/symbolize.zsh symbols d3d11.dll "${rvas[@]}" | tee "$RUNNER_TEMP/symbolized.txt"
+          [[ $(grep -c -E '^0x[0-9A-Fa-f]+: #?D3D11CreateDevice( at |$)' "$RUNNER_TEMP/symbolized.txt") == "${#rvas[@]}" ]]
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dxmt-mach9-${{ env.COMMIT }}
           path: dist
+          retention-days: 7
+          if-no-files-found: error
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dxmt-mach9-symbols-${{ env.COMMIT }}
+          path: symbols
           retention-days: 7
           if-no-files-found: error
 
@@ -425,11 +464,16 @@ jobs:
       GH_REPO: ${{ github.repository }}
       RELEASE: mach9-builds
       NAME: dxmt-mach9-${{ github.event.pull_request.head.sha || github.sha }}.tar.xz
+      SYMBOLS: dxmt-mach9-symbols-${{ github.event.pull_request.head.sha || github.sha }}.tar.xz
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: dxmt-mach9-${{ env.COMMIT }}
           path: dist
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dxmt-mach9-symbols-${{ env.COMMIT }}
+          path: symbols
       - name: Pack
         run: |
           # VERSION as the arm64 job wrote it: git describe of this commit (no lightweight tag
@@ -438,52 +482,65 @@ jobs:
           [[ $describe =~ ^v[0-9][^[:space:]]*-[0-9]+-g([0-9a-f]{7,})$ ]]
           [[ $COMMIT == "${BASH_REMATCH[1]}"* ]]
           grep -qx "commit: $COMMIT" dist/VERSION
-          # the artifact keeps no modes: directories and .so 755, the rest 644
-          chmod -R u=rwX,go=rX dist
-          find dist -name '*.so' -exec chmod 755 {} +
-          (cd dist && find . -type f | sort | xargs sha256sum) >"$RUNNER_TEMP/files.sha256"
-          tar --sort=name --owner=0 --group=0 --numeric-owner -C dist -cJf "$NAME" \
-            aarch64-windows i386-windows aarch64-unix VERSION LICENSE COPYING.LIB
-          tar -tvJf "$NAME"
-          # the archive unpacks to the artifact's files, sha256 for sha256, and nothing else
-          mkdir "$RUNNER_TEMP/unpacked"
-          tar -xJf "$NAME" -C "$RUNNER_TEMP/unpacked"
-          (cd "$RUNNER_TEMP/unpacked" && find . -type f | sort | xargs sha256sum) | diff "$RUNNER_TEMP/files.sha256" -
-          cat "$RUNNER_TEMP/files.sha256"
-          sha256sum "$NAME" | tee -a "$GITHUB_STEP_SUMMARY"
+          # the symbols are the same build's
+          cmp dist/VERSION symbols/VERSION
+          # pack <dir> <archive> <member>...
+          pack() {
+            local dir=$1 archive=$2
+            shift 2
+            # the artifact keeps no modes: directories and .so 755, the rest 644
+            chmod -R u=rwX,go=rX "$dir"
+            find "$dir" -name '*.so' -exec chmod 755 {} +
+            (cd "$dir" && find . -type f | sort | xargs sha256sum) >"$RUNNER_TEMP/$dir.sha256"
+            tar --sort=name --owner=0 --group=0 --numeric-owner -C "$dir" -cJf "$archive" "$@"
+            tar -tvJf "$archive"
+            # the archive unpacks to the artifact's files, sha256 for sha256, and nothing else
+            mkdir "$RUNNER_TEMP/unpacked-$dir"
+            tar -xJf "$archive" -C "$RUNNER_TEMP/unpacked-$dir"
+            (cd "$RUNNER_TEMP/unpacked-$dir" && find . -type f | sort | xargs sha256sum) | diff "$RUNNER_TEMP/$dir.sha256" -
+            cat "$RUNNER_TEMP/$dir.sha256"
+            echo "$archive: $(wc -c <"$archive") bytes, sha256 $(sha256sum "$archive" | cut -d' ' -f1)" | tee -a "$GITHUB_STEP_SUMMARY"
+          }
+          pack dist "$NAME" aarch64-windows i386-windows aarch64-unix VERSION LICENSE COPYING.LIB
+          pack symbols "$SYMBOLS" aarch64-windows aarch64-unix VERSION LICENSE COPYING.LIB
       - name: Upload to the pre-release ${{ env.RELEASE }}
         if: github.event_name == 'push' && github.ref == 'refs/heads/gw2-on-mac'
         run: |
           if ! gh release view "$RELEASE" >/dev/null 2>&1; then
             gh release create "$RELEASE" --prerelease --latest=false --target "$COMMIT" --title "Mach9 builds of my DXMT fork" \
-              --notes "CI output for GW2 on Mac's arm64 line, not a release of DXMT: my fork's build for Mach9 $MACH9_VERSION's engine, built and checked by .github/workflows/gw2.yml for each push to gw2-on-mac. One asset per commit, dxmt-mach9-<full sha>.tar.xz, in the layout of the engine's lib/wine/dxgi/dxmt; the 30 newest stay."
+              --notes "CI output for GW2 on Mac's arm64 line, not a release of DXMT: my fork's build for Mach9 $MACH9_VERSION's engine, built and checked by .github/workflows/gw2.yml for each push to gw2-on-mac. Two assets per commit: dxmt-mach9-<full sha>.tar.xz, in the layout of the engine's lib/wine/dxgi/dxmt, and dxmt-mach9-symbols-<full sha>.tar.xz, its unstripped arm64 files for .github/gw2/symbolize.zsh. The 30 newest of each stay."
           fi
           # a lightweight tag, which git describe (the arm64 job's VERSION) skips
           [[ $(gh api "repos/$GH_REPO/git/ref/tags/$RELEASE" -q .object.type) == commit ]]
-          uploaded=0
-          if gh release view "$RELEASE" --json assets -q '.assets[].name' | grep -qxF "$NAME"; then
-            echo "$NAME is there already, and a published file is never replaced"
-          else
-            gh release upload "$RELEASE" "$NAME"
-            uploaded=1
-          fi
-          # the 30 newest assets stay
+          for name in "$NAME" "$SYMBOLS"; do
+            uploaded=0
+            if gh release view "$RELEASE" --json assets -q '.assets[].name' | grep -qxF "$name"; then
+              echo "$name is there already, and a published file is never replaced"
+            else
+              gh release upload "$RELEASE" "$name"
+              uploaded=1
+            fi
+            digest=$(gh api "repos/$GH_REPO/releases/tags/$RELEASE" -q ".assets[] | select(.name == \"$name\") | .digest")
+            echo "$RELEASE has $name, $digest" | tee -a "$GITHUB_STEP_SUMMARY"
+            [[ $digest == sha256:* ]]
+            # what anyone downloads by URL is what GitHub reports, and, when this run uploaded it, this archive
+            url="https://github.com/$GH_REPO/releases/download/$RELEASE/$name"
+            # --retry-all-errors: a 404 too, in case the URL lags behind the upload
+            curl -fsSL --retry 5 --retry-all-errors -o "$RUNNER_TEMP/download.tar.xz" "$url"
+            [[ $digest == "sha256:$(sha256sum "$RUNNER_TEMP/download.tar.xz" | cut -d' ' -f1)" ]]
+            (( !uploaded )) || cmp "$RUNNER_TEMP/download.tar.xz" "$name"
+            echo "$url" | tee -a "$GITHUB_STEP_SUMMARY"
+          done
+          # the 30 newest builds and the 30 newest symbols stay
           id=$(gh api "repos/$GH_REPO/releases/tags/$RELEASE" -q .id)
-          gh api --paginate "repos/$GH_REPO/releases/$id/assets?per_page=100" -q '.[] | [.created_at, .id, .name] | @tsv' |
-            grep -P '\tdxmt-mach9-[0-9a-f]{40}\.tar\.xz$' | sort -r | tail -n +31 | while IFS=$'\t' read -r _ asset old; do
-              echo "deleting $old"
-              gh api -X DELETE "repos/$GH_REPO/releases/assets/$asset"
-            done
-          digest=$(gh api "repos/$GH_REPO/releases/tags/$RELEASE" -q ".assets[] | select(.name == \"$NAME\") | .digest")
-          echo "$RELEASE has $NAME, $digest" | tee -a "$GITHUB_STEP_SUMMARY"
-          [[ $digest == sha256:* ]]
-          # what anyone downloads by URL is what GitHub reports, and, when this run uploaded it, this archive
-          url="https://github.com/$GH_REPO/releases/download/$RELEASE/$NAME"
-          # --retry-all-errors: a 404 too, in case the URL lags behind the upload
-          curl -fsSL --retry 5 --retry-all-errors -o "$RUNNER_TEMP/download.tar.xz" "$url"
-          [[ $digest == "sha256:$(sha256sum "$RUNNER_TEMP/download.tar.xz" | cut -d' ' -f1)" ]]
-          (( !uploaded )) || cmp "$RUNNER_TEMP/download.tar.xz" "$NAME"
-          echo "$url" | tee -a "$GITHUB_STEP_SUMMARY"
+          gh api --paginate "repos/$GH_REPO/releases/$id/assets?per_page=100" -q '.[] | [.created_at, .id, .name] | @tsv' >"$RUNNER_TEMP/assets.tsv"
+          for kind in dxmt-mach9 dxmt-mach9-symbols; do
+            grep -P "\t$kind-[0-9a-f]{40}\.tar\.xz\$" "$RUNNER_TEMP/assets.tsv" | sort -r | tail -n +31 |
+              while IFS=$'\t' read -r _ asset old; do
+                echo "deleting $old"
+                gh api -X DELETE "repos/$GH_REPO/releases/assets/$asset"
+              done
+          done
           latest=$(gh api "repos/$GH_REPO/releases/latest" -q .tag_name 2>/dev/null || true)
           echo "releases/latest: ${latest:-none}"
           [[ $latest != "$RELEASE" ]]
