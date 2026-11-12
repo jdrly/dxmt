@@ -1271,6 +1271,7 @@ so only the first run after a version change builds LLVM (about 25 minutes per a
   `pso_archive_tool_test` skips without the AIR copy from my Mac (`GW2_AIR_DB`). `thread_priority_test` skips
   because the runner's jobs run clamped to the utility band (maximum priority 20). A skip shows as `skip`
   with the test's reason. It never counts as a pass. The Metal 4 paths are still tested only on my Mac.
+  The display tests (`present_cursor_test`) only build here, with `tests/gw2/run.zsh display --build-only`.
 - **Lint**: actionlint on the workflow (`.github/actionlint.yaml` names the `xcode-27` label it doesn't
   know yet).
 - **Artifact** `dxmt-<commit>`: the build as `build-dxmt.zsh` stages it (`x86_64-windows`,
@@ -1300,9 +1301,11 @@ so only the first run after a version change builds LLVM (about 25 minutes per a
 
 ## Native tests
 
-`tests/gw2/run.zsh [pure|metal|all] [--meson <build dir>]` (X1) builds and runs every registered test
-under `tests/gw2/`, on the Mac, with no Wine and no game. The CI runs it too ([CI](#ci)). A test registers in its header:
-`// gw2-test: pure` (no Metal device) or `metal`, one or more `// gw2-build:` lines (zsh, from the
+`tests/gw2/run.zsh [pure|metal|display|all] [--build-only] [--meson <build dir>]` (X1) builds and runs
+every registered test under `tests/gw2/`, on the Mac, with no Wine and no game. The CI runs it too
+([CI](#ci)). A test registers in its header: `// gw2-test: pure` (no Metal device), `metal`, or
+`display` (a full-screen window in a GUI session; run only by name, never by `all`). `--build-only`
+builds the selected tests and runs none. Then come one or more `// gw2-build:` lines (zsh, from the
 checkout's root, writing `$OUT`) and optional `// gw2-run:` lines (default `"$OUT"`). A failed build or
 a nonzero exit fails the run; exit 77 is *skipped*, never counted as passed; a test without the lines
 is listed as unregistered. `--meson <build>/x64` adds the meson tests of the `gw2` suite (B1's
@@ -1500,6 +1503,21 @@ three chunks sharing a block whose first two complete before another user takes 
 once more without the reset on commit, where the check must catch the reuse), commands larger than a
 slab, and 300,000 random steps of emits, other users' allocations, commits and late completions. It
 prints the ns an emit before #148 (an out-of-line ring allocation per command) and through the window.
+
+`present_cursor_test.m` (display, #225, for #223) is a probe, not a check of my code: a borderless
+full-screen window with one `CAMetalLayer` set up as my presenter sets it up, a frame pass with a GPU
+cost calibrated to `--gpu-ms` (13 ms by default) and a present pass, presented the Metal 3 way
+(`--present mtl3`), the Metal 4 way (`--present mtl4`, with `--layer-set queue`, `--empty-commit off`
+and `--present-thread queue` as one-flag variants), or the frame on Metal 4 and the present through a
+Metal 3 command buffer joined by two shared events, as #227's `DXMT_MTL4_PRESENT=mtl3` does
+(`--present mtl3-on-mtl4`), while `--pointer wave` moves the pointer 80 times a
+second. Each second it prints the frame interval, missed refreshes, `presentedTime` minus the take,
+how long Metal held the present pass, how many passes started while their surface may still have been
+on screen, and the layer's private `displayCompositingInternalStatus`; a line on a composited layer says
+that run can't show #223. `tests/gw2/run.zsh display` runs both ways and each variant for 600 frames with
+`MTL_DEBUG_LAYER=1`, as arm64 and x86_64, with the pointer still. It needs a logged-in GUI session, a
+display and, for the Metal 4 ways, Metal 4, and exits 77 without them. The source's header has the flags, the
+fields and what it can't tell.
 
 `layer_poll_test.cpp` (pure, #156) checks when the presenter asks the bridge for its layer's screen
 values (`dxmt_gw2_layer_poll.hpp`): at every Present with `DXMT_LAYER_PROPS_POLL_MS=0`; with 250 ms at
