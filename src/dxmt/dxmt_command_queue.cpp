@@ -191,6 +191,8 @@ CommandQueue::CommandQueue(WMT::Device device) :
     auto mtl4 = std::make_unique<gw2::Mtl4Queue>(device, chunk_count_);
     if (!mtl4->valid())
       gw2::metal4Failed("creating the Metal 4 queue, its event or its allocators");
+    else if (gw2::mtl4PresentMetal3() && !mtl4->enableMetal3Present())
+      gw2::metal4Failed("creating the two events of DXMT_MTL4_PRESENT=mtl3");
     else if (!gw2::residencyAttachMtl4Queue(device, mtl4->queue()))
       gw2::metal4Failed("attaching the residency set to the Metal 4 queue");
     else {
@@ -211,6 +213,9 @@ CommandQueue::CommandQueue(WMT::Device device) :
               : "Metal 4: a chunk with timestamp queries commits an empty command buffer for them after its last one "
                 "(DXMT_MTL4_TIMESTAMP_REUSE=0, the default)"
       );
+      // gw2 (#227): a test switch for #223; unset, no line
+      if (gw2::mtl4PresentMetal3())
+        Logger::info("Metal 4: present through a Metal 3 command buffer (DXMT_MTL4_PRESENT=mtl3)");
     }
   }
   // gw2 (#78): Metal 3, unless the queue is on Metal 4

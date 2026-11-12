@@ -147,4 +147,21 @@ Mtl4Encoding::signalDrawable(WMT::MetalDrawable drawable) {
   queue_.queue().signalDrawable(drawable);
 }
 
+uint64_t
+Mtl4Encoding::beginMetal3Present(WMT::CommandBuffer present) {
+  uint64_t value = queue_.nextMetal3PresentValue();
+  encodeSignalEvent(queue_.frameEvent(), value); // after every commit so far: the frame's work
+  present.encodeWaitForEvent(queue_.frameEvent(), value);
+  return value;
+}
+
+void
+Mtl4Encoding::commitMetal3Present(WMT::CommandBuffer present, uint64_t value) {
+  present.encodeSignalEvent(queue_.shownEvent(), value);
+  present.commit();
+  queue_.addMetal3Present(seq_, present, value);
+  // nothing is open here (the pass went into `present`): this commits nothing
+  encodeWaitForEvent(queue_.shownEvent(), value);
+}
+
 } // namespace dxmt::gw2

@@ -63,6 +63,18 @@ public:
   // commits the open command buffer (the present pass), then signals the drawable at the queue
   void signalDrawable(WMT::MetalDrawable drawable);
 
+  // --- gw2 (#227): present through a Metal 3 command buffer (DXMT_MTL4_PRESENT=mtl3, the queue's
+  // metal3Present()). In place of waitForDrawable, the pass, signalDrawable and the drawable's present:
+  //   value = beginMetal3Present(present);  // present: a new, open Metal 3 command buffer
+  //   the pass into `present` (Presenter::encodeCommands), and its present call
+  //   commitMetal3Present(present, value);
+  // begin commits the open command buffer, signals the queue's `frame` event at a new value at the
+  // queue, and makes `present` wait for it; returns the value.
+  uint64_t beginMetal3Present(WMT::CommandBuffer present);
+  // `present` signals `shown` at `value` and is committed; the chunk holds it (Mtl4Queue::wait waits
+  // for it, retire lets it go), and the command buffers committed from now on wait for `shown`.
+  void commitMetal3Present(WMT::CommandBuffer present, uint64_t value);
+
   Mtl4Queue &
   queue() {
     return queue_;

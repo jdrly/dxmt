@@ -68,6 +68,15 @@
 //   its queries, and another after a queue-level wait; with the switch off a chunk whose last buffer is
 //   committed gets another.
 //
+// gw2 (#227): a third run, DXMT_MTL4_PRESENT=mtl3: the same frame on its own Metal 4 queue, with the
+// present as the context encodes it with that switch. The present split commits the frame, then
+// beginMetal3Present (the `frame` event) and a Metal 3 command buffer of a Metal 3 queue that takes the
+// present pass's packets (without the pass's wait for the blit's fence, which belongs to the Metal 4
+// queue: the event replaces it), the drawable's readback and presentDrawable; commitMetal3Present
+// commits it (`shown`). Its chunk commits two Metal 4 buffers (the frame's and the empty one for the
+// queries) and one Metal 3 buffer, all without an error. Its readbacks pass the CPU checks, and its
+// drawable is byte-identical to the Metal 4 run's.
+//
 // How much it sees (measured 2026-11-04 on an M5 Max by mutating a scratch copy of mtl4.c, arm64): each
 // of these made the run fail: Set*BufferOffset ignoring its offset, a Set*Bytes overflow skipped instead
 // of resumed, DrawIndexed without its index-buffer offset, an instanced draw without its base instance,
@@ -701,13 +710,16 @@ buildFrame(Stream &s, const Fixture &fx, const Resources &r) {
 }
 
 // the present pass's packets: they name the drawable's texture, known only after nextDrawable
+// gw2 (#227): `wait_blit` false: no wait for the blit's fence (a Metal 3 pass after a Metal 4 frame)
 static void
-buildPresent(Stream &s, const Fixture &fx, const Resources &r, obj_handle_t drawable_texture) {
+buildPresent(Stream &s, const Fixture &fx, const Resources &r, obj_handle_t drawable_texture, bool wait_blit) {
   {
     Chain &c = s.present_pass;
-    auto &wait = c.add<wmtcmd_render_fence_op>(WMTRenderCommandWaitForFence);
-    wait.fence = H(r.blit_done);
-    wait.stages = WMTRenderStageFragment;
+    if (wait_blit) {
+      auto &wait = c.add<wmtcmd_render_fence_op>(WMTRenderCommandWaitForFence);
+      wait.fence = H(r.blit_done);
+      wait.stages = WMTRenderStageFragment;
+    }
     auto &tex = c.add<wmtcmd_render_settexture>(WMTRenderCommandSetFragmentTexture);
     tex.texture = H(r.back);
     tex.index = 0;
@@ -768,6 +780,14 @@ struct Metal3Target {
   }
   void
   beforePresentPass(WMT::MetalDrawable) {}
+  WMT::RenderCommandEncoder
+  presentRender(WMTRenderPassInfo &info) {
+    return render(info, true);
+  }
+  WMT::BlitCommandEncoder
+  presentBlit() {
+    return blit();
+  }
   void
   present(WMT::MetalDrawable drawable) {
     cmdbuf.presentDrawable(drawable);
@@ -806,6 +826,14 @@ struct Metal4Target {
   beforePresentPass(WMT::MetalDrawable drawable) {
     encoding.waitForDrawable(drawable);
   }
+  WMT::MTL4RenderCommandEncoder
+  presentRender(WMTRenderPassInfo &info) {
+    return render(info, true);
+  }
+  WMT::MTL4BlitCommandEncoder
+  presentBlit() {
+    return blit();
+  }
   void
   present(WMT::MetalDrawable drawable) {
     encoding.signalDrawable(drawable); // commits the present pass first
@@ -815,6 +843,36 @@ struct Metal4Target {
   end() {
     encoding.openForTimestamps(!timestamp_reuse); // gw2 (#154): with timestamp queries pending
     encoding.commitOpen();
+  }
+};
+
+// gw2 (#227): DXMT_MTL4_PRESENT=mtl3: the frame on Metal 4 (Metal4Target), the present in a Metal 3
+// command buffer, in the context's order
+struct Metal4Mtl3Target : Metal4Target {
+  WMT::CommandQueue mtl3;
+  WMT::CommandBuffer present_cmdbuf{};
+  uint64_t value = 0;
+
+  void
+  split() {
+    Metal4Target::split(); // the present split
+    present_cmdbuf = mtl3.commandBuffer();
+    value = encoding.beginMetal3Present(present_cmdbuf); // before nextDrawable, as in the context
+  }
+  void
+  beforePresentPass(WMT::MetalDrawable) {}
+  WMT::RenderCommandEncoder
+  presentRender(WMTRenderPassInfo &info) {
+    return present_cmdbuf.renderCommandEncoder(info);
+  }
+  WMT::BlitCommandEncoder
+  presentBlit() {
+    return present_cmdbuf.blitCommandEncoder();
+  }
+  void
+  present(WMT::MetalDrawable drawable) {
+    present_cmdbuf.presentDrawable(drawable);
+    encoding.commitMetal3Present(present_cmdbuf, value);
   }
 };
 
@@ -892,17 +950,17 @@ encodeFrame(Target &target, Stream &s, const Fixture &fx, const Resources &r, WM
   WMT::MetalDrawable drawable = layer.nextDrawable();
   if (drawable) {
     WMT::Texture texture = drawable.texture();
-    buildPresent(s, fx, r, texture.handle);
+    buildPresent(s, fx, r, texture.handle, !std::is_same_v<Target, Metal4Mtl3Target>);
     target.beforePresentPass(drawable);
     WMTRenderPassInfo info;
     colorPass(info, texture.handle, WMTLoadActionDontCare);
     {
-      auto enc = target.render(info, true);
+      auto enc = target.presentRender(info);
       enc.encodeCommands(s.present_pass.head<wmtcmd_render_nop>());
       enc.endEncoding();
     }
     {
-      auto enc = target.blit();
+      auto enc = target.presentBlit();
       enc.encodeCommands(s.present_blit.head<wmtcmd_blit_nop>());
       enc.endEncoding();
     }
@@ -1064,14 +1122,25 @@ waitMetal3(std::vector<WMT::CommandBuffer> &committed, size_t expected, const ch
 
 // the chunk's commits completed without an error; then it retires (its slot's residency set emptied).
 // `times`: the last commit has a GPU end, which exact timestamp queries read (gw2 #154).
+// gw2 (#227): `metal3`: the chunk's Metal 3 present buffers (DXMT_MTL4_PRESENT=mtl3), each completed
+// without an error
 static void
-waitMetal4(Mtl4Queue &queue, uint64_t seq, size_t expected, const char *what, bool times = false) {
+waitMetal4(Mtl4Queue &queue, uint64_t seq, size_t expected, const char *what, bool times = false, size_t metal3 = 0) {
   const auto &commits = queue.wait(seq);
   CHECK(commits.size() == expected, "%s: %zu commits, expected %zu", what, commits.size(), expected);
   for (auto *commit : commits) {
     CHECK(commit->done(), "%s: a commit isn't done after wait()", what);
     WMT::Error error = commit->error();
     CHECK(!error, "%s: commit error %s", what, error ? error.description().getUTF8String().c_str() : "");
+  }
+  auto &presents = queue.metal3Presents(seq);
+  CHECK(presents.size() == metal3, "%s: %zu Metal 3 present buffers, expected %zu", what, presents.size(), metal3);
+  for (auto &present : presents) {
+    WMT::CommandBuffer cmdbuf = present.cmdbuf;
+    auto status = cmdbuf.status();
+    WMT::Error error = cmdbuf.error();
+    CHECK(status == WMTCommandBufferStatusCompleted && !error, "%s: Metal 3 present status %llu, error %s", what,
+          (unsigned long long)status, error ? error.description().getUTF8String().c_str() : "none");
   }
   if (times && !commits.empty())
     CHECK(commits.back()->gpuEndNs() > 0, "%s: the last commit has no GPU end for the timestamps", what);
@@ -1234,9 +1303,48 @@ main() {
       queue.waitIdle();
     }
 
+    // --- gw2 (#227): Metal 4 with DXMT_MTL4_PRESENT=mtl3, on a queue of its own
+    Resources r4m = makeResources(fx.device);
+    Stream s4m;
+    buildFrame(s4m, fx, r4m);
+    RunResult run4m;
+    {
+      Mtl4Queue queue(device, 2);
+      CHECK(queue.valid() && queue.enableMetal3Present(), "Metal 4 queue with the Metal 3 present's events");
+      if (!queue.valid() || !queue.metal3Present())
+        return 1;
+      WMT::CommandQueue mtl3{MTLDevice_newCommandQueue(device.handle, 16)};
+      CHECK(mtl3, "Metal 3 queue (DXMT_MTL4_PRESENT=mtl3)");
+      CAMetalLayer *layer = newLayer(fx.device);
+      std::vector<id<MTLBuffer>> arenas;
+      auto bytes = [&](uint64_t size) {
+        id<MTLBuffer> b = [fx.device newBufferWithLength:size
+                                                 options:MTLResourceStorageModeShared |
+                                                         MTLResourceHazardTrackingModeUntracked];
+        arenas.push_back(b);
+        return Mtl4Encoding::Bytes{WMT::Buffer{H(b)}, 0, false};
+      };
+      {
+        Mtl4Encoding encoding(queue, 0, bytes);
+        Metal4Target target{encoding};
+        encodeLoad(target, s4m);
+      }
+      waitMetal4(queue, 0, 1, "Metal 4 load (DXMT_MTL4_PRESENT=mtl3)");
+      {
+        Mtl4Encoding encoding(queue, 1, bytes);
+        Metal4Mtl3Target target{{encoding}, mtl3};
+        run4m = encodeFrame(target, s4m, fx, r4m, WMT::MetalLayer{H(layer)});
+      }
+      // the frame's and the empty one for the queries; the Metal 3 present's if it presented
+      waitMetal4(queue, 1, 2, "Metal 4 frame (DXMT_MTL4_PRESENT=mtl3)", false, run4m.presented ? 1 : 0);
+      queue.waitIdle();
+      mtl3.release();
+    }
+
     // --- the pairing
     CHECK(run3.types == run4.types, "the two backends were given different packet streams");
     CHECK(run3.presented == run4.presented, "a drawable for one backend only");
+    CHECK(run4m.presented == run4.presented, "a drawable for one Metal 4 present only");
     presented = run3.presented && run4.presented;
     size_t packets = 0;
     for (auto &t : run3.types)
@@ -1251,6 +1359,11 @@ main() {
     compare("compute", r3.out, r4.out, kOutWords * 4 + kOutTail, 0);
     if (run3.presented && run4.presented)
       compare("drawable", r3.rb_present, r4.rb_present, kSize * kSize * 4, kSize);
+    // gw2 (#227): "Metal 3" below is the Metal 4 run, "Metal 4" the DXMT_MTL4_PRESENT=mtl3 run
+    expectFrame("Metal 4 (DXMT_MTL4_PRESENT=mtl3)", r4m, run4m.presented);
+    if (run4.presented && run4m.presented)
+      compare("drawable, Metal 4's present against DXMT_MTL4_PRESENT=mtl3", r4.rb_present, r4m.rb_present,
+              kSize * kSize * 4, kSize);
   }
   std::printf("%s (%d failures, %d xfail)\n", failures ? "FAILED" : "passed", failures, xfailed);
   if (failures)
