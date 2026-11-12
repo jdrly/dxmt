@@ -1507,14 +1507,16 @@ prints the ns an emit before #148 (an out-of-line ring allocation per command) a
 `present_cursor_test.m` (display, #225, for #223) is a probe, not a check of my code: a borderless
 full-screen window with one `CAMetalLayer` set up as my presenter sets it up, a frame pass with a GPU
 cost calibrated to `--gpu-ms` (13 ms by default) and a present pass, presented the Metal 3 way
-(`--present mtl3`) or the Metal 4 way (`--present mtl4`, with `--layer-set queue`, `--empty-commit off`
-and `--present-thread queue` as one-flag variants), while `--pointer wave` moves the pointer 80 times a
+(`--present mtl3`), the Metal 4 way (`--present mtl4`, with `--layer-set queue`, `--empty-commit off`
+and `--present-thread queue` as one-flag variants), or the frame on Metal 4 and the present through a
+Metal 3 command buffer joined by two shared events, as #227's `DXMT_MTL4_PRESENT=mtl3` does
+(`--present mtl3-on-mtl4`), while `--pointer wave` moves the pointer 80 times a
 second. Each second it prints the frame interval, missed refreshes, `presentedTime` minus the take,
 how long Metal held the present pass, how many passes started while their surface may still have been
 on screen, and the layer's private `displayCompositingInternalStatus`; a line on a composited layer says
 that run can't show #223. `tests/gw2/run.zsh display` runs both ways and each variant for 600 frames with
 `MTL_DEBUG_LAYER=1`, as arm64 and x86_64, with the pointer still. It needs a logged-in GUI session, a
-display and, for `mtl4`, Metal 4, and exits 77 without them. The source's header has the flags, the
+display and, for the Metal 4 ways, Metal 4, and exits 77 without them. The source's header has the flags, the
 fields and what it can't tell.
 
 `layer_poll_test.cpp` (pure, #156) checks when the presenter asks the bridge for its layer's screen

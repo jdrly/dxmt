@@ -4,7 +4,7 @@
 // gw2-build:   codesign -s - -f ${OUT}_$arch
 // gw2-build: done
 // gw2-run: for arch in arm64 x86_64; do
-// gw2-run:   for v in "--present mtl3" "--present mtl4" "--present mtl4 --layer-set queue" "--present mtl4 --empty-commit off" "--present mtl4 --present-thread queue"; do
+// gw2-run:   for v in "--present mtl3" "--present mtl4" "--present mtl4 --layer-set queue" "--present mtl4 --empty-commit off" "--present mtl4 --present-thread queue" "--present mtl3-on-mtl4"; do
 // gw2-run:     MTL_DEBUG_LAYER=1 ${OUT}_$arch ${=v} --pointer still
 // gw2-run:   done
 // gw2-run: done
@@ -17,7 +17,7 @@
 // the pointer. It changes nothing in the driver.
 //
 // It isn't part of `tests/gw2/run.zsh all`: it needs a logged-in GUI session, a display, the pointer,
-// and for --present mtl4 a Metal 4 device. `tests/gw2/run.zsh display` builds it and runs the
+// and for the Metal 4 ways a Metal 4 device. `tests/gw2/run.zsh display` builds it and runs the
 // acceptance runs above (both ways and each Metal 4 variant, 600 frames, MTL_DEBUG_LAYER=1, arm64 and
 // x86_64, pointer still). GitHub's runner only builds it (`run.zsh display --build-only`). By hand:
 //
@@ -52,10 +52,16 @@
 //      ahead from the encoding thread; then an empty command buffer committed with feedback, as a GW2
 //      frame gets with DXMT_MTL4_TIMESTAMP_REUSE off. The queue holds a residency set of its own with
 //      the offscreen texture, the cost buffer and both pipelines (DXMT's device set, #29).
+//    --present mtl3-on-mtl4 (#227's DXMT_MTL4_PRESENT=mtl3): the frame pass on the Metal 4 queue, the
+//      present as --present mtl3 does it in a buffer of a Metal 3 queue on the same device. The Metal 4
+//      queue signals a shared event after the frame pass and the Metal 3 buffer waits for it; the buffer
+//      signals a second one and the Metal 4 queue's later commits wait for that. No waitForDrawable, no
+//      signalDrawable, no layer set.
 //    Metal 4 variants, one flag each:
-//      --layer-set queue         the layer's set on the queue for the whole run, as before #184
-//      --empty-commit off        no empty command buffer after the present (DXMT_MTL4_TIMESTAMP_REUSE=1)
-//      --present-thread queue    presentAtTime: from a serial dispatch queue, not the encoding thread
+//      --layer-set queue         the layer's set on the queue for the whole run, as before #184 (mtl4)
+//      --empty-commit off        no empty command buffer after the present (DXMT_MTL4_TIMESTAMP_REUSE=1;
+//                                mtl4 and mtl3-on-mtl4)
+//      --present-thread queue    presentAtTime: from a serial dispatch queue, not the encoding thread (mtl4)
 // --pointer wave moves the pointer in a circle (a quarter of the screen's height) 80 times a second,
 // one turn a second, with CGWarpMouseCursorPosition, or with posted mouse-moved events with
 // --move event (needs the Accessibility permission for the terminal). Whether a warp makes the window
@@ -88,7 +94,7 @@
 //
 // Exit: 0 when every frame was encoded and no command buffer reported an error; 1 on a Metal error or
 // if no frame was presented; 2 on a bad argument; 77 (skipped) without a GUI session, without a
-// display, without a Metal device, without Metal 4 for --present mtl4, without the permission for
+// display, without a Metal device, without Metal 4 for either Metal 4 way, without the permission for
 // --move event, or when the layer gives no drawable three times in a row (the window isn't on a
 // display); 130 after Ctrl-C.
 
@@ -134,7 +140,7 @@ typedef struct {
 } Cost;
 
 static struct {
-  bool mtl4, set_on_queue, empty_commit, present_on_queue, wave, move_event;
+  bool mtl4, mtl3_present, set_on_queue, empty_commit, present_on_queue, wave, move_event;
   long frames;
   double gpu_ms;
 } opt = {.mtl4 = true, .empty_commit = true, .frames = 600, .gpu_ms = 13};
@@ -174,6 +180,7 @@ static id<MTL4ArgumentTable> g_cost_table, g_copy_table;
 static id<MTLFence> g_raw, g_war; // frame pass -> present pass, present pass -> next frame pass
 static bool g_war_updated;
 static id<MTLResidencySet> g_layer_set;
+static id<MTLSharedEvent> g_frame_event, g_shown_event; // --present mtl3-on-mtl4
 static dispatch_queue_t g_present_queue;
 
 static Frame *
@@ -300,6 +307,35 @@ take(uint64_t k) {
   return d;
 }
 
+// the present pass into a Metal 3 command buffer, and the command buffer's present
+// (dxmt_presenter.cpp's encodeCommands, dxmt_context.cpp's Metal 3 branch)
+static void
+encode_present3(id<MTLCommandBuffer> pcb, id<CAMetalDrawable> d) {
+  MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+  rp.colorAttachments[0].texture = d.texture;
+  rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+  rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+  id<MTLRenderCommandEncoder> e = [pcb renderCommandEncoderWithDescriptor:rp];
+  [e setRenderPipelineState:g_copy_pso];
+  [e setFragmentTexture:g_offscreen atIndex:0];
+  [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+  [e endEncoding];
+  [pcb presentDrawable:d atTime:CACurrentMediaTime() + g_period];
+}
+
+static void
+commit_present3(uint64_t k, id<MTLCommandBuffer> pcb) {
+  frame_ref(k);
+  [pcb addCompletedHandler:^(id<MTLCommandBuffer> cb) {
+    if (cb.error)
+      gpu_error("present pass", cb.error);
+    SET(k, pass_start, cb.GPUStartTime);
+    frame_unref(k);
+  }];
+  SET(k, pass_commit, CACurrentMediaTime());
+  [pcb commit];
+}
+
 static void
 frame3(uint64_t k, unsigned s) {
   id<MTLCommandBuffer> fcb = [g_q3 commandBuffer];
@@ -325,25 +361,8 @@ frame3(uint64_t k, unsigned s) {
   if (!d)
     return;
   id<MTLCommandBuffer> pcb = [g_q3 commandBuffer];
-  rp = [MTLRenderPassDescriptor renderPassDescriptor];
-  rp.colorAttachments[0].texture = d.texture;
-  rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
-  rp.colorAttachments[0].storeAction = MTLStoreActionStore;
-  e = [pcb renderCommandEncoderWithDescriptor:rp];
-  [e setRenderPipelineState:g_copy_pso];
-  [e setFragmentTexture:g_offscreen atIndex:0];
-  [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
-  [e endEncoding];
-  [pcb presentDrawable:d atTime:CACurrentMediaTime() + g_period];
-  frame_ref(k);
-  [pcb addCompletedHandler:^(id<MTLCommandBuffer> cb) {
-    if (cb.error)
-      gpu_error("present pass", cb.error);
-    SET(k, pass_start, cb.GPUStartTime);
-    frame_unref(k);
-  }];
-  SET(k, pass_commit, CACurrentMediaTime());
-  [pcb commit];
+  encode_present3(pcb, d);
+  commit_present3(k, pcb);
 }
 
 enum { kFramePass, kPresentPass, kEmpty };
@@ -366,6 +385,66 @@ commit4(uint64_t k, id<MTL4CommandBuffer> cb, int kind) {
   [g_q4 commit:list count:1 options:options];
 }
 
+// the present the Metal 4 way (dxmt_context.cpp's Metal 4 branch, encodeCommandsMetal4, mtl4.c)
+static void
+present_mtl4(uint64_t k, unsigned s) {
+  id<CAMetalDrawable> d = take(k);
+  if (!d)
+    return;
+  [g_q4 waitForDrawable:d];
+  id<MTL4CommandBuffer> pcb = g_pcb[s];
+  [pcb beginCommandBufferWithAllocator:g_alloc[s]];
+  if (!opt.set_on_queue && g_layer_set)
+    [pcb useResidencySet:g_layer_set];
+  MTL4RenderPassDescriptor *rp = [MTL4RenderPassDescriptor new];
+  rp.colorAttachments[0].texture = d.texture;
+  rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+  rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+  id<MTL4RenderCommandEncoder> e = [pcb renderCommandEncoderWithDescriptor:rp];
+  [e waitForFence:g_raw beforeEncoderStages:MTLStageFragment];
+  [e setRenderPipelineState:g_copy_pso];
+  [g_copy_table setTexture:g_offscreen.gpuResourceID atIndex:0];
+  [e setArgumentTable:g_copy_table atStages:MTLRenderStageFragment];
+  [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+  [e updateFence:g_war afterEncoderStages:MTLStageFragment];
+  [e endEncoding];
+  [pcb endCommandBuffer];
+  g_war_updated = true;
+  SET(k, pass_commit, CACurrentMediaTime());
+  commit4(k, pcb, kPresentPass);
+  [g_q4 signalDrawable:d];
+  if (opt.present_on_queue)
+    dispatch_async(g_present_queue, ^{
+      [d presentAtTime:CACurrentMediaTime() + g_period];
+    });
+  else
+    [d presentAtTime:CACurrentMediaTime() + g_period];
+}
+
+// --present mtl3-on-mtl4, #227's DXMT_MTL4_PRESENT=mtl3 (Mtl4Encoding::beginMetal3Present and
+// commitMetal3Present): the frame stays on the Metal 4 queue; the pass and the present are a Metal 3
+// command buffer's. The Metal 4 queue signals `frame` after the frame pass and the Metal 3 buffer waits
+// for it; the buffer signals `shown` and the Metal 4 queue's later commits wait for it. No
+// waitForDrawable, no signalDrawable, no layer set: Metal 3 does those.
+static void
+present_mtl3_on_mtl4(uint64_t k) {
+  uint64_t value = k + 1;
+  [g_q4 signalEvent:g_frame_event value:value];
+  id<MTLCommandBuffer> pcb = [g_q3 commandBuffer];
+  [pcb encodeWaitForEvent:g_frame_event value:value];
+  id<CAMetalDrawable> d = take(k);
+  if (d)
+    encode_present3(pcb, d);
+  [pcb encodeSignalEvent:g_shown_event value:value]; // also without a drawable: the queue waits for it
+  // as Mtl4Queue::waitMetal3: a failed buffer may never signal, so the CPU does, or the queue stops
+  [pcb addCompletedHandler:^(id<MTLCommandBuffer> cb) {
+    if (cb.status == MTLCommandBufferStatusError && g_shown_event.signaledValue < value)
+      g_shown_event.signaledValue = value;
+  }];
+  commit_present3(k, pcb);
+  [g_q4 waitForEvent:g_shown_event value:value];
+}
+
 static void
 frame4(uint64_t k, unsigned s) {
   id<MTL4CommandBuffer> fcb = g_fcb[s];
@@ -385,38 +464,10 @@ frame4(uint64_t k, unsigned s) {
   [e endEncoding];
   [fcb endCommandBuffer];
   commit4(k, fcb, kFramePass);
-
-  id<CAMetalDrawable> d = take(k);
-  if (!d)
-    return;
-  [g_q4 waitForDrawable:d];
-  id<MTL4CommandBuffer> pcb = g_pcb[s];
-  [pcb beginCommandBufferWithAllocator:g_alloc[s]];
-  if (!opt.set_on_queue && g_layer_set)
-    [pcb useResidencySet:g_layer_set];
-  rp = [MTL4RenderPassDescriptor new];
-  rp.colorAttachments[0].texture = d.texture;
-  rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
-  rp.colorAttachments[0].storeAction = MTLStoreActionStore;
-  e = [pcb renderCommandEncoderWithDescriptor:rp];
-  [e waitForFence:g_raw beforeEncoderStages:MTLStageFragment];
-  [e setRenderPipelineState:g_copy_pso];
-  [g_copy_table setTexture:g_offscreen.gpuResourceID atIndex:0];
-  [e setArgumentTable:g_copy_table atStages:MTLRenderStageFragment];
-  [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
-  [e updateFence:g_war afterEncoderStages:MTLStageFragment];
-  [e endEncoding];
-  [pcb endCommandBuffer];
-  g_war_updated = true;
-  SET(k, pass_commit, CACurrentMediaTime());
-  commit4(k, pcb, kPresentPass);
-  [g_q4 signalDrawable:d];
-  if (opt.present_on_queue)
-    dispatch_async(g_present_queue, ^{
-      [d presentAtTime:CACurrentMediaTime() + g_period];
-    });
+  if (opt.mtl3_present)
+    present_mtl3_on_mtl4(k);
   else
-    [d presentAtTime:CACurrentMediaTime() + g_period];
+    present_mtl4(k, s);
   if (opt.empty_commit) {
     [g_ecb[s] beginCommandBufferWithAllocator:g_alloc[s]];
     [g_ecb[s] endCommandBuffer];
@@ -636,12 +687,17 @@ path_text(char *out, size_t size) {
   }
 }
 
+static const char *
+present_name(void) {
+  return opt.mtl3_present ? "mtl3-on-mtl4" : opt.mtl4 ? "mtl4" : "mtl3";
+}
+
 static void
 print_window(const char *label, Window *w, const char *path) {
   printf(
       "%s %s %s frames=%ld dropped=%ld interval p50=%.1f p95=%.1f missed=%ld shown p50=%.1f p95=%.1f "
       "nextdrawable p50=%.1f max=%.1f passwait p50=%.2f max=%.2f early=%ld/%ld gpu p50=%.1f",
-      label, opt.mtl4 ? "mtl4" : "mtl3", opt.wave ? "wave" : "still", w->frames, w->dropped, pct(&w->interval, 0.5),
+      label, present_name(), opt.wave ? "wave" : "still", w->frames, w->dropped, pct(&w->interval, 0.5),
       pct(&w->interval, 0.95), w->missed, pct(&w->shown, 0.5), pct(&w->shown, 0.95), pct(&w->next_wait, 0.5),
       pct(&w->next_wait, 1), pct(&w->pass_wait, 0.5), pct(&w->pass_wait, 1), w->early, w->early_known,
       pct(&w->gpu, 0.5)
@@ -706,27 +762,28 @@ finish(int code) {
 static void
 usage(void) {
   printf(
-      "usage: present_cursor_test [--present mtl3|mtl4] [--layer-set buffer|queue] [--empty-commit on|off]\n"
+      "usage: present_cursor_test [--present mtl3|mtl4|mtl3-on-mtl4] [--layer-set buffer|queue] [--empty-commit on|off]\n"
       "                           [--present-thread encode|queue] [--pointer still|wave] [--move warp|event]\n"
       "                           [--frames N] [--gpu-ms MS]\n"
-      "The three Metal 4 variants take --present mtl4 (the default). See the source's header.\n"
+      "--layer-set and --present-thread take --present mtl4 (the default), --empty-commit either Metal 4 way.\n"
+      "See the source's header.\n"
   );
 }
 
 static bool
 parse(int argc, const char **argv) {
-  bool mtl4_only = false;
+  bool mtl4_only = false, drawable4_only = false;
   for (int i = 1; i < argc; i++) {
     const char *a = argv[i], *v = i + 1 < argc ? argv[i + 1] : NULL;
 #define IS(name) (!strcmp(a, name) && v && ++i)
-    if (IS("--present") && (!strcmp(v, "mtl3") || !strcmp(v, "mtl4")))
-      opt.mtl4 = !strcmp(v, "mtl4");
+    if (IS("--present") && (!strcmp(v, "mtl3") || !strcmp(v, "mtl4") || !strcmp(v, "mtl3-on-mtl4")))
+      opt.mtl4 = strcmp(v, "mtl3") != 0, opt.mtl3_present = !strcmp(v, "mtl3-on-mtl4");
     else if (IS("--layer-set") && (!strcmp(v, "buffer") || !strcmp(v, "queue")))
-      opt.set_on_queue = !strcmp(v, "queue"), mtl4_only |= opt.set_on_queue;
+      opt.set_on_queue = !strcmp(v, "queue"), drawable4_only |= opt.set_on_queue;
     else if (IS("--empty-commit") && (!strcmp(v, "on") || !strcmp(v, "off")))
       opt.empty_commit = !strcmp(v, "on"), mtl4_only |= !opt.empty_commit;
     else if (IS("--present-thread") && (!strcmp(v, "encode") || !strcmp(v, "queue")))
-      opt.present_on_queue = !strcmp(v, "queue"), mtl4_only |= opt.present_on_queue;
+      opt.present_on_queue = !strcmp(v, "queue"), drawable4_only |= opt.present_on_queue;
     else if (IS("--pointer") && (!strcmp(v, "still") || !strcmp(v, "wave")))
       opt.wave = !strcmp(v, "wave");
     else if (IS("--move") && (!strcmp(v, "warp") || !strcmp(v, "event")))
@@ -741,8 +798,12 @@ parse(int argc, const char **argv) {
     }
 #undef IS
   }
-  if (mtl4_only && !opt.mtl4) {
-    printf("present_cursor_test: --layer-set, --empty-commit and --present-thread are Metal 4 variants (--present mtl4)\n");
+  if ((mtl4_only || drawable4_only) && !opt.mtl4) {
+    printf("present_cursor_test: --layer-set, --empty-commit and --present-thread are Metal 4 variants\n");
+    return false;
+  }
+  if (drawable4_only && opt.mtl3_present) {
+    printf("present_cursor_test: --layer-set and --present-thread are --present mtl4's; mtl3-on-mtl4 has neither\n");
     return false;
   }
   return true;
@@ -876,6 +937,10 @@ setup_metal4(void) {
     printf("Metal 4: the layer has no residency set; the drawables may not be resident\n");
   else if (opt.set_on_queue)
     [g_q4 addResidencySet:g_layer_set];
+  g_frame_event = [g_device newSharedEvent];
+  g_shown_event = [g_device newSharedEvent];
+  if (!g_frame_event || !g_shown_event)
+    return false;
   g_present_queue =
       dispatch_queue_create("present", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0));
   return true;
@@ -955,7 +1020,8 @@ main(int argc, const char **argv) {
     }
     bool metal4 = [g_device supportsFamily:MTLGPUFamilyMetal4];
     if (opt.mtl4 && !metal4) {
-      printf("skip: no Metal 4 on %s (--present mtl4)\n", g_device.name.UTF8String);
+      printf("skip: no Metal 4 on %s (--present %s)\n", g_device.name.UTF8String,
+             opt.mtl3_present ? "mtl3-on-mtl4" : "mtl4");
       return 77;
     }
     if (opt.wave && opt.move_event && !CGPreflightPostEventAccess()) {
@@ -963,10 +1029,12 @@ main(int argc, const char **argv) {
       return 77;
     }
 
-    printf("present_cursor_test: present=%s", opt.mtl4 ? "mtl4" : "mtl3");
+    printf("present_cursor_test: present=%s", present_name());
+    if (opt.mtl4 && !opt.mtl3_present)
+      printf(" layer-set=%s present-thread=%s", opt.set_on_queue ? "queue" : "buffer",
+             opt.present_on_queue ? "queue" : "encode");
     if (opt.mtl4)
-      printf(" layer-set=%s empty-commit=%s present-thread=%s", opt.set_on_queue ? "queue" : "buffer",
-             opt.empty_commit ? "on" : "off", opt.present_on_queue ? "queue" : "encode");
+      printf(" empty-commit=%s", opt.empty_commit ? "on" : "off");
     printf(" pointer=%s", opt.wave ? "wave" : "still");
     if (opt.wave)
       printf(" move=%s (%d a second)", opt.move_event ? "event" : "warp", kPointerHz);
