@@ -361,7 +361,7 @@ jobs:
           cp -R dist "$RUNNER_TEMP/code"
           f=$RUNNER_TEMP/code/aarch64-windows/d3d11.dll
           text=$(toolchains/llvm-mingw/bin/llvm-readobj --sections "$f" |
-            awk '$1 == "Name:" { n = $2 } $1 == "PointerToRawData:" && n == ".text" { print $2; exit }')
+            awk '$1 == "Name:" { n = $2 } $1 == "PointerToRawData:" && n == ".text" && !done { print $2; done = 1 }')
           [[ -n $text ]]
           python3 -I -c 'import sys; p, o = sys.argv[1], int(sys.argv[2]); d = bytearray(open(p, "rb").read()); d[o] ^= 1; open(p, "wb").write(d)' \
             "$f" $((text + 64))
@@ -376,16 +376,17 @@ jobs:
           # points at lld's x64 export thunk (EXP+#..., in .hexpthk), which has no source of its own.
           bin=toolchains/llvm-mingw/bin dll=dist/aarch64-windows/d3d11.dll
           native=$("$bin/llvm-readobj" --coff-exports "$dll" |
-            awk '/^HybridObject/ { exit } $1 == "Name:" { n = $2 } $1 == "RVA:" && n == "D3D11CreateDevice" { print $2 }')
-          base=$("$bin/llvm-readobj" --file-headers "$dll" | awk '$1 == "ImageBase:" { print $2; exit }')
-          # llvm-nm prints an image's virtual addresses
-          ec=$("$bin/llvm-nm" symbols/aarch64-windows/d3d11.dll | awk '$3 == "#D3D11CreateDevice" { print "0x" $1; exit }')
+            awk '/^HybridObject/ { ec = 1 } $1 == "Name:" { n = $2 } $1 == "RVA:" && n == "D3D11CreateDevice" && !ec { print $2 }')
+          base=$("$bin/llvm-readobj" --file-headers "$dll" | awk '$1 == "ImageBase:" && !done { print $2; done = 1 }')
+          # llvm-nm prints an image's virtual addresses. No awk exit in these pipes: the producer would
+          # die of SIGPIPE, and pipefail fails the step
+          ec=$("$bin/llvm-nm" symbols/aarch64-windows/d3d11.dll | awk '$3 == "#D3D11CreateDevice" && !done { print "0x" $1; done = 1 }')
           [[ -n $native && -n $base && -n $ec ]]
           ec=$(printf '0x%X' $((ec - base)))
           echo "D3D11CreateDevice: ARM64 export $native, ARM64EC function $ec"
           LLVM_SYMBOLIZER=$bin/llvm-symbolizer .github/gw2/symbolize.zsh symbols d3d11.dll "$native" "$ec" |
             tee "$RUNNER_TEMP/symbolized.txt"
-          [[ $(grep -c -E '^0x[0-9A-Fa-f]+: #?D3D11CreateDevice at ' "$RUNNER_TEMP/symbolized.txt") == 2 ]]
+          [[ $(grep -c -E '^0x[0-9A-Fa-f]+: #?D3D11CreateDevice at [^?].*:[1-9][0-9]*:[0-9]+$' "$RUNNER_TEMP/symbolized.txt") == 2 ]]
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dxmt-arm64-${{ env.COMMIT }}
