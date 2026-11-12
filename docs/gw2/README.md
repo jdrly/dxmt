@@ -1236,7 +1236,7 @@ so only the first run after a version change builds LLVM (about 25 minutes per a
   or has to keep a new one, that list replaces the file. x86_64 also runs the meson `gw2` suite without
   `gw2-metal`. `.github/gw2/unix-call.py` preprocesses `winemetal_thunks.c` with the build's own command
   and requires `NSObject_retain`'s call to go through `__wine_unix_call_dispatcher` (#205).
-- **Build arm64 (Mach9)** (#182): the build for GW2 on Mac 0.2's engine, Mach9 0.3.1, made the way
+- **Build arm64** (#182, #215): the build for GW2 on Mac 0.2's engine, Mach9 0.3.1, made the way
   Mach9's `bin/build-dxmt.sh` makes its own DXMT. One meson tree with `build-arm64ec.txt` builds the
   ARM64X DLLs and the arm64 `winemetal.so`, a second with `build-win32.txt` the i386 DLLs, both with
   llvm-mingw 20261104 (Mach9's pin). They link against the engine's own `winemac.so`, `ntdll.so` and
@@ -1278,24 +1278,25 @@ so only the first run after a version change builds LLVM (about 25 minutes per a
   the branch's head, not GitHub's merge commit, so `VERSION` and the startup line name it. To play it,
   unzip it into a directory, then run `scripts/dxmt-use.zsh save <name> <dir>` and
   `scripts/dxmt-use.zsh <name>`.
-- **Artifact** `dxmt-mach9-<commit>` (#182): the arm64 build in the layout of the engine's
+- **Artifact** `dxmt-arm64-<commit>` (#182, #215): the arm64 build in the layout of the engine's
   `lib/wine/dxgi/dxmt` (`aarch64-windows`, `i386-windows`, `aarch64-unix`), the licenses and `VERSION`:
   its first line is the `git describe` that `d3d11.dll` carries, then `commit:`, `engine:` (the tarball,
   its SHA-256 and the Wine version its `ntdll.so` carries) and `toolchain:`. Kept 7 days. In the engine
   the tree's `aarch64-unix/winemetal.so` is a link to `lib/wine/aarch64-unix/winemetal.so`, which serves
   the i386 DLLs too.
-- **Publish** (#194): after every other job is green, packs `dxmt-mach9-<commit>` into
-  `dxmt-mach9-<commit>.tar.xz` (the same files at the archive's root, owner 0, directories and `.so`
+- **Publish** (#194): after every other job is green, packs `dxmt-arm64-<commit>` into
+  `dxmt-arm64-<commit>.tar.xz` (the same files at the archive's root, owner 0, directories and `.so`
   755, the rest 644), checks that it unpacks to the artifact's files sha256 for sha256, and prints the
   list and the archive's sha256. For a push to `gw2-on-mac` it adds the archive to the pre-release
-  `mach9-builds` of my fork, so a build stays downloadable past the artifact's 7 days, without a
+  `arm64-builds` of my fork, so a build stays downloadable past the artifact's 7 days, without a
   token:
-  `https://github.com/jdrly/dxmt/releases/download/mach9-builds/dxmt-mach9-<sha>.tar.xz`, with the
+  `https://github.com/jdrly/dxmt/releases/download/arm64-builds/dxmt-arm64-<sha>.tar.xz`, with the
   full sha. GitHub reports each asset's sha256 as its `digest`
-  (`gh release view mach9-builds -R jdrly/dxmt --json assets`). One release, one asset per commit, the 30
+  (`gh release view arm64-builds -R jdrly/dxmt --json assets`). One release, one asset per commit, the 30
   newest kept. An asset that's there already is never replaced. The release is never marked latest, and
   its tag is a lightweight one, which `git describe` and so `VERSION` skip. A run with a red job
-  publishes nothing. GW2 on Mac's dev build (jdrly/gw2-on-mac) takes its DXMT from this asset.
+  publishes nothing. GW2 on Mac's dev build (jdrly/gw2-on-mac) takes its DXMT from this asset. Builds
+  from before #215 stay in the pre-release `mach9-builds`, which this workflow no longer touches.
 
 ## Native tests
 
