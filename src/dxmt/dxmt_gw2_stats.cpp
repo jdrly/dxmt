@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <atomic>
 #include <deque>
+#include <format>
 #include <mutex>
 #include <vector>
 #include <version.h>
@@ -122,9 +123,114 @@ emitSections(double window_ms, uint32_t frames) {
 
 const char *const kApiNames[kApiCount] = {"present", "map", "flush", "create", "draw", "dispatch", "presentwait"};
 
+// --- creates (gw2 #202)
+
+const char *const kCreateKindNames[kCreateKindCount] = {"buffer", "texture", "view", "shader", "state", "query"};
+
+uint64_t
+textureBytes(uint32_t width, uint32_t height, uint32_t depth, uint32_t layers, uint32_t mips, uint32_t unit, bool bc) {
+  uint32_t levels = mips;
+  if (!levels) // the full chain, down to 1x1x1
+    for (uint32_t m = std::max({width, height, depth, 1u}); m; m >>= 1)
+      levels++;
+  levels = std::min(levels, 32u); // a bad description's count; D3D11 allows 15
+  uint64_t bytes = 0;
+  for (uint32_t level = 0; level < levels; level++) {
+    uint64_t w = std::max(width >> level, 1u), h = std::max(height >> level, 1u), d = std::max(depth >> level, 1u);
+    bytes += (bc ? ((w + 3) / 4) * ((h + 3) / 4) : w * h) * d * unit;
+  }
+  return bytes * std::max(layers, 1u);
+}
+
+void
+CreateTotals::add(const CreateCall &call, int64_t call_ns) {
+  unsigned k = (unsigned)call.kind;
+  calls[k]++;
+  ns[k] += call_ns;
+  if (k >= kCreateResourceKinds)
+    return;
+  bytes[k] += call.bytes;
+  init[k] += call.init;
+  size[k][sizeClass(call.bytes)]++;
+  if (call.kind == CreateKind::Buffer) {
+    if (call.usage < kUsageCount)
+      usage[call.usage]++;
+  } else {
+    rt += !!(call.bind & kBindRenderTarget);
+    ds += !!(call.bind & kBindDepthStencil);
+  }
+}
+
+void
+CreateTotals::add(const CreateTotals &o) {
+  for (unsigned k = 0; k < kCreateKindCount; k++) {
+    calls[k] += o.calls[k];
+    ns[k] += o.ns[k];
+  }
+  for (unsigned k = 0; k < kCreateResourceKinds; k++) {
+    bytes[k] += o.bytes[k];
+    init[k] += o.init[k];
+    for (unsigned s = 0; s < kSizeClassCount; s++)
+      size[k][s] += o.size[k][s];
+  }
+  for (unsigned u = 0; u < kUsageCount; u++)
+    usage[u] += o.usage[u];
+  rt += o.rt;
+  ds += o.ds;
+}
+
+uint64_t
+CreateTotals::totalCalls() const {
+  uint64_t n = 0;
+  for (auto c : calls)
+    n += c;
+  return n;
+}
+
+std::string
+createLine(const CreateTotals &thread, const CreateTotals &other, double frames) {
+  if (frames <= 0 || (!thread.totalCalls() && !other.totalCalls()))
+    return {};
+  std::string out;
+  auto append = [&](const char *p, const CreateTotals &t) {
+    int64_t ns = 0;
+    for (auto v : t.ns)
+      ns += v;
+    out += std::format(" {}calls={:.2f} {}ms={:.3f} {}total={}", p, t.totalCalls() / frames, p, ns / 1e6 / frames, p,
+                       t.totalCalls());
+    for (unsigned k = 0; k < kCreateKindCount; k++)
+      if (t.calls[k])
+        out += std::format(" {}{}={:.2f}/{:.3f}", p, kCreateKindNames[k], t.calls[k] / frames, t.ns[k] / 1e6 / frames);
+    for (unsigned k = 0; k < kCreateResourceKinds; k++) {
+      if (!t.calls[k])
+        continue;
+      auto &s = t.size[k];
+      out += std::format(
+          " {}{}.kb={:.1f} {}{}.init={:.2f} {}{}.size=<64k:{:.2f}/<1m:{:.2f}/<=16m:{:.2f}/>16m:{:.2f}", p,
+          kCreateKindNames[k], t.bytes[k] / 1024.0 / frames, p, kCreateKindNames[k], t.init[k] / frames, p,
+          kCreateKindNames[k], s[0] / frames, s[1] / frames, s[2] / frames, s[3] / frames
+      );
+      if (k == (unsigned)CreateKind::Buffer)
+        out += std::format(
+            " {}buffer.usage=default:{:.2f}/immutable:{:.2f}/dynamic:{:.2f}/staging:{:.2f}", p, t.usage[0] / frames,
+            t.usage[1] / frames, t.usage[2] / frames, t.usage[3] / frames
+        );
+      else
+        out += std::format(" {}texture.rt={:.2f} {}texture.ds={:.2f}", p, t.rt / frames, p, t.ds / frames);
+    }
+  };
+  append("", thread);
+  if (other.totalCalls())
+    append("other.", other);
+  return out.substr(1);
+}
+
 namespace {
 std::atomic<uint64_t> g_other_calls[kApiCount];
 std::atomic<int64_t> g_other_ns[kApiCount];
+// gw2 (#202): the other threads' creates; a few a frame, so a lock is cheap
+std::mutex g_other_create_mutex;
+CreateTotals g_other_create;
 
 // gw2 (#28): ApiThread ownership. A thread takes a block on its first lookup and keeps it in a
 // fiber-local slot whose callback releases it when the thread exits. A released block has tid 0, so
@@ -232,6 +338,16 @@ ApiThread::add(Api api, int64_t ns) {
     g_other_ns[(unsigned)api].fetch_add(ns, std::memory_order_relaxed);
 }
 
+void
+ApiThread::create(const CreateCall &call, int64_t ns) {
+  if (presenter) {
+    interval.create.add(call, ns);
+    return;
+  }
+  std::lock_guard lock(g_other_create_mutex);
+  g_other_create.add(call, ns);
+}
+
 ApiThread &
 apiThread() {
   DWORD fls = flsIndex();
@@ -321,6 +437,12 @@ otherDrain() {
     t.ns[i] = g_other_ns[i].exchange(0, std::memory_order_relaxed);
   }
   return t;
+}
+
+CreateTotals
+otherCreateDrain() {
+  std::lock_guard lock(g_other_create_mutex);
+  return std::exchange(g_other_create, CreateTotals{});
 }
 
 void
