@@ -1,6 +1,6 @@
 #!/bin/zsh
 # gw2 (#199): name the functions at addresses in my arm64 build, from the symbols of the same commit
-# (the artifact dxmt-mach9-symbols-<commit>, or dxmt-mach9-symbols-<sha>.tar.xz on mach9-builds,
+# (the artifact dxmt-arm64-symbols-<commit>, or dxmt-arm64-symbols-<sha>.tar.xz on arm64-builds,
 # unpacked; VERSION in both names the commit).
 #
 #   symbolize.zsh <symbols dir> <dll> <rva>...

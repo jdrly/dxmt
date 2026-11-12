@@ -18,7 +18,7 @@ Closes #
 
 ## Definition of Done
 
-- [ ] The `GW2` workflow is green: x86_64 and i386 without new warnings, arm64 (Mach9), the native tests.
+- [ ] The `GW2` workflow is green: x86_64 and i386 without new warnings, arm64, the native tests.
 - [ ] The change logs when it acts, and a behaviour change has a `DXMT_*` off-switch; both are in `docs/gw2/README.md`.
 - [ ] Measured in GW2: STATS before and after in the same place and settings, plus the off-switch run.
 - [ ] Nothing measurably slower or worse to look at.
