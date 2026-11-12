@@ -103,6 +103,17 @@ public:
     return (bound.qword(0) & mask) != 0;
   }
 
+  // gw2 (#203): the bound bits of slots [start, start + count), slot `start` in bit 0. Takes 1 to 64
+  // slots, all below NumElements; a range may cross the first 64 slots' word.
+  constexpr uint64_t
+  bound_range(size_t start, size_t count) const noexcept {
+    size_t word = start / 64, shift = start % 64;
+    uint64_t bits = bound.qword(word) >> shift;
+    if (shift && word + 1 < (NumElements + 63) / 64)
+      bits |= bound.qword(word + 1) << (64 - shift);
+    return count < 64 ? bits & ((1ull << count) - 1) : bits;
+  }
+
   constexpr uint32_t
   max_binding_64() const noexcept {
     uint64_t qword = dirty.qword(0);
@@ -255,4 +266,29 @@ public:
     return NumElements;
   }
 };
+
+// gw2 (#203): DXMT_SKIP_EMPTY_SLOTS's walk for XXSetShaderResources and XXSetSamplers. Calls
+// visit(slot) for the slots [start, start + count) in ascending order. With `skip` on and 1 to 64
+// slots in range, it calls it only for a slot whose incoming entry isn't null or that is bound. A null
+// entry for a slot that holds nothing changes nothing in the setters: unbind() finds the slot empty,
+// and no counter moves. A visit binds or unbinds only its own slot, so the bits read before the
+// first visit are still that slot's bits when its turn comes. Wider or out-of-range calls take the
+// full walk.
+template <typename Element, size_t NumElements, typename Entry, typename Visit>
+inline void
+visit_settable_slots(
+    const BindingSet<Element, NumElements> &set, unsigned start, unsigned count, Entry *const *entries, bool skip,
+    Visit &&visit
+) {
+  if (skip && count - 1u < 64u && uint64_t(start) + count <= NumElements) {
+    uint64_t mask = 0;
+    for (unsigned i = 0; i < count; i++)
+      mask |= uint64_t(entries[i] != nullptr) << i;
+    for (mask |= set.bound_range(start, count); mask; mask &= mask - 1)
+      visit(start + bit::tzcnt(mask));
+    return;
+  }
+  for (unsigned slot = start; slot < start + count; slot++)
+    visit(slot);
+}
 } // namespace dxmt
