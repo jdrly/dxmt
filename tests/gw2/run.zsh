@@ -81,6 +81,10 @@ for f in tests/gw2/*_test.*; do
 done
 
 for dir in $MESON; do
+  if (( BUILD_ONLY )); then
+    print "none  meson test -C $dir: --build-only runs no test"
+    continue
+  fi
   case $KIND in
     pure) args=(--suite gw2 --no-suite gw2-metal) ;;
     metal) args=(--suite gw2-metal) ;;

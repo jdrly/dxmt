@@ -548,6 +548,7 @@ static struct {
   double replaced; // when the frame after that one was presented; 0 until then
 } g_surf[kSurfaces];
 static int g_seconds, g_direct, g_composited, g_unknown;
+static long g_presented_all; // over the whole run, the first second too
 
 static void
 push(Series *s, double x) {
@@ -657,6 +658,7 @@ collect(bool final) {
         if (g_surf[i].frame == g_last_frame)
           g_surf[i].replaced = f.presented;
       }
+      g_presented_all++;
       g_last_presented = f.presented;
       g_last_surface = f.surface;
       g_last_frame = k;
@@ -734,12 +736,15 @@ finish(int code) {
          (unsigned long long)atomic_load(&g_taken), g_direct, g_composited, g_unknown);
   if (g_composited || g_unknown)
     printf("note: the layer wasn't on the direct path for the whole run, so this run can't show #223\n");
+  if (opt.wave)
+    printf("note: flat frames count against #223 only if the window server's sample shows the cursor as its "
+           "own plane (cursor_callback, set_cursor_surface)\n");
   int errors = atomic_load(&g_errors);
   if (errors) {
     printf("FAIL: %d command buffers reported a Metal error\n", errors);
     code = 1;
-  } else if (g_sum.frames && g_sum.frames == g_sum.dropped) {
-    printf("FAIL: no frame was presented after the first second\n");
+  } else if (!g_presented_all) {
+    printf("FAIL: no frame was presented\n");
     code = 1;
   }
   fflush(stdout);
@@ -885,14 +890,21 @@ describe_display(CGDirectDisplayID display, NSScreen *screen, uint32_t displays)
   if (hz > 0)
     g_period = 1.0 / hz;
   uint32_t vendor = CGDisplayVendorNumber(display), model = CGDisplayModelNumber(display);
+  // Apple: 'unkn' (kDisplayVendorIDUnknown) when the display has no vendor id, 0xFFFFFFFF when no monitor
+  // is behind the display id. A virtual display may carry any vendor id its maker gives it, so
+  // "external" doesn't prove a monitor: the path status in every line decides.
+  bool no_vendor = vendor == 0 || vendor == 0x756e6b6eu || vendor == 0xffffffffu;
   const char *kind = CGDisplayIsBuiltin(display) ? "built-in"
-                     : vendor                    ? "external"
-                                                 : "unknown, no vendor id (maybe a virtual display)";
+                     : no_vendor ? "unknown: no vendor id or no monitor (maybe a virtual display, which may not "
+                                   "show #223)"
+                                 : "external, by its vendor id (a virtual display can have one too)";
   printf("display: %u \"%s\", %s, vendor 0x%x model 0x%x, mode %zux%zu pixels at %.2f Hz, %.0fx%.0f points at "
          "scale %.1f, %s, %u active display(s)\n",
          display, screen.localizedName.UTF8String, kind, vendor, model, pw, ph, 1.0 / g_period, screen.frame.size.width,
          screen.frame.size.height, screen.backingScaleFactor,
          CGDisplayIsInMirrorSet(display) ? "mirrored" : "not mirrored", displays);
+  printf("cursor: nothing public says whether the pointer is a hardware plane here; a window server sample "
+         "beside the run shows it (cursor_callback, set_cursor_surface)\n");
 }
 
 static bool
