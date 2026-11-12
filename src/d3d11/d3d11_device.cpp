@@ -91,11 +91,25 @@ public:
 
   bool IsTraced() override { return is_traced_; }
 
+  // gw2 (#202): CREATE's texture fields, for a counted call only (the format lookup is stats-only)
+  void gw2DescribeTexture(gw2::CreateScope &scope, DXGI_FORMAT format, UINT width, UINT height, UINT depth,
+                          UINT layers, UINT mips, D3D11_USAGE usage, UINT bind, const D3D11_SUBRESOURCE_DATA *init) {
+    if (!scope.counting())
+      return;
+    MTL_DXGI_FORMAT_DESC desc;
+    MTLQueryDXGIFormat(GetMTLDevice(), format, desc); // on failure PixelFormat is Invalid: 0 bytes
+    uint64_t bytes = gw2::textureBytes(width, height, depth, layers, mips, MTLGetTexelSize(desc.PixelFormat),
+                                       IsBlockCompressionFormat(desc.PixelFormat));
+    scope.resource(bytes, usage, bind, init != nullptr);
+  }
+
   HRESULT STDMETHODCALLTYPE
   CreateBuffer(const D3D11_BUFFER_DESC *pDesc,
                const D3D11_SUBRESOURCE_DATA *pInitialData,
                ID3D11Buffer **ppBuffer) override {
-    GW2_API_SCOPE(Create);
+    GW2_CREATE_SCOPE(Buffer);
+    if (pDesc && gw2_create_scope_.counting())
+      gw2_create_scope_.resource(pDesc->ByteWidth, pDesc->Usage, pDesc->BindFlags, pInitialData != nullptr);
     InitReturnPtr(ppBuffer);
 
     if (pDesc->ByteWidth == 0 && !(pDesc->MiscFlags & D3D11_RESOURCE_MISC_TILE_POOL))
@@ -122,12 +136,14 @@ public:
   CreateTexture1D(const D3D11_TEXTURE1D_DESC *pDesc,
                   const D3D11_SUBRESOURCE_DATA *pInitialData,
                   ID3D11Texture1D **ppTexture1D) override {
-    GW2_API_SCOPE(Create);
+    GW2_CREATE_SCOPE(Texture);
 
     InitReturnPtr(ppTexture1D);
 
     if (!pDesc)
       return E_INVALIDARG;
+    gw2DescribeTexture(gw2_create_scope_, pDesc->Format, pDesc->Width, 1, 1, pDesc->ArraySize, pDesc->MipLevels,
+                       pDesc->Usage, pDesc->BindFlags, pInitialData);
 
     if (pDesc->MiscFlags & D3D11_RESOURCE_MISC_TILED)
       return E_INVALIDARG; // not supported yet
@@ -160,7 +176,11 @@ public:
   CreateTexture2D(const D3D11_TEXTURE2D_DESC *pDesc,
                   const D3D11_SUBRESOURCE_DATA *pInitialData,
                   ID3D11Texture2D **ppTexture2D) override {
-    GW2_API_SCOPE(Create);
+    GW2_CREATE_SCOPE(Texture);
+    if (pDesc)
+      gw2DescribeTexture(gw2_create_scope_, pDesc->Format, pDesc->Width, pDesc->Height, 1,
+                         pDesc->ArraySize * pDesc->SampleDesc.Count, pDesc->MipLevels, pDesc->Usage, pDesc->BindFlags,
+                         pInitialData);
     D3D11_TEXTURE2D_DESC1 desc1;
     UpgradeResourceDescription(pDesc, desc1);
     return CreateTexture2D1(&desc1, pInitialData,
@@ -171,7 +191,10 @@ public:
   CreateTexture3D(const D3D11_TEXTURE3D_DESC *pDesc,
                   const D3D11_SUBRESOURCE_DATA *pInitialData,
                   ID3D11Texture3D **ppTexture3D) override {
-    GW2_API_SCOPE(Create);
+    GW2_CREATE_SCOPE(Texture);
+    if (pDesc)
+      gw2DescribeTexture(gw2_create_scope_, pDesc->Format, pDesc->Width, pDesc->Height, pDesc->Depth, 1,
+                         pDesc->MipLevels, pDesc->Usage, pDesc->BindFlags, pInitialData);
     D3D11_TEXTURE3D_DESC1 desc1;
     UpgradeResourceDescription(pDesc, desc1);
     return CreateTexture3D1(&desc1, pInitialData,
@@ -181,7 +204,7 @@ public:
   HRESULT STDMETHODCALLTYPE CreateShaderResourceView(
       ID3D11Resource *pResource, const D3D11_SHADER_RESOURCE_VIEW_DESC *pDesc,
       ID3D11ShaderResourceView **ppSRView) override {
-    GW2_API_SCOPE(Create);
+    GW2_CREATE_SCOPE(View);
     if (pDesc) {
       D3D11_SHADER_RESOURCE_VIEW_DESC1 desc1;
       UpgradeViewDescription(pDesc, desc1);
@@ -195,7 +218,7 @@ public:
   HRESULT STDMETHODCALLTYPE CreateUnorderedAccessView(
       ID3D11Resource *pResource, const D3D11_UNORDERED_ACCESS_VIEW_DESC *pDesc,
       ID3D11UnorderedAccessView **ppUAView) override {
-    GW2_API_SCOPE(Create);
+    GW2_CREATE_SCOPE(View);
     if (pDesc) {
       D3D11_UNORDERED_ACCESS_VIEW_DESC1 desc1;
       UpgradeViewDescription(pDesc, desc1);
@@ -209,7 +232,7 @@ public:
   HRESULT STDMETHODCALLTYPE CreateRenderTargetView(
       ID3D11Resource *pResource, const D3D11_RENDER_TARGET_VIEW_DESC *pDesc,
       ID3D11RenderTargetView **ppRTView) override {
-    GW2_API_SCOPE(Create);
+    GW2_CREATE_SCOPE(View);
     if (pDesc) {
       D3D11_RENDER_TARGET_VIEW_DESC1 desc1;
       UpgradeViewDescription(pDesc, desc1);
@@ -223,7 +246,7 @@ public:
   HRESULT STDMETHODCALLTYPE CreateDepthStencilView(
       ID3D11Resource *pResource, const D3D11_DEPTH_STENCIL_VIEW_DESC *pDesc,
       ID3D11DepthStencilView **ppDepthStencilView) override {
-    GW2_API_SCOPE(Create);
+    GW2_CREATE_SCOPE(View);
     InitReturnPtr(ppDepthStencilView);
 
     if (!pResource)
@@ -239,7 +262,7 @@ public:
       const D3D11_INPUT_ELEMENT_DESC *pInputElementDescs, UINT NumElements,
       const void *pShaderBytecodeWithInputSignature, SIZE_T BytecodeLength,
       ID3D11InputLayout **ppInputLayout) override {
-    GW2_API_SCOPE(Create);
+    GW2_CREATE_SCOPE(State);
     InitReturnPtr(ppInputLayout);
 
     if (!pInputElementDescs)
@@ -262,7 +285,7 @@ public:
   CreateVertexShader(const void *pShaderBytecode, SIZE_T BytecodeLength,
                      ID3D11ClassLinkage *pClassLinkage,
                      ID3D11VertexShader **ppVertexShader) override {
-    GW2_API_SCOPE(Create);
+    GW2_CREATE_SCOPE(Shader);
     InitReturnPtr(ppVertexShader);
     if (pClassLinkage != nullptr)
       WARN("Class linkage not supported");
@@ -275,7 +298,7 @@ public:
   CreateGeometryShader(const void *pShaderBytecode, SIZE_T BytecodeLength,
                        ID3D11ClassLinkage *pClassLinkage,
                        ID3D11GeometryShader **ppGeometryShader) override {
-    GW2_API_SCOPE(Create);
+    GW2_CREATE_SCOPE(Shader);
     InitReturnPtr(ppGeometryShader);
     if (pClassLinkage != nullptr)
       WARN("Class linkage not supported");
@@ -293,7 +316,7 @@ public:
       const UINT *pBufferStrides, UINT NumStrides, UINT RasterizedStream,
       ID3D11ClassLinkage *pClassLinkage,
       ID3D11GeometryShader **ppGeometryShader) override {
-    GW2_API_SCOPE(Create);
+    GW2_CREATE_SCOPE(Shader);
     InitReturnPtr(ppGeometryShader);
     if (pClassLinkage != nullptr)
       WARN("Class linkage not supported");
@@ -322,7 +345,7 @@ public:
   CreatePixelShader(const void *pShaderBytecode, SIZE_T BytecodeLength,
                     ID3D11ClassLinkage *pClassLinkage,
                     ID3D11PixelShader **ppPixelShader) override {
-    GW2_API_SCOPE(Create);
+    GW2_CREATE_SCOPE(Shader);
     InitReturnPtr(ppPixelShader);
     if (pClassLinkage != nullptr)
       WARN("Class linkage not supported");
@@ -335,7 +358,7 @@ public:
   CreateHullShader(const void *pShaderBytecode, SIZE_T BytecodeLength,
                    ID3D11ClassLinkage *pClassLinkage,
                    ID3D11HullShader **ppHullShader) override {
-    GW2_API_SCOPE(Create);
+    GW2_CREATE_SCOPE(Shader);
     InitReturnPtr(ppHullShader);
     if (pClassLinkage != nullptr)
       WARN("Class linkage not supported");
@@ -351,7 +374,7 @@ public:
   CreateDomainShader(const void *pShaderBytecode, SIZE_T BytecodeLength,
                      ID3D11ClassLinkage *pClassLinkage,
                      ID3D11DomainShader **ppDomainShader) override {
-    GW2_API_SCOPE(Create);
+    GW2_CREATE_SCOPE(Shader);
     InitReturnPtr(ppDomainShader);
     if (pClassLinkage != nullptr)
       WARN("Class linkage not supported");
@@ -367,7 +390,7 @@ public:
   CreateComputeShader(const void *pShaderBytecode, SIZE_T BytecodeLength,
                       ID3D11ClassLinkage *pClassLinkage,
                       ID3D11ComputeShader **ppComputeShader) override {
-    GW2_API_SCOPE(Create);
+    GW2_CREATE_SCOPE(Shader);
     InitReturnPtr(ppComputeShader);
     if (pClassLinkage != nullptr)
       WARN("Class linkage not supported");
@@ -385,7 +408,7 @@ public:
   HRESULT STDMETHODCALLTYPE
   CreateBlendState(const D3D11_BLEND_DESC *pBlendStateDesc,
                    ID3D11BlendState **ppBlendState) override {
-    GW2_API_SCOPE(Create);
+    GW2_CREATE_SCOPE(State);
     ID3D11BlendState1 *pBlendState1;
     D3D11_BLEND_DESC1 desc;
     desc.AlphaToCoverageEnable = pBlendStateDesc->AlphaToCoverageEnable;
@@ -418,7 +441,7 @@ public:
   HRESULT STDMETHODCALLTYPE CreateDepthStencilState(
       const D3D11_DEPTH_STENCIL_DESC *pDesc,
       ID3D11DepthStencilState **ppDepthStencilState) override {
-    GW2_API_SCOPE(Create);
+    GW2_CREATE_SCOPE(State);
     return depthstencil_states_.CreateStateObject(
         pDesc, (IMTLD3D11DepthStencilState **)ppDepthStencilState);
   }
@@ -426,7 +449,7 @@ public:
   HRESULT STDMETHODCALLTYPE
   CreateRasterizerState(const D3D11_RASTERIZER_DESC *pRasterizerDesc,
                         ID3D11RasterizerState **ppRasterizerState) override {
-    GW2_API_SCOPE(Create);
+    GW2_CREATE_SCOPE(State);
     ID3D11RasterizerState2 *pRasterizerState;
     D3D11_RASTERIZER_DESC2 desc;
     desc.FillMode = pRasterizerDesc->FillMode;
@@ -450,14 +473,14 @@ public:
   HRESULT STDMETHODCALLTYPE
   CreateSamplerState(const D3D11_SAMPLER_DESC *pSamplerDesc,
                      ID3D11SamplerState **ppSamplerState) override {
-    GW2_API_SCOPE(Create);
+    GW2_CREATE_SCOPE(State);
     return sampler_states_.CreateStateObject(
         pSamplerDesc, (D3D11SamplerState **)ppSamplerState);
   }
 
   HRESULT STDMETHODCALLTYPE
   CreateQuery(const D3D11_QUERY_DESC *pQueryDesc, ID3D11Query **ppQuery) override {
-    GW2_API_SCOPE(Create);
+    GW2_CREATE_SCOPE(Query);
     D3D11_QUERY_DESC1 desc;
     desc.Query = pQueryDesc->Query;
     desc.MiscFlags = pQueryDesc->MiscFlags;
@@ -468,7 +491,7 @@ public:
   HRESULT STDMETHODCALLTYPE
   CreatePredicate(const D3D11_QUERY_DESC *pPredicateDesc,
                   ID3D11Predicate **ppPredicate) override {
-    GW2_API_SCOPE(Create);
+    GW2_CREATE_SCOPE(Query);
     return CreateQuery(pPredicateDesc,
                        reinterpret_cast<ID3D11Query **>(ppPredicate));
   }
@@ -765,7 +788,7 @@ public:
   HRESULT STDMETHODCALLTYPE
       CreateBlendState1(const D3D11_BLEND_DESC1 *pBlendStateDesc,
                         ID3D11BlendState1 **ppBlendState) override {
-        GW2_API_SCOPE(Create);
+    GW2_CREATE_SCOPE(State);
     return pipeline_cache_->AddBlendState(pBlendStateDesc,
                                           (IMTLD3D11BlendState **)ppBlendState);
   }
@@ -773,7 +796,7 @@ public:
   HRESULT STDMETHODCALLTYPE
   CreateRasterizerState1(const D3D11_RASTERIZER_DESC1 *pRasterizerDesc,
                          ID3D11RasterizerState1 **ppRasterizerState) override {
-    GW2_API_SCOPE(Create);
+    GW2_CREATE_SCOPE(State);
     ID3D11RasterizerState2 *pRasterizerState;
     D3D11_RASTERIZER_DESC2 desc;
     desc.FillMode = pRasterizerDesc->FillMode;
@@ -874,11 +897,14 @@ public:
   CreateTexture2D1(const D3D11_TEXTURE2D_DESC1 *pDesc,
                    const D3D11_SUBRESOURCE_DATA *pInitialData,
                    ID3D11Texture2D1 **ppTexture2D) override {
-    GW2_API_SCOPE(Create);
+    GW2_CREATE_SCOPE(Texture);
     InitReturnPtr(ppTexture2D);
 
     if (!pDesc)
       return E_INVALIDARG;
+    gw2DescribeTexture(gw2_create_scope_, pDesc->Format, pDesc->Width, pDesc->Height, 1,
+                       pDesc->ArraySize * pDesc->SampleDesc.Count, pDesc->MipLevels, pDesc->Usage, pDesc->BindFlags,
+                       pInitialData);
 
     if ((pDesc->MiscFlags & D3D11_RESOURCE_MISC_TILED))
       return E_INVALIDARG; // not supported yet
@@ -911,11 +937,13 @@ public:
   CreateTexture3D1(const D3D11_TEXTURE3D_DESC1 *pDesc,
                    const D3D11_SUBRESOURCE_DATA *pInitialData,
                    ID3D11Texture3D1 **ppTexture3D) override {
-    GW2_API_SCOPE(Create);
+    GW2_CREATE_SCOPE(Texture);
     InitReturnPtr(ppTexture3D);
 
     if (!pDesc)
       return E_INVALIDARG;
+    gw2DescribeTexture(gw2_create_scope_, pDesc->Format, pDesc->Width, pDesc->Height, pDesc->Depth, 1,
+                       pDesc->MipLevels, pDesc->Usage, pDesc->BindFlags, pInitialData);
 
     if ((pDesc->MiscFlags & D3D11_RESOURCE_MISC_TILED))
       return E_INVALIDARG; // not supported yet
@@ -943,7 +971,7 @@ public:
   HRESULT STDMETHODCALLTYPE
   CreateRasterizerState2(const D3D11_RASTERIZER_DESC2 *pRasterizerDesc,
                          ID3D11RasterizerState2 **ppRasterizerState) override {
-    GW2_API_SCOPE(Create);
+    GW2_CREATE_SCOPE(State);
     return rasterizer_states_.CreateStateObject(
         pRasterizerDesc, (IMTLD3D11RasterizerState **)ppRasterizerState);
   }
@@ -951,7 +979,7 @@ public:
   HRESULT STDMETHODCALLTYPE CreateShaderResourceView1(
       ID3D11Resource *pResource, const D3D11_SHADER_RESOURCE_VIEW_DESC1 *pDesc,
       ID3D11ShaderResourceView1 **ppSRView) override {
-    GW2_API_SCOPE(Create);
+    GW2_CREATE_SCOPE(View);
     InitReturnPtr(ppSRView);
 
     if (!pResource)
@@ -966,7 +994,7 @@ public:
   HRESULT STDMETHODCALLTYPE CreateUnorderedAccessView1(
       ID3D11Resource *pResource, const D3D11_UNORDERED_ACCESS_VIEW_DESC1 *pDesc,
       ID3D11UnorderedAccessView1 **ppUAView) override {
-    GW2_API_SCOPE(Create);
+    GW2_CREATE_SCOPE(View);
     InitReturnPtr(ppUAView);
 
     if (!pResource)
@@ -981,7 +1009,7 @@ public:
   HRESULT STDMETHODCALLTYPE CreateRenderTargetView1(
       ID3D11Resource *pResource, const D3D11_RENDER_TARGET_VIEW_DESC1 *pDesc,
       ID3D11RenderTargetView1 **ppRTView) override {
-    GW2_API_SCOPE(Create);
+    GW2_CREATE_SCOPE(View);
     InitReturnPtr(ppRTView);
 
     if (!pResource)
@@ -995,7 +1023,7 @@ public:
 
   HRESULT STDMETHODCALLTYPE
   CreateQuery1(const D3D11_QUERY_DESC1 *pQueryDesc, ID3D11Query1 **ppQuery) override {
-    GW2_API_SCOPE(Create);
+    GW2_CREATE_SCOPE(Query);
     InitReturnPtr(ppQuery);
 
     if (!pQueryDesc)
