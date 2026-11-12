@@ -3,20 +3,22 @@
 # (.github/workflows/gw2.yml) runs pure and metal on a runner without Metal 4, where the Metal 4 tests
 # skip (docs/gw2/README.md, CI). Run it on the Mac from anywhere in the checkout:
 #
-#   tests/gw2/run.zsh [pure|metal|all] [--meson <build dir>]...
+#   tests/gw2/run.zsh [pure|metal|display|all] [--build-only] [--meson <build dir>]...
 #
 # A test registers in its own header. Every tests/gw2/*_test.* with these lines is one test:
 #
-#   // gw2-test: pure          (no Metal device needed) or: metal
+#   // gw2-test: pure          (no Metal device needed) or: metal, or: display (a window on a display in
+#                              a GUI session; only by name, never in all)
 #   // gw2-build: <command>    zsh, run from the checkout's root; several lines run as one script.
 #                              $OUT is the test's output path (a file in the runner's directory; a
 #                              test may write $OUT_<suffix> files too), $T that directory
 #   // gw2-run: <command>      optional, as gw2-build; default: "$OUT"
 #
 # A failed build, or a nonzero exit, fails the run. Exit 77 is "skipped" (unsupported hardware or
-# OS), and a skipped test is never counted as passed. A test without the lines is listed as
-# unregistered. --meson <dir> also runs `meson test -C <dir> --suite gw2` (pure: the gw2 suite
-# minus gw2-metal; metal: gw2-metal), e.g. B1's bridge-native-smoke in <build>/x64.
+# OS), and a skipped test is never counted as passed. --build-only builds the selected tests and runs
+# none (the CI's check of the display tests). A test without the lines is listed as unregistered.
+# --meson <dir> also runs `meson test -C <dir> --suite gw2` (pure: the gw2 suite minus gw2-metal;
+# metal: gw2-metal), e.g. B1's bridge-native-smoke in <build>/x64.
 #
 # The runner's directory is GW2_TEST_DIR, or a new one under $TMPDIR; it's kept for the logs.
 
@@ -27,12 +29,14 @@ ROOT=${0:A:h:h:h}
 cd "$ROOT" || exit 2
 
 KIND=all
+BUILD_ONLY=0
 MESON=()
 while (( $# )); do
   case $1 in
-    pure|metal|all) KIND=$1 ;;
+    pure|metal|display|all) KIND=$1 ;;
     --meson) shift; MESON+=("$1") ;;
-    -h|--help) sed -n '2,22p' "${0:A}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --build-only) BUILD_ONLY=1 ;;
+    -h|--help) sed -n '2,24p' "${0:A}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) print -u2 "run.zsh: unknown argument $1"; exit 2 ;;
   esac
   shift
@@ -42,7 +46,7 @@ done
 T=${GW2_TEST_DIR:-$(mktemp -d "${${TMPDIR:-/tmp}%/}/gw2-tests.XXXXXX")}
 mkdir -p "$T"
 
-typeset -a passed failed skipped unregistered
+typeset -a passed failed skipped built unregistered
 for f in tests/gw2/*_test.*; do
   name=${f:t:r}
   kind=$(sed -n 's|^// gw2-test: *\([a-z]*\).*|\1|p' "$f" | head -1)
@@ -52,7 +56,7 @@ for f in tests/gw2/*_test.*; do
     unregistered+=("$name")
     continue
   fi
-  [[ $KIND == all || $KIND == "$kind" ]] || continue
+  [[ $KIND == "$kind" || ( $KIND == all && $kind != display ) ]] || continue
   [[ -n $run ]] || run='"$OUT"'
   OUT=$T/$name
   log=$T/$name.log
@@ -60,6 +64,11 @@ for f in tests/gw2/*_test.*; do
     failed+=("$name (build)")
     print "FAIL  $name: build failed ($log)"
     tail -n 15 "$log" | sed 's/^/      /'
+    continue
+  fi
+  if (( BUILD_ONLY )); then
+    built+=("$name")
+    print "built $name ($kind)"
     continue
   fi
   OUT=$OUT T=$T zsh -c "set -e; $run" >>"$log" 2>&1
@@ -76,6 +85,7 @@ for dir in $MESON; do
     pure) args=(--suite gw2 --no-suite gw2-metal) ;;
     metal) args=(--suite gw2-metal) ;;
     all) args=(--suite gw2) ;;
+    display) print "none  meson test -C $dir: no display suite"; continue ;;
   esac
   log=$T/meson-${dir:t}.log
   if meson test -C "$dir" $args >"$log" 2>&1; then
@@ -95,6 +105,6 @@ for dir in $MESON; do
 done
 
 print
-print "passed ${#passed}, failed ${#failed}, skipped ${#skipped} (not passed)${unregistered:+, unregistered: ${(j:, :)unregistered}}"
+print "passed ${#passed}, failed ${#failed}, skipped ${#skipped} (not passed)${built:+, built and not run ${#built}}${unregistered:+, unregistered: ${(j:, :)unregistered}}"
 print "logs: $T"
 (( ${#failed} == 0 ))

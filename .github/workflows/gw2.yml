@@ -15,7 +15,7 @@
 #   with the engine's DXMT and ntdll.dll without running anything. Artifact dxmt-arm64-<commit>:
 #   aarch64-windows, i386-windows, aarch64-unix, VERSION, kept 7 days.
 # tests: zsh -n for the zsh scripts and warnings.zsh's self-check, then tests/gw2/run.zsh pure,
-#   and metal on the runner's Metal device.
+#   and metal on the runner's Metal device. The display tests only build here (#225).
 # lint: actionlint for the workflows.
 # artifact: the installable build of the commit (as build-dxmt.zsh stages it: x86_64-windows,
 #   i386-windows, x86_64-unix, VERSION), kept 7 days, for scripts/dxmt-use.zsh save.
@@ -380,6 +380,9 @@ jobs:
       # it runs on the Mac, with the game's recipes and AIR; here it only has to build (#159)
       - name: Cold-cache benchmark builds
         run: clang -x objective-c -fobjc-arc -O1 -Wall -arch x86_64 tests/gw2/stagecache_bench.m -framework Metal -framework Foundation -lsqlite3 -o "$RUNNER_TEMP/stagecache"
+      # they need a GUI session, a display and Metal 4; they run on my Mac (#225)
+      - name: Display tests build
+        run: tests/gw2/run.zsh display --build-only
       - name: Metal tests
         run: |
           status=0
