@@ -342,27 +342,34 @@ jobs:
         run: .github/gw2/check-mach9.zsh dist toolchains/mach9 toolchains/llvm-mingw/bin/llvm-readobj symbols | tee -a "$GITHUB_STEP_SUMMARY"
       - name: The checks fail on a broken copy
         run: |
-          # an export without an address in each tree, an i386 DLL where an ARM64X one belongs, an
-          # import from ntdll.dll that the engine's doesn't export (the name renamed in place), and one
-          # changed code byte in d3d11.dll
+          # an export without an address in each tree, an i386 DLL where an ARM64X one belongs, and an
+          # import from ntdll.dll that the engine's doesn't export (the name renamed in place)
           cp -R dist "$RUNNER_TEMP/broken"
           python3 -I .github/gw2/zero-export.py "$RUNNER_TEMP/broken/aarch64-windows/d3d11.dll" D3D11CreateDevice
           python3 -I .github/gw2/zero-export.py "$RUNNER_TEMP/broken/i386-windows/dxgi.dll" CreateDXGIFactory
           cp "$RUNNER_TEMP/broken/i386-windows/d3d10core.dll" "$RUNNER_TEMP/broken/aarch64-windows/d3d10core.dll"
           perl -0777 -pi -e 's/NtQueryVirtualMemory\0/NtQueryVirtualMemorz\0/' "$RUNNER_TEMP/broken/i386-windows/winemetal.dll"
-          f=$RUNNER_TEMP/broken/aarch64-windows/d3d11.dll
+          status=0
+          .github/gw2/check-mach9.zsh "$RUNNER_TEMP/broken" toolchains/mach9 toolchains/llvm-mingw/bin/llvm-readobj symbols >"$RUNNER_TEMP/broken.txt" || status=$?
+          grep FAIL "$RUNNER_TEMP/broken.txt"
+          # five FAILs for those, and the symbols check for both ARM64X DLLs that no longer match their copies
+          [[ $status == 1 ]] && [[ $(grep -c '^FAIL' "$RUNNER_TEMP/broken.txt") == 7 ]]
+          grep -q '^FAIL  i386-windows/winemetal.dll imports from ntdll.dll' "$RUNNER_TEMP/broken.txt"
+      - name: The checks fail on one changed code byte
+        run: |
+          # one byte of d3d11.dll's .text, and nothing else
+          cp -R dist "$RUNNER_TEMP/code"
+          f=$RUNNER_TEMP/code/aarch64-windows/d3d11.dll
           text=$(toolchains/llvm-mingw/bin/llvm-readobj --sections "$f" |
             awk '$1 == "Name:" { n = $2 } $1 == "PointerToRawData:" && n == ".text" { print $2; exit }')
           [[ -n $text ]]
           python3 -I -c 'import sys; p, o = sys.argv[1], int(sys.argv[2]); d = bytearray(open(p, "rb").read()); d[o] ^= 1; open(p, "wb").write(d)' \
             "$f" $((text + 64))
           status=0
-          .github/gw2/check-mach9.zsh "$RUNNER_TEMP/broken" toolchains/mach9 toolchains/llvm-mingw/bin/llvm-readobj symbols >"$RUNNER_TEMP/broken.txt" || status=$?
-          grep FAIL "$RUNNER_TEMP/broken.txt"
-          # five FAILs from #213's fixtures, and the code check for d3d11.dll and the i386 d3d10core.dll
-          grep -q "^FAIL  symbols: d3d11.dll's code sections" "$RUNNER_TEMP/broken.txt"
-          [[ $status == 1 ]] && [[ $(grep -c '^FAIL' "$RUNNER_TEMP/broken.txt") == 7 ]]
-          grep -q '^FAIL  i386-windows/winemetal.dll imports from ntdll.dll' "$RUNNER_TEMP/broken.txt"
+          .github/gw2/check-mach9.zsh "$RUNNER_TEMP/code" toolchains/mach9 toolchains/llvm-mingw/bin/llvm-readobj symbols >"$RUNNER_TEMP/code.txt" || status=$?
+          grep FAIL "$RUNNER_TEMP/code.txt"
+          [[ $status == 1 ]] && [[ $(grep -c '^FAIL' "$RUNNER_TEMP/code.txt") == 1 ]]
+          grep -q "^FAIL  symbols: d3d11.dll's sections differ" "$RUNNER_TEMP/code.txt"
       - name: The symbols name D3D11CreateDevice
         run: |
           # its RVA in each view of the shipped d3d11.dll, which the symbols must name as that export

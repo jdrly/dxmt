@@ -1265,11 +1265,13 @@ so only the first run after a version change builds LLVM (about 25 minutes per a
   `-gdwarf-4`. The buildtype stays `release`, so `-O3` and `NDEBUG` stay, and the install strips the
   shipped files as before. The job copies the unstripped `d3d11.dll`, `dxgi.dll`, `d3d10core.dll`,
   `winemetal.dll` and `winemetal.so` from the build tree into the symbols artifact. `check-mach9.zsh`
-  requires each ARM64X DLL's code sections to be its unstripped copy's byte for byte
-  (`.github/gw2/pe-code.py` hashes them), and the copy to have `.debug_info`. The broken copy also gets
-  one changed code byte in `d3d11.dll`, so there the script has to fail on six checks. Last,
-  `.github/gw2/symbolize.zsh` has to name `D3D11CreateDevice` at that export's RVA in both views of
-  the shipped `d3d11.dll`.
+  requires every section of each shipped ARM64X DLL to be its unstripped copy's, at the same RVA and
+  byte for byte (`.github/gw2/pe-sections.py` hashes them), and the copy to have `.debug_info`. All
+  sections, not only the code: the EC view's dynamic relocations, which patch instructions, sit in a
+  data section. On the broken copy above the script now fails on seven checks: the five, and this one
+  for the two ARM64X DLLs that no longer match their copies. A second copy with one changed byte in `d3d11.dll`'s `.text` has to fail
+  on that check alone. Last, `.github/gw2/symbolize.zsh` has to name `D3D11CreateDevice` at that
+  export's RVA in both views of the shipped `d3d11.dll`.
 - **Native tests**: `zsh -n` on the zsh scripts and a self-check of `.github/gw2/warnings.zsh`, then
   `tests/gw2/run.zsh pure` and `metal`. The zsh checks run here because macOS has zsh, so they install
   nothing (#174). The runner's GPU is an Apple Paravirtual device
@@ -1327,6 +1329,12 @@ DLLs. To name them:
 4. `.github/gw2/symbolize.zsh <symbols dir> d3d11.dll 0x<rva>...` prints each RVA's function and
    source line, and the functions inlined there. It runs `llvm-symbolizer` from `$LLVM_SYMBOLIZER` or
    `PATH` (llvm-mingw has one).
+
+A build without its symbols (one from before #199, say) can still be named, roughly: meson strips the
+shipped DLLs with `-S -x`, which removes DWARF and local symbols but keeps a COFF symbol table of the
+global ones (about 42,500 entries in `d3d11.dll` at `2483559`). Give `symbolize.zsh` the build's own
+directory instead of the symbols. It then names functions with external linkage, with no source lines
+or inlines, and an address in a static function gets the name of the nearest global symbol before it.
 
 ## Native tests
 

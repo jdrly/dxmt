@@ -21,7 +21,7 @@
 #   is macdrv_functions, which it looks up at run time (the table's layout can't be read off a file;
 #   docs/gw2/README.md says where it was checked)
 # - d3d11.dll carries the version that VERSION names
-# - every ARM64X DLL's code sections are byte for byte those of its unstripped copy, and the copy has
+# - every section of each ARM64X DLL is byte for byte its unstripped copy's, and the copy has
 #   DWARF (.debug_info), so the symbols describe the code that runs
 emulate -L zsh
 setopt err_exit pipe_fail no_unset
@@ -193,11 +193,15 @@ for dll in $dlls; do
   else
     fail "symbols: $dll.dll has no .debug_info section"
   fi
-  code=$(python3 -I "$here/pe-code.py" "$mine") sym_code=$(python3 -I "$here/pe-code.py" "$sym")
-  if [[ -n $code && $code == "$sym_code" ]]; then
-    ok "symbols: $dll.dll's code is its unstripped copy's, byte for byte (${(j:, :)${(@)${(@f)code}% *}})"
+  # every section the shipped DLL has, at the same RVA with the same bytes; the copy has the debug
+  # sections on top
+  shipped=("${(@f)$(python3 -I "$here/pe-sections.py" "$mine")}")
+  copy=("${(@f)$(python3 -I "$here/pe-sections.py" "$sym")}")
+  differ=(${shipped:|copy})
+  if (( ${#differ} == 0 )) && [[ ${(M)shipped:#.text *} ]]; then
+    ok "symbols: $dll.dll's ${#shipped} sections are its unstripped copy's, byte for byte"
   else
-    fail "symbols: $dll.dll's code sections (name, RVA, size, sha256) differ from its unstripped copy's:"$'\n'"      shipped  ${(pj:\n               :)${(f)code:-none}}"$'\n'"      symbols  ${(pj:\n               :)${(f)sym_code:-none}}"
+    fail "symbols: $dll.dll's sections differ from its unstripped copy's (name, RVA, size, sha256):"$'\n'"      shipped  ${(pj:\n               :)differ}"$'\n'"      symbols  ${(pj:\n               :)copy}"
   fi
 done
 
