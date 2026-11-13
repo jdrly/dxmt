@@ -3,11 +3,20 @@
 // gw2-build:   clang -x objective-c -std=gnu17 -fobjc-arc -O1 -Wall -Werror -arch $arch -mmacosx-version-min=26.0 tests/gw2/present_cursor_test.m -framework Cocoa -framework Metal -framework QuartzCore -framework IOSurface -framework CoreGraphics -o ${OUT}_$arch
 // gw2-build:   codesign -s - -f ${OUT}_$arch
 // gw2-build: done
+// gw2-build: rm -rf ${OUT}.app && mkdir -p ${OUT}.app/Contents/MacOS
+// gw2-build: cp ${OUT}_arm64 ${OUT}.app/Contents/MacOS/present_cursor_test
+// gw2-build: cp tests/gw2/fixtures/present_cursor_test.plist ${OUT}.app/Contents/Info.plist
+// gw2-build: codesign -s - -f ${OUT}.app
+// gw2-run: R=(tests/gw2/present_cursor.zsh --dir $T --no-sample --pointer still)
 // gw2-run: for arch in arm64 x86_64; do
-// gw2-run:   for v in "--present mtl3" "--present mtl4" "--present mtl4 --layer-set queue" "--present mtl4 --empty-commit off" "--present mtl4 --present-thread queue" "--present mtl3-on-mtl4"; do
-// gw2-run:     MTL_DEBUG_LAYER=1 ${OUT}_$arch ${=v} --pointer still
+// gw2-run:   for v in "--present mtl3" "--present mtl4" "--present mtl4 --layer-set queue" "--present mtl4 --empty-commit off" "--present mtl4 --present-thread queue" "--present mtl3-on-mtl4" "--present mtl4 --present-at done" "--present mtl3 --encode-thread wine" "--present mtl4 --encode-thread wine" "--present mtl3 --layer wine" "--present mtl4 --layer wine"; do
+// gw2-run:     MTL_DEBUG_LAYER=1 $R --arch $arch ${=v}
 // gw2-run:   done
+// gw2-run:   for p in mtl3 mtl4; do MTL_HUD_ENABLED=1 MTL_DEBUG_LAYER=1 $R --arch $arch --present $p --hud-lines on; done
+// gw2-run:   $R --arch $arch --present mtl4 --wait-for-drawable off
+// gw2-run:   MTL_DEBUG_LAYER=1 $R --arch $arch --present mtl4 --wait-for-drawable off || true # the layer may stop it
 // gw2-run: done
+// gw2-run: for p in mtl3 mtl4; do MTL_DEBUG_LAYER=1 $R --bundle --present $p; done
 //
 // gw2 (#225, for #223): on the arm64 engine with Metal 4, moving the cursor makes every frame a
 // refresh late (40 fps at 60 Hz with three drawables), and with Metal 3 it doesn't. This is the
@@ -18,13 +27,14 @@
 //
 // It isn't part of `tests/gw2/run.zsh all`: it needs a logged-in GUI session, a display, the pointer,
 // and for the Metal 4 ways a Metal 4 device. `tests/gw2/run.zsh display` builds it and runs the
-// acceptance runs above (both ways and each Metal 4 variant, 600 frames, MTL_DEBUG_LAYER=1, arm64 and
-// x86_64, pointer still). GitHub's runner only builds it (`run.zsh display --build-only`). By hand:
+// acceptance runs above (both ways and each variant, 600 frames, MTL_DEBUG_LAYER=1, arm64 and x86_64,
+// pointer still), and prints one RESULT line a run. GitHub's runner only builds it
+// (`run.zsh display --build-only`). One run with a window server sample beside it is one command,
+// which builds what it needs, asks for sudo once and ends with one RESULT line (tests/gw2/present_cursor.zsh):
 //
-//   tests/gw2/run.zsh display --build-only     # prints the logs directory; the binaries are in it
-//   $T/present_cursor_test_arm64 --present mtl4 --pointer wave
-//   $T/present_cursor_test_arm64 --present mtl3 --pointer wave
-//   sudo sample WindowServer 10 10 -file ~/Desktop/ws-mtl4-wave.txt     # beside a run, from another terminal
+//   tests/gw2/present_cursor.zsh --present mtl4 --pointer wave
+//   MTL_HUD_ENABLED=1 tests/gw2/present_cursor.zsh --present mtl4 --pointer wave
+//   tests/gw2/present_cursor.zsh --bundle --present mtl4 --pointer wave     # from the Game Mode bundle
 //
 // Run it from a terminal inside the GUI session, with the game closed and nothing over the window.
 //
@@ -57,20 +67,71 @@
 //      queue signals a shared event after the frame pass and the Metal 3 buffer waits for it; the buffer
 //      signals a second one and the Metal 4 queue's later commits wait for that. No waitForDrawable, no
 //      signalDrawable, no layer set.
-//    Metal 4 variants, one flag each:
+//    Metal 4 variants, one flag each; they combine:
 //      --layer-set queue         the layer's set on the queue for the whole run, as before #184 (mtl4)
 //      --empty-commit off        no empty command buffer after the present (DXMT_MTL4_TIMESTAMP_REUSE=1;
 //                                mtl4 and mtl3-on-mtl4)
 //      --present-thread queue    presentAtTime: from a serial dispatch queue, not the encoding thread (mtl4)
+//      --present-at done         (#230, mtl4) signalDrawable where it was, but presentAtTime: from the present
+//                                pass's commit feedback handler, once its GPU work has completed. The target
+//                                is the one the encoding thread computed after signalDrawable, one refresh
+//                                ahead; only the moment of the call moves, so the handler may call it after
+//                                the target. If the encoding thread hasn't reached signalDrawable when the
+//                                handler runs, the encoding thread presents right after it, so no frame is
+//                                presented before its signal. A pass with a Metal error isn't presented and
+//                                counts as dropped. The present then comes from a Metal thread too: read it
+//                                against --present-thread queue, which moves the thread and not the time
+//                                (with both, the handler hands the present to that queue)
+//      --wait-for-drawable off   (#230, mtl4) no waitForDrawable; everything else stays. This breaks Apple's
+//                                rule for the call. It is a probe: the debug layer may stop it, and the pass
+//                                may draw into a surface the display still shows (a moving image tears)
+//    What a variant's window server sample means (#230). Read the frame-info thread
+//    (com.apple.coreanimation.frameinfo.<display>) under frame_info_callback, and of it kern_SwapWait,
+//    next to interval p95, missed, passwait and early. Quiet is Metal 3's level on my Mac, 2 or 3
+//    samples in 600; busy is Metal 4's, 11 or more:
+//      --present-at done, quiet and flat while waving: the window server waits per frame only for a frame
+//        presented before its GPU work ran; the early present is the cause, and the fix presents later
+//      --present-at done quiet, and --present-thread queue quiet too: the calling thread did it, not the time
+//      --present-at done, busy: the wait belongs to the Metal 4 sequence whenever the present arrives
+//      --wait-for-drawable off, quiet: the frame-info work is the display's side of waitForDrawable, the
+//        window server waiting for a swap so it can say the display is done with a drawable
+//      --wait-for-drawable off, busy: the wait call isn't what asks for it
+//      both, busy in every combination: it belongs to a drawable that presents itself after signalDrawable;
+//        only Metal 3's way avoids it, which is what #227's mtl3 does
+//    With --wait-for-drawable off also compare passwait and early with the run with the wait on: unchanged
+//    means the wait never held the present pass.
+//    What the game's process has and this one hasn't (#230, after the M1 run), one flag each, every way:
+//      --hud-lines on            five label lines a frame into the Metal HUD through MTLHUDService
+//                                (_CADeveloperHUDProperties before macOS 27), from the encoding thread right
+//                                after the present, under the heading label, as d3d11_swapchain.cpp's
+//                                UpdateStatistics and winemetal_unix.c write them. Private. Without the class
+//                                or its instance (the HUD off) it says so in one line and runs without them.
+//                                Only the HUD itself (MTL_HUD_ENABLED=1, no flag) is in every game session;
+//                                a release build of my fork writes the heading and not the five lines
+//      --encode-thread wine      the encoding thread without a QoS class, with the Mach policies wineserver
+//                                sets for THREAD_PRIORITY_TIME_CRITICAL (server/thread.c's
+//                                apply_thread_priority at effective priority 15: latency and throughput QoS
+//                                tiers unspecified, timeshare off, precedence 32). The default is a thread
+//                                with QOS_CLASS_USER_INTERACTIVE. On Metal 4 this thread calls the present
+//      --layer wine              the layer as Mach9's Mac driver makes it (dlls/winemac.drv/cocoa_window.m,
+//                                WineMetalView): framebufferOnly on at creation (my presenter turns it off),
+//                                nearest magnification filter, black background, redraw policy never, the
+//                                Metal view as the lowest subview of a layer-backed content view whose own
+//                                layer holds an image (black, the window's size)
+//    Game Mode: `run.zsh display` also puts the arm64 binary into ${OUT}.app with LSSupportsGameMode,
+//    GCSupportsGameMode and a games category (tests/gw2/fixtures/present_cursor_test.plist), as the game's
+//    process runs from a bundle with those keys. Started from the bundle, the start line says bundle=<id>
+//    and nothing else differs. Whether macOS turned Game Mode on shows only in its menu bar item.
 // --pointer wave moves the pointer in a circle (a quarter of the screen's height) 80 times a second,
 // one turn a second, with CGWarpMouseCursorPosition, or with posted mouse-moved events with
 // --move event (needs the Accessibility permission for the terminal). Whether a warp makes the window
 // server update its cursor the way a mouse does I haven't checked; the start line says which way it
 // used. The pointer goes back where it was at the end, also after Ctrl-C or SIGTERM.
 //
-// Output. At start: the process's architecture (Rosetta or not), the device, the display (size,
-// refresh rate, built-in or external, vendor and model), the layer, the calibrated cost. Then one line
-// a second, for the frames whose GPU work and presented handler have come back:
+// Output. At start: the start line with every variant in effect, the process's architecture (Rosetta
+// or not), the device, the display (size, refresh rate, built-in or external, vendor and model), the
+// layer, the calibrated cost, and a line for each of --hud-lines, --encode-thread wine and --layer wine
+// when on. Then one line a second, for the frames whose GPU work and presented handler have come back:
 //   frames, dropped    frames taken; dropped: not presented (presentedTime 0, or no drawable)
 //   interval p50/p95   presentedTime minus the last presented frame's, ms. 16.7 is flat at 60 Hz
 //   missed             refreshes skipped between presented frames (an interval of two refreshes is 1)
@@ -102,6 +163,10 @@
 #import <IOSurface/IOSurface.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/QuartzCore.h>
+#include <mach/mach.h>
+#include <mach/task_policy.h>
+#include <mach/thread_act.h>
+#include <mach/thread_policy.h>
 #include <math.h>
 #include <objc/message.h>
 #include <os/lock.h>
@@ -141,9 +206,10 @@ typedef struct {
 
 static struct {
   bool mtl4, mtl3_present, set_on_queue, empty_commit, present_on_queue, wave, move_event;
+  bool present_at_done, wait_for_drawable, hud_lines, encode_wine, layer_wine; // #230
   long frames;
   double gpu_ms;
-} opt = {.mtl4 = true, .empty_commit = true, .frames = 600, .gpu_ms = 13};
+} opt = {.mtl4 = true, .empty_commit = true, .wait_for_drawable = true, .frames = 600, .gpu_ms = 13};
 
 // --- what the threads share
 
@@ -275,6 +341,95 @@ pointer_stop(void) {
   printf("pointer: back at %.0f,%.0f\n", g_pointer_home.x, g_pointer_home.y);
 }
 
+// --- what the game's process has (#230)
+
+// --hud-lines on: the Metal HUD's label lines as my fork writes them (dxmt_hud_state.cpp, and
+// winemetal_unix.c's _DeveloperHUDProperties_*), all through objc_msgSend on private classes
+static id g_hud;
+static bool g_hud_metric; // MTLHUDService's insertMetric:, from macOS 27
+static NSString *g_hud_labels[6]; // the heading, then the five lines
+
+static void
+hud_add(NSString *label, NSString *after) {
+  if (g_hud_metric)
+    ((bool (*)(id, SEL, id, id, id, id, uint32_t, uint32_t, uint32_t, uint64_t))objc_msgSend)(
+        g_hud, sel_registerName("insertMetric:after:name:unit:nameColor:valueColor:visualType:options:"), label,
+        after, @"", @"", UINT32_MAX, UINT32_MAX, 1u, 0u
+    );
+  else
+    ((bool (*)(id, SEL, id, id))objc_msgSend)(g_hud, sel_registerName("addLabel:after:"), label, after);
+}
+
+static void
+hud_update(NSString *label, NSString *value) {
+  ((void (*)(id, SEL, id, id))objc_msgSend)(g_hud, sel_registerName("updateLabel:value:"), label, value);
+}
+
+// at start: the class, its instance and the heading (HUDState::initialize); without them, one line
+static void
+hud_setup(void) {
+  g_hud_metric = NSProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 27;
+  const char *name = g_hud_metric ? "MTLHUDService" : "_CADeveloperHUDProperties";
+  Class cls = objc_lookUpClass(name);
+  SEL instance = sel_registerName("instance");
+  if (cls && [cls respondsToSelector:instance])
+    g_hud = ((id (*)(id, SEL))objc_msgSend)(cls, instance);
+  if (!g_hud) {
+    printf("hud-lines: no %s%s in this process (MTL_HUD_ENABLED=%s); running without the lines\n", name,
+           cls ? " instance" : "", getenv("MTL_HUD_ENABLED") ?: "unset");
+    opt.hud_lines = false;
+    return;
+  }
+  g_hud_labels[0] = @"com.github.3shain.dxmt-version";
+  for (int i = 1; i < 6; i++)
+    g_hud_labels[i] = [NSString stringWithFormat:@"com.github.3shain.dxmt-line%d", i];
+  hud_add(g_hud_labels[0], @"com.apple.hud-graph.default");
+  hud_update(g_hud_labels[0], @"present_cursor_test");
+  printf("hud-lines: %s, five lines a frame from the encoding thread\n", name);
+}
+
+// each frame, right after its present (UpdateStatistics): five lines of DXMT's lengths, each label
+// added after the one before the first time
+static void
+hud_frame(uint64_t k) {
+  static bool added;
+  if (!added) {
+    for (int i = 1; i < 6; i++)
+      hud_add(g_hud_labels[i], g_hud_labels[i - 1]);
+    added = true;
+  }
+  hud_update(g_hud_labels[1], @"---------------------------");
+  hud_update(g_hud_labels[2], [NSString stringWithFormat:@"Commit: %2u -%4.1f -%4.1f", opt.mtl4 ? 3u : 2u,
+                                                         g_period * 1e3, g_period * 1e3]);
+  hud_update(g_hud_labels[3], [NSString stringWithFormat:@"Sync:   %2d %4.1f  %2d %4.1f %2d", 0, 0.0, 0, 0.0,
+                                                         kInFlight]);
+  hud_update(g_hud_labels[4], [NSString stringWithFormat:@"Encode: %4.1f+%4.1f+%4.1f=%4.1f", 0.1, 0.1, 0.0, 0.2]);
+  hud_update(g_hud_labels[5], [NSString stringWithFormat:@"Render:%3llu+%-3d Clear:%3d+%-2d",
+                                                         (unsigned long long)(k % 1000), 0, 0, 0]);
+}
+
+// --encode-thread wine: what wineserver gives a THREAD_PRIORITY_TIME_CRITICAL thread on macOS
+// (server/thread.c's apply_thread_priority, effective priority 15 in a normal priority class: the
+// application band, not the realtime one). The thread is created without a QoS class.
+static void
+wine_thread_policies(void) {
+  mach_port_t port = pthread_mach_thread_np(pthread_self());
+  thread_latency_qos_policy_data_t latency = {LATENCY_QOS_TIER_UNSPECIFIED};
+  thread_throughput_qos_policy_data_t throughput = {THROUGHPUT_QOS_TIER_UNSPECIFIED};
+  thread_extended_policy_data_t extended = {.timeshare = 0};          // effective priority > 14
+  thread_precedence_policy_data_t precedence = {.importance = 32};    // -31 + (15 - 1) * 63 / 14
+  kern_return_t kr[4] = {
+      thread_policy_set(port, THREAD_LATENCY_QOS_POLICY, (thread_policy_t)&latency, THREAD_LATENCY_QOS_POLICY_COUNT),
+      thread_policy_set(port, THREAD_THROUGHPUT_QOS_POLICY, (thread_policy_t)&throughput,
+                        THREAD_THROUGHPUT_QOS_POLICY_COUNT),
+      thread_policy_set(port, THREAD_EXTENDED_POLICY, (thread_policy_t)&extended, THREAD_EXTENDED_POLICY_COUNT),
+      thread_policy_set(port, THREAD_PRECEDENCE_POLICY, (thread_policy_t)&precedence, THREAD_PRECEDENCE_POLICY_COUNT),
+  };
+  printf("encode-thread: wine: latency and throughput QoS tiers unspecified, timeshare 0, precedence 32 "
+         "(kern_return %d %d %d %d), QoS class 0x%x\n",
+         kr[0], kr[1], kr[2], kr[3], (unsigned)qos_class_self());
+}
+
 // --- the frame
 
 // nextDrawable, timed; the presented handler goes on before any present
@@ -363,13 +518,16 @@ frame3(uint64_t k, unsigned s) {
   id<MTLCommandBuffer> pcb = [g_q3 commandBuffer];
   encode_present3(pcb, d);
   commit_present3(k, pcb);
+  if (opt.hud_lines)
+    hud_frame(k);
 }
 
 enum { kFramePass, kPresentPass, kEmpty };
 static const char *kCommitNames[] = {"frame pass", "present pass", "empty command buffer"};
 
+// `then`, if any, runs in the feedback handler once the GPU work has completed, before the frame lets go
 static void
-commit4(uint64_t k, id<MTL4CommandBuffer> cb, int kind) {
+commit4(uint64_t k, id<MTL4CommandBuffer> cb, int kind, void (^then)(bool failed)) {
   frame_ref(k);
   MTL4CommitOptions *options = [MTL4CommitOptions new]; // one per commit, as mtl4.c does
   [options addFeedbackHandler:^(id<MTL4CommitFeedback> fb) {
@@ -379,10 +537,37 @@ commit4(uint64_t k, id<MTL4CommandBuffer> cb, int kind) {
       SET(k, gpu_cost, fb.GPUEndTime - fb.GPUStartTime);
     else if (kind == kPresentPass)
       SET(k, pass_start, fb.GPUStartTime);
+    if (then)
+      then(fb.error != nil);
     frame_unref(k);
   }];
   __unsafe_unretained id<MTL4CommandBuffer> list[1] = {cb};
   [g_q4 commit:list count:1 options:options];
+}
+
+// --present-at done: the drawable's present once the pass has completed and signalDrawable was called,
+// by whichever of the feedback handler and the encoding thread comes second; the block holds the drawable
+typedef struct {
+  _Atomic int arrived; // the pass's completion and signalDrawable, each adds one
+  double at;           // the target, from the encoding thread before it arrives
+  bool failed;         // the pass reported an error, from the handler before it arrives
+} PresentGate;
+
+static void
+gate_arrive(uint64_t k, id<CAMetalDrawable> d, PresentGate *g) {
+  if (atomic_fetch_add(&g->arrived, 1) != 1)
+    return; // the other one presents
+  if (g->failed) {
+    SET(k, shown_done, true); // never presented: presented stays 0, so the frame counts as dropped
+  } else if (opt.present_on_queue) {
+    double at = g->at;
+    dispatch_async(g_present_queue, ^{
+      [d presentAtTime:at];
+    });
+  } else {
+    [d presentAtTime:g->at];
+  }
+  free(g);
 }
 
 // the present the Metal 4 way (dxmt_context.cpp's Metal 4 branch, encodeCommandsMetal4, mtl4.c)
@@ -391,7 +576,8 @@ present_mtl4(uint64_t k, unsigned s) {
   id<CAMetalDrawable> d = take(k);
   if (!d)
     return;
-  [g_q4 waitForDrawable:d];
+  if (opt.wait_for_drawable)
+    [g_q4 waitForDrawable:d];
   id<MTL4CommandBuffer> pcb = g_pcb[s];
   [pcb beginCommandBufferWithAllocator:g_alloc[s]];
   if (!opt.set_on_queue && g_layer_set)
@@ -411,7 +597,18 @@ present_mtl4(uint64_t k, unsigned s) {
   [pcb endCommandBuffer];
   g_war_updated = true;
   SET(k, pass_commit, CACurrentMediaTime());
-  commit4(k, pcb, kPresentPass);
+  if (opt.present_at_done) {
+    PresentGate *g = calloc(1, sizeof(*g));
+    commit4(k, pcb, kPresentPass, ^(bool failed) {
+      g->failed = failed;
+      gate_arrive(k, d, g);
+    });
+    [g_q4 signalDrawable:d];
+    g->at = CACurrentMediaTime() + g_period;
+    gate_arrive(k, d, g);
+    return;
+  }
+  commit4(k, pcb, kPresentPass, nil);
   [g_q4 signalDrawable:d];
   if (opt.present_on_queue)
     dispatch_async(g_present_queue, ^{
@@ -463,15 +660,17 @@ frame4(uint64_t k, unsigned s) {
   [e updateFence:g_raw afterEncoderStages:MTLStageFragment];
   [e endEncoding];
   [fcb endCommandBuffer];
-  commit4(k, fcb, kFramePass);
+  commit4(k, fcb, kFramePass, nil);
   if (opt.mtl3_present)
     present_mtl3_on_mtl4(k);
   else
     present_mtl4(k, s);
+  if (opt.hud_lines) // before the chunk's end, where DXMT's empty commit goes
+    hud_frame(k);
   if (opt.empty_commit) {
     [g_ecb[s] beginCommandBufferWithAllocator:g_alloc[s]];
     [g_ecb[s] endCommandBuffer];
-    commit4(k, g_ecb[s], kEmpty);
+    commit4(k, g_ecb[s], kEmpty, nil);
   }
 }
 
@@ -480,6 +679,8 @@ static void finish(int code);
 static void *
 render_main(void *arg) {
   (void)arg;
+  if (opt.encode_wine)
+    wine_thread_policies();
   int no_drawable_run = 0;
   for (uint64_t k = 0; k < (uint64_t)opt.frames; k++) {
     @autoreleasepool {
@@ -757,27 +958,67 @@ finish(int code) {
 @end
 @implementation PCMetalView
 - (CALayer *)makeBackingLayer {
-  return [CAMetalLayer layer];
+  CAMetalLayer *layer = [CAMetalLayer layer];
+  if (opt.layer_wine) { // WineMetalView's makeBackingLayer
+    layer.device = g_device;
+    layer.framebufferOnly = YES;
+    layer.magnificationFilter = kCAFilterNearest;
+    layer.backgroundColor = CGColorGetConstantColor(kCGColorBlack);
+  }
+  return layer;
 }
 - (BOOL)isOpaque {
   return YES;
 }
 @end
 
+// --layer wine: WineContentView, whose own layer holds the window surface's image (updateLayer)
+static CGImageRef g_window_image;
+
+@interface PCImageView : NSView
+@end
+@implementation PCImageView
+- (BOOL)isFlipped {
+  return YES;
+}
+- (BOOL)wantsUpdateLayer {
+  return YES;
+}
+- (void)updateLayer {
+  self.layer.contents = (__bridge id)g_window_image;
+}
+@end
+
+// black, opaque, `w` x `h` pixels
+static CGImageRef
+black_image(size_t w, size_t h) {
+  CGColorSpaceRef srgb = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+  CGContextRef c = CGBitmapContextCreate(NULL, w, h, 8, 0, srgb, (CGBitmapInfo)kCGImageAlphaNoneSkipLast);
+  CGColorSpaceRelease(srgb);
+  if (!c)
+    return NULL;
+  CGContextSetRGBFillColor(c, 0, 0, 0, 1);
+  CGContextFillRect(c, CGRectMake(0, 0, (CGFloat)w, (CGFloat)h));
+  CGImageRef image = CGBitmapContextCreateImage(c);
+  CGContextRelease(c);
+  return image;
+}
+
 static void
 usage(void) {
   printf(
       "usage: present_cursor_test [--present mtl3|mtl4|mtl3-on-mtl4] [--layer-set buffer|queue] [--empty-commit on|off]\n"
-      "                           [--present-thread encode|queue] [--pointer still|wave] [--move warp|event]\n"
-      "                           [--frames N] [--gpu-ms MS]\n"
-      "--layer-set and --present-thread take --present mtl4 (the default), --empty-commit either Metal 4 way.\n"
-      "See the source's header.\n"
+      "                           [--present-thread encode|queue] [--present-at signal|done]\n"
+      "                           [--wait-for-drawable on|off] [--hud-lines off|on] [--encode-thread interactive|wine]\n"
+      "                           [--layer plain|wine] [--pointer still|wave] [--move warp|event] [--frames N] [--gpu-ms MS]\n"
+      "--layer-set, --present-thread, --present-at and --wait-for-drawable take --present mtl4 (the default),\n"
+      "--empty-commit either Metal 4 way. See the source's header.\n"
   );
 }
 
 static bool
 parse(int argc, const char **argv) {
-  bool mtl4_only = false, drawable4_only = false;
+  bool mtl4_only = false, drawable4_only = false, signal4_only = false;
   for (int i = 1; i < argc; i++) {
     const char *a = argv[i], *v = i + 1 < argc ? argv[i + 1] : NULL;
 #define IS(name) (!strcmp(a, name) && v && ++i)
@@ -789,6 +1030,16 @@ parse(int argc, const char **argv) {
       opt.empty_commit = !strcmp(v, "on"), mtl4_only |= !opt.empty_commit;
     else if (IS("--present-thread") && (!strcmp(v, "encode") || !strcmp(v, "queue")))
       opt.present_on_queue = !strcmp(v, "queue"), drawable4_only |= opt.present_on_queue;
+    else if (IS("--present-at") && (!strcmp(v, "signal") || !strcmp(v, "done")))
+      opt.present_at_done = !strcmp(v, "done"), signal4_only = true;
+    else if (IS("--wait-for-drawable") && (!strcmp(v, "on") || !strcmp(v, "off")))
+      opt.wait_for_drawable = !strcmp(v, "on"), signal4_only = true;
+    else if (IS("--hud-lines") && (!strcmp(v, "off") || !strcmp(v, "on")))
+      opt.hud_lines = !strcmp(v, "on");
+    else if (IS("--encode-thread") && (!strcmp(v, "interactive") || !strcmp(v, "wine")))
+      opt.encode_wine = !strcmp(v, "wine");
+    else if (IS("--layer") && (!strcmp(v, "plain") || !strcmp(v, "wine")))
+      opt.layer_wine = !strcmp(v, "wine");
     else if (IS("--pointer") && (!strcmp(v, "still") || !strcmp(v, "wave")))
       opt.wave = !strcmp(v, "wave");
     else if (IS("--move") && (!strcmp(v, "warp") || !strcmp(v, "event")))
@@ -802,6 +1053,10 @@ parse(int argc, const char **argv) {
       return false;
     }
 #undef IS
+  }
+  if (signal4_only && (!opt.mtl4 || opt.mtl3_present)) {
+    printf("present_cursor_test: --present-at and --wait-for-drawable are --present mtl4's\n");
+    return false;
   }
   if ((mtl4_only || drawable4_only) && !opt.mtl4) {
     printf("present_cursor_test: --layer-set, --empty-commit and --present-thread are Metal 4 variants\n");
@@ -1047,6 +1302,14 @@ main(int argc, const char **argv) {
              opt.present_on_queue ? "queue" : "encode");
     if (opt.mtl4)
       printf(" empty-commit=%s", opt.empty_commit ? "on" : "off");
+    if (opt.mtl4 && !opt.mtl3_present)
+      printf(" present-at=%s wait-for-drawable=%s", opt.present_at_done ? "done" : "signal",
+             opt.wait_for_drawable ? "on" : "off");
+    printf(" hud-lines=%s encode-thread=%s layer=%s", opt.hud_lines ? "on" : "off",
+           opt.encode_wine ? "wine" : "interactive", opt.layer_wine ? "wine" : "plain");
+    NSString *bundle = NSBundle.mainBundle.bundleIdentifier;
+    if (bundle)
+      printf(" bundle=%s", bundle.UTF8String);
     printf(" pointer=%s", opt.wave ? "wave" : "still");
     if (opt.wave)
       printf(" move=%s (%d a second)", opt.move_event ? "event" : "warp", kPointerHz);
@@ -1069,7 +1332,21 @@ main(int argc, const char **argv) {
     NSRect bounds = NSMakeRect(0, 0, frame.size.width, frame.size.height);
     PCMetalView *view = [[PCMetalView alloc] initWithFrame:bounds];
     view.wantsLayer = YES;
-    window.contentView = view;
+    if (opt.layer_wine) {
+      // WineContentView's newMetalViewWithDevice: the Metal view as its lowest subview
+      CGFloat scale = window.backingScaleFactor;
+      g_window_image = black_image((size_t)(bounds.size.width * scale), (size_t)(bounds.size.height * scale));
+      PCImageView *content = [[PCImageView alloc] initWithFrame:bounds];
+      content.wantsLayer = YES;
+      window.contentView = content;
+      view.layerContentsRedrawPolicy = NSViewLayerContentsRedrawNever;
+      view.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+      content.autoresizesSubviews = YES;
+      [content addSubview:view positioned:NSWindowBelow relativeTo:nil];
+      content.needsDisplay = YES;
+    } else {
+      window.contentView = view;
+    }
     window.contentView.superview.layer.backgroundColor = NULL; // athei/mtld3d #1123
     g_layer = (CAMetalLayer *)view.layer;
     g_layer.device = g_device;
@@ -1088,6 +1365,10 @@ main(int argc, const char **argv) {
            "opaque %d, sRGB, contentsScale %.1f\n",
            size.width, size.height, g_layer.framebufferOnly, g_layer.displaySyncEnabled,
            (unsigned long)g_layer.maximumDrawableCount, g_layer.opaque, g_layer.contentsScale);
+    if (opt.layer_wine)
+      printf("layer: wine: magnificationFilter %s, background black, under a content view with a %zux%zu image%s\n",
+             g_layer.magnificationFilter.UTF8String, g_window_image ? CGImageGetWidth(g_window_image) : 0,
+             g_window_image ? CGImageGetHeight(g_window_image) : 0, g_window_image ? "" : " (none: no bitmap)");
     [window makeKeyAndOrderFront:nil];
     [app activate];
 
@@ -1121,6 +1402,8 @@ main(int argc, const char **argv) {
       printf("FAIL: Metal 4 queue, allocators, command buffers or tables\n");
       return 1;
     }
+    if (opt.hud_lines)
+      hud_setup();
     for (unsigned s = 0; s < kInFlight; s++)
       g_slot[s] = dispatch_semaphore_create(1);
     g_warm = (uint64_t)lround(1.0 / g_period);
@@ -1132,7 +1415,8 @@ main(int argc, const char **argv) {
         pointer_start();
       pthread_attr_t attr;
       pthread_attr_init(&attr);
-      pthread_attr_set_qos_class_np(&attr, QOS_CLASS_USER_INTERACTIVE, 0);
+      if (!opt.encode_wine) // a Wine thread has no QoS class
+        pthread_attr_set_qos_class_np(&attr, QOS_CLASS_USER_INTERACTIVE, 0);
       pthread_t render;
       pthread_create(&render, &attr, render_main, NULL);
       pthread_attr_destroy(&attr);

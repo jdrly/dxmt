@@ -1528,17 +1528,25 @@ prints the ns an emit before #148 (an out-of-line ring allocation per command) a
 `present_cursor_test.m` (display, #225, for #223) is a probe, not a check of my code: a borderless
 full-screen window with one `CAMetalLayer` set up as my presenter sets it up, a frame pass with a GPU
 cost calibrated to `--gpu-ms` (13 ms by default) and a present pass, presented the Metal 3 way
-(`--present mtl3`), the Metal 4 way (`--present mtl4`, with `--layer-set queue`, `--empty-commit off`
-and `--present-thread queue` as one-flag variants), or the frame on Metal 4 and the present through a
+(`--present mtl3`), the Metal 4 way (`--present mtl4`, with `--layer-set queue`, `--empty-commit off`,
+`--present-thread queue`, and #230's `--present-at done` and `--wait-for-drawable off` as one-flag
+variants that combine), or the frame on Metal 4 and the present through a
 Metal 3 command buffer joined by two shared events, as #227's `DXMT_MTL4_PRESENT=mtl3` does
 (`--present mtl3-on-mtl4`), while `--pointer wave` moves the pointer 80 times a
 second. Each second it prints the frame interval, missed refreshes, `presentedTime` minus the take,
 how long Metal held the present pass, how many passes started while their surface may still have been
 on screen, and the layer's private `displayCompositingInternalStatus`; a line on a composited layer says
-that run can't show #223. `tests/gw2/run.zsh display` runs both ways and each variant for 600 frames with
-`MTL_DEBUG_LAYER=1`, as arm64 and x86_64, with the pointer still. It needs a logged-in GUI session, a
-display and, for the Metal 4 ways, Metal 4, and exits 77 without them. The source's header has the flags, the
-fields and what it can't tell.
+that run can't show #223. For #230 it also has, on every way, what the game's process has and it didn't:
+`--hud-lines on` (DXMT's five Metal HUD label lines a frame, private), `--encode-thread wine` (wineserver's
+Mach policies for a time-critical thread), `--layer wine` (the layer and view tree of Mach9's Mac driver),
+and the arm64 binary in a bundle with Game Mode's keys. `tests/gw2/run.zsh display` runs both ways and each
+variant for 600 frames with `MTL_DEBUG_LAYER=1` (`--wait-for-drawable off` plain, and once with the layer,
+whose stop doesn't fail the run), as arm64 and x86_64, with the pointer still, and prints one `RESULT` line
+a run. `tests/gw2/present_cursor.zsh <test arguments>` is one run with `sudo sample WindowServer 10 10`
+beside it: its `RESULT` line puts `passwait` and `early` first, then the window server's frame-info
+thread counted as in #223 (`tests/gw2/ws_sample_count.py`). It needs a logged-in GUI session, a display and,
+for the Metal 4 ways, Metal 4, and exits 77 without them. The source's header has the flags, the fields,
+what each #230 variant's result means and what it can't tell.
 
 `layer_poll_test.cpp` (pure, #156) checks when the presenter asks the bridge for its layer's screen
 values (`dxmt_gw2_layer_poll.hpp`): at every Present with `DXMT_LAYER_PROPS_POLL_MS=0`; with 250 ms at
