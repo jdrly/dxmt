@@ -312,6 +312,7 @@ static bool g_war_updated;
 static id<MTLResidencySet> g_layer_set;
 static id<MTLSharedEvent> g_frame_event, g_shown_event; // --present mtl3-on-mtl4
 static id<MTLSharedEvent> g_drawn_event; // --transaction on: the queue has run a frame's pass and signalDrawable
+static _Atomic int g_drawn_late;         // frames presented before it said so, after 1 s
 static dispatch_queue_t g_present_queue;
 // --drawable link: the update the callback is encoding, on the link's thread
 static id<CAMetalDrawable> g_link_drawable;
@@ -714,8 +715,7 @@ present_mtl4(uint64_t k, unsigned s) {
     // Apple's rule presents after the pass is scheduled; a Metal 4 queue has no waitUntilScheduled, so wait
     // until it has run the pass and signalDrawable (later than scheduled), then present
     [g_q4 signalEvent:g_drawn_event value:k + 1];
-    static int late;
-    if (![g_drawn_event waitUntilSignaledValue:k + 1 timeoutMS:1000] && late++ < 5)
+    if (![g_drawn_event waitUntilSignaledValue:k + 1 timeoutMS:1000] && atomic_fetch_add(&g_drawn_late, 1) < 5)
       printf("transaction: frame %llu: the queue hadn't run the pass and signalDrawable in 1 s; presenting anyway\n",
              (unsigned long long)k);
     present_in_transaction(d);
@@ -1145,7 +1145,11 @@ finish(int code) {
   if (errors) {
     printf("FAIL: %d command buffers reported a Metal error\n", errors);
     code = 1;
-  } else if (!g_presented_all && opt.mtl4 && opt.transaction) {
+  } else if (atomic_load(&g_drawn_late)) {
+    printf("FAIL: %d frames were presented before the queue had run them (1 s wait), so this run can't tell\n",
+           atomic_load(&g_drawn_late));
+    code = 1;
+  } else if (!g_presented_all && opt.mtl4 && opt.transaction && code == 0) {
     // the variant's result, not the test's failure (#245): the present followed Apple's rule as far as Metal 4 can
     printf("result: no frame was presented: Metal 4 doesn't present a drawable of a layer with "
            "presentsWithTransaction this way\n");
@@ -1439,8 +1443,9 @@ setup_metal4(void) {
     [g_q4 addResidencySet:g_layer_set];
   g_frame_event = [g_device newSharedEvent];
   g_shown_event = [g_device newSharedEvent];
-  g_drawn_event = [g_device newSharedEvent];
-  if (!g_frame_event || !g_shown_event || !g_drawn_event)
+  if (opt.transaction)
+    g_drawn_event = [g_device newSharedEvent];
+  if (!g_frame_event || !g_shown_event || (opt.transaction && !g_drawn_event))
     return false;
   g_present_queue =
       dispatch_queue_create("present", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0));
