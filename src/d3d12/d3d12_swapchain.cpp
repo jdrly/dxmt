@@ -266,7 +266,7 @@ public:
   HRESULT
   STDMETHODCALLTYPE
   Present(UINT sync_interval, UINT flags) final {
-    return Present1(sync_interval, flags, nullptr);
+    return PresentFrame(sync_interval, flags, nullptr);
   };
 
   HRESULT
@@ -489,10 +489,10 @@ public:
     return S_OK;
   };
 
-  DXMT_HOTPATCHABLE
-  HRESULT
-  STDMETHODCALLTYPE
-  ResizeBuffers(UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT Format, UINT flags) final {
+  // gw2 (#248): ResizeBuffers1 calls ResizeBackBuffers, not ResizeBuffers (util_hotpatch.h)
+  DXMT_HOTPATCHABLE_SHARED(ResizeBuffers, ResizeBackBuffers,
+                           (UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT Format, UINT flags),
+                           (BufferCount, Width, Height, Format, flags)) {
     if (Width == 0 || Height == 0) {
       wsi::getWindowSize(hWnd, &desc_.Width, &desc_.Height);
     } else {
@@ -699,10 +699,10 @@ public:
     return E_NOTIMPL;
   };
 
-  DXMT_HOTPATCHABLE
-  HRESULT
-  STDMETHODCALLTYPE
-  Present1(UINT SyncInterval, UINT PresentFlags, const DXGI_PRESENT_PARAMETERS *pPresentParameters) final {
+  // gw2 (#248): Present calls PresentFrame, not Present1 (util_hotpatch.h)
+  DXMT_HOTPATCHABLE_SHARED(Present1, PresentFrame,
+                           (UINT SyncInterval, UINT PresentFlags, const DXGI_PRESENT_PARAMETERS *pPresentParameters),
+                           (SyncInterval, PresentFlags, pPresentParameters)) {
     HRESULT hr = S_OK;
     if (desc_.Width == 0 || desc_.Height == 0)
       hr = DXGI_STATUS_OCCLUDED;
@@ -838,7 +838,7 @@ public:
       IUnknown *const *ppPresentQueue
   ) override {
     WARN("DXGISwapChain3::ResizeBuffers1: ignoring d3d12 related parameters");
-    return ResizeBuffers(BufferCount, Width, Height, Format, SwapChainFlags);
+    return ResizeBackBuffers(BufferCount, Width, Height, Format, SwapChainFlags);
   }
 
   HRESULT STDMETHODCALLTYPE

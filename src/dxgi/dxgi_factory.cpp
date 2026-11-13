@@ -92,18 +92,20 @@ public:
     descFs.Windowed = pDesc->Windowed;
 
     IDXGISwapChain1 *swapChain = nullptr;
-    HRESULT hr = CreateSwapChainForHwnd(pDevice, pDesc->OutputWindow, &desc,
-                                        &descFs, nullptr, &swapChain);
+    HRESULT hr = CreateSwapChainForWindow(pDevice, pDesc->OutputWindow, &desc,
+                                          &descFs, nullptr, &swapChain);
 
     *ppSwapChain = swapChain;
     return hr;
   }
 
-  DXMT_HOTPATCHABLE
-  HRESULT STDMETHODCALLTYPE CreateSwapChainForHwnd(
-      IUnknown *pDevice, HWND hWnd, const DXGI_SWAP_CHAIN_DESC1 *pDesc,
-      const DXGI_SWAP_CHAIN_FULLSCREEN_DESC *pFullscreenDesc,
-      IDXGIOutput *pRestrictToOutput, IDXGISwapChain1 **ppSwapChain) final {
+  // gw2 (#248): CreateSwapChain calls CreateSwapChainForWindow, not CreateSwapChainForHwnd
+  // (util_hotpatch.h)
+  DXMT_HOTPATCHABLE_SHARED(CreateSwapChainForHwnd, CreateSwapChainForWindow,
+      (IUnknown *pDevice, HWND hWnd, const DXGI_SWAP_CHAIN_DESC1 *pDesc,
+       const DXGI_SWAP_CHAIN_FULLSCREEN_DESC *pFullscreenDesc,
+       IDXGIOutput *pRestrictToOutput, IDXGISwapChain1 **ppSwapChain),
+      (pDevice, hWnd, pDesc, pFullscreenDesc, pRestrictToOutput, ppSwapChain)) {
     InitReturnPtr(ppSwapChain);
 
     if (!ppSwapChain || !pDesc || !hWnd || !pDevice)

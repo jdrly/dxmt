@@ -12,8 +12,9 @@
 #   since #200) and one i386 tree, with llvm-mingw $LLVM_MINGW_VERSION (Mach9's pin), linked against the engine's own Wine files from its
 #   release tarball. unix-call.py checks that the ARM64EC thunks call winecrt0's
 #   __wine_unix_call_arm64ec directly (#205). Then .github/gw2/check-mach9.zsh compares the result
-#   with the engine's DXMT and ntdll.dll without running anything, and counts the exclusive pairs
-#   left in the ARM64X DLLs (#200). Artifact dxmt-arm64-<commit>:
+#   with the engine's DXMT and ntdll.dll without running anything, counts the exclusive pairs
+#   left in the ARM64X DLLs (#200) and checks that no x64 entry's ARM64EC code reaches another
+#   (#248). Artifact dxmt-arm64-<commit>:
 #   aarch64-windows, i386-windows, aarch64-unix, VERSION, kept 7 days.
 # tests: zsh -n for the zsh scripts and warnings.zsh's self-check, then tests/gw2/run.zsh pure,
 #   and metal on the runner's Metal device. The display tests only build here (#225).
@@ -335,10 +336,12 @@ jobs:
           UNFLAGGED_SHA256: e4fa20097890b4c6d441b4d2feb2b5a8d87840b6163c14487b30c8153b245d47
         run: |
           # an export without an address in each tree, an i386 DLL where an ARM64X one belongs (which
-          # has no ARM64 code to count exclusive pairs in), an import from ntdll.dll that the engine's
-          # doesn't export (the name renamed in place), and a dxgi.dll built without LSE
+          # has no ARM64 code to count exclusive pairs in or x64 entries to read), an import from
+          # ntdll.dll that the engine's doesn't export (the name renamed in place), and a dxgi.dll
+          # built without LSE, from before #248 (CreateSwapChain enters CreateSwapChainForHwnd)
           cp -R dist "$RUNNER_TEMP/broken"
-          .github/gw2/toolchain.zsh fetch "$UNFLAGGED" "$UNFLAGGED_SHA256" "$RUNNER_TEMP/broken" aarch64-windows/dxgi.dll
+          .github/gw2/toolchain.zsh fetch "$UNFLAGGED" "$UNFLAGGED_SHA256" "$RUNNER_TEMP/unflagged" aarch64-windows/dxgi.dll aarch64-windows/d3d11.dll
+          cp "$RUNNER_TEMP/unflagged/aarch64-windows/dxgi.dll" "$RUNNER_TEMP/broken/aarch64-windows/dxgi.dll"
           python3 -I .github/gw2/zero-export.py "$RUNNER_TEMP/broken/aarch64-windows/d3d11.dll" D3D11CreateDevice
           python3 -I .github/gw2/zero-export.py "$RUNNER_TEMP/broken/i386-windows/dxgi.dll" CreateDXGIFactory
           cp "$RUNNER_TEMP/broken/i386-windows/d3d10core.dll" "$RUNNER_TEMP/broken/aarch64-windows/d3d10core.dll"
@@ -346,9 +349,18 @@ jobs:
           status=0
           .github/gw2/check-mach9.zsh "$RUNNER_TEMP/broken" toolchains/mach9 toolchains/llvm-mingw/bin/llvm-readobj >"$RUNNER_TEMP/broken.txt" || status=$?
           grep FAIL "$RUNNER_TEMP/broken.txt"
-          [[ $status == 1 ]] && [[ $(grep -c '^FAIL' "$RUNNER_TEMP/broken.txt") == 7 ]]
+          [[ $status == 1 ]] && [[ $(grep -c '^FAIL' "$RUNNER_TEMP/broken.txt") == 9 ]]
           grep -q '^FAIL  i386-windows/winemetal.dll imports from ntdll.dll' "$RUNNER_TEMP/broken.txt"
           grep -q '^FAIL  aarch64-windows/dxgi.dll has [0-9]* exclusive-pair instructions' "$RUNNER_TEMP/broken.txt"
+          grep -q "^FAIL  aarch64-windows/dxgi.dll: an x64 entry's ARM64EC code enters another" "$RUNNER_TEMP/broken.txt"
+          grep -qxF '      dxmt::MTLDXGIFactory::CreateSwapChain(IUnknown*, DXGI_SWAP_CHAIN_DESC*, IDXGISwapChain**) -> dxmt::MTLDXGIFactory::CreateSwapChainForHwnd(IUnknown*, HWND__*, DXGI_SWAP_CHAIN_DESC1 const*, DXGI_SWAP_CHAIN_FULLSCREEN_DESC const*, IDXGIOutput*, IDXGISwapChain1**)' "$RUNNER_TEMP/broken.txt"
+          # #248: the same build's d3d11.dll, where Present entered Present1 and ResizeBuffers1 entered
+          # ResizeBuffers, in both swap chains (with and without MetalFX)
+          python3 -I .github/gw2/patchable-calls.py toolchains/llvm-mingw/bin/llvm-readobj "$RUNNER_TEMP/unflagged/aarch64-windows/d3d11.dll" |
+            tee "$RUNNER_TEMP/crossings.txt"
+          [[ $(head -1 "$RUNNER_TEMP/crossings.txt") =~ ^d3d11\.dll\ [0-9]+\ 4$ ]]
+          grep -qxF 'dxmt::MTLD3D11SwapChain<true>::Present(unsigned int, unsigned int) -> dxmt::MTLD3D11SwapChain<true>::Present1(unsigned int, unsigned int, DXGI_PRESENT_PARAMETERS const*)' "$RUNNER_TEMP/crossings.txt"
+          grep -qxF 'dxmt::MTLD3D11SwapChain<false>::Present(unsigned int, unsigned int) -> dxmt::MTLD3D11SwapChain<false>::Present1(unsigned int, unsigned int, DXGI_PRESENT_PARAMETERS const*)' "$RUNNER_TEMP/crossings.txt"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dxmt-arm64-${{ env.COMMIT }}
