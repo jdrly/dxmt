@@ -138,10 +138,11 @@
 //                                --present-at done or --present-thread queue
 //      --drawable link           the drawable from a CAMetalDisplayLink on the layer, not from nextDrawable.
 //                                The link runs on the encoding thread's run loop at the display's refresh rate,
-//                                with --link-latency 1|2|3 (default 2) as its preferredFrameLatency. Each
-//                                callback encodes one frame: it waits for frame k - 3 as the loop does, then the
-//                                frame pass, the present pass into the update's drawable, and the present at the
-//                                update's targetPresentationTimestamp (the plain one with --transaction on). The
+//                                with --link-latency 1|2 (default 2; Apple takes no other) as its
+//                                preferredFrameLatency. Each callback encodes one frame: it waits for frame k - 3
+//                                as the loop does, then the frame pass, the present pass into the update's
+//                                drawable, and the present for the chosen way, the plain one: the link times it,
+//                                and Apple says a present for a specific time asserts with a display link. The
 //                                callback that encodes the last frame invalidates the link and stops the run
 //                                loop, and the thread is joined before the summary. So the frame starts when the
 //                                layer hands the drawable out, the reverse of DXMT's order (the frame first, then
@@ -304,7 +305,7 @@ static id<MTLSharedEvent> g_frame_event, g_shown_event; // --present mtl3-on-mtl
 static dispatch_queue_t g_present_queue;
 // --drawable link: the update the callback is encoding, on the link's thread
 static id<CAMetalDrawable> g_link_drawable;
-static double g_link_time, g_link_target; // the callback's start, the update's targetPresentationTimestamp
+static double g_link_time; // the callback's start
 static bool g_link_inuse;
 
 static Frame *
@@ -524,10 +525,14 @@ take(uint64_t k) {
   return d;
 }
 
-// when a timed present targets: one refresh ahead, or with --drawable link the update's target
-static double
-present_target(void) {
-  return opt.link ? g_link_target : CACurrentMediaTime() + g_period;
+// the drawable's present at `at`; with --drawable link the plain one: the link times the present, and Apple
+// says a present for a specific time asserts there
+static void
+present_at(id<CAMetalDrawable> d, double at) {
+  if (opt.link)
+    [d present];
+  else
+    [d presentAtTime:at];
 }
 
 // --transaction on: the drawable's plain present inside an explicit transaction, on the encoding thread,
@@ -553,8 +558,10 @@ encode_present3(id<MTLCommandBuffer> pcb, id<CAMetalDrawable> d) {
   [e setFragmentTexture:g_offscreen atIndex:0];
   [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
   [e endEncoding];
-  if (!opt.transaction)
-    [pcb presentDrawable:d atTime:present_target()];
+  if (opt.link && !opt.transaction)
+    [pcb presentDrawable:d]; // the link times it
+  else if (!opt.transaction)
+    [pcb presentDrawable:d atTime:CACurrentMediaTime() + g_period];
 }
 
 static void
@@ -645,10 +652,10 @@ gate_arrive(uint64_t k, id<CAMetalDrawable> d, PresentGate *g) {
   } else if (opt.present_on_queue) {
     double at = g->at;
     dispatch_async(g_present_queue, ^{
-      [d presentAtTime:at];
+      present_at(d, at);
     });
   } else {
-    [d presentAtTime:g->at];
+    present_at(d, g->at);
   }
   free(g);
 }
@@ -687,7 +694,7 @@ present_mtl4(uint64_t k, unsigned s) {
       gate_arrive(k, d, g);
     });
     [g_q4 signalDrawable:d];
-    g->at = present_target();
+    g->at = CACurrentMediaTime() + g_period;
     gate_arrive(k, d, g);
     return;
   }
@@ -696,12 +703,11 @@ present_mtl4(uint64_t k, unsigned s) {
   if (opt.transaction) {
     present_in_transaction(d);
   } else if (opt.present_on_queue) {
-    double target = g_link_target; // this frame's with --drawable link; without it the queue takes the time
     dispatch_async(g_present_queue, ^{
-      [d presentAtTime:opt.link ? target : CACurrentMediaTime() + g_period];
+      present_at(d, CACurrentMediaTime() + g_period);
     });
   } else {
-    [d presentAtTime:present_target()];
+    present_at(d, CACurrentMediaTime() + g_period);
   }
 }
 
@@ -815,7 +821,6 @@ encode_frame(uint64_t k) {
     g_link_drawable = update.drawable;
     IOSurfaceRef surface = g_link_drawable.texture.iosurface;
     g_link_inuse = surface && IOSurfaceIsInUse(surface);
-    g_link_target = update.targetPresentationTimestamp;
     encode_frame(_next++);
     g_link_drawable = nil;
   }
@@ -1190,7 +1195,7 @@ usage(void) {
       "                           [--present-thread encode|queue] [--present-at signal|done]\n"
       "                           [--wait-for-drawable on|off] [--hud-lines off|on] [--encode-thread interactive|wine]\n"
       "                           [--layer plain|wine] [--framebuffer-only off|on] [--colorspace srgb|none]\n"
-      "                           [--transaction off|on] [--drawable next|link] [--link-latency 1|2|3]\n"
+      "                           [--transaction off|on] [--drawable next|link] [--link-latency 1|2]\n"
       "                           [--pointer still|wave] [--move warp|event] [--frames N] [--gpu-ms MS]\n"
       "--layer-set, --present-thread, --present-at and --wait-for-drawable take --present mtl4 (the default),\n"
       "--empty-commit either Metal 4 way, --transaction and --drawable mtl3 and mtl4, --link-latency\n"
@@ -1230,7 +1235,7 @@ parse(int argc, const char **argv) {
       opt.transaction = !strcmp(v, "on");
     else if (IS("--drawable") && (!strcmp(v, "next") || !strcmp(v, "link")))
       opt.link = !strcmp(v, "link");
-    else if (IS("--link-latency") && (!strcmp(v, "1") || !strcmp(v, "2") || !strcmp(v, "3")))
+    else if (IS("--link-latency") && (!strcmp(v, "1") || !strcmp(v, "2"))) // Apple takes only these
       opt.link_latency = atoi(v), latency = true;
     else if (IS("--pointer") && (!strcmp(v, "still") || !strcmp(v, "wave")))
       opt.wave = !strcmp(v, "wave");
@@ -1592,7 +1597,7 @@ main(int argc, const char **argv) {
     if (opt.link)
       printf("drawable: from a CAMetalDisplayLink on the encoding thread's run loop, preferredFrameLatency %d, at "
              "%.2f Hz; a frame starts when the link hands its drawable out (DXMT takes the drawable after the "
-             "frame); a timed present targets the update's targetPresentationTimestamp\n",
+             "frame); every present is the plain one, timed by the link\n",
              opt.link_latency, 1.0 / g_period);
     if (opt.layer_wine)
       printf("layer: wine: magnificationFilter %s, background black, under a content view with a %zux%zu image%s\n",
