@@ -888,7 +888,8 @@ public:
     ctx_state.cmd_queue.CommitCurrentChunk();
     ctx_state.has_dirty_op_since_last_event = false;
     gw2_front_.publish(); // gw2 (#4): once per chunk
-    gw2_map_.publish();   // gw2 (#25)
+    if (gw2_map_.on)      // gw2 (#25; #251: the sequence id MAP's queued.age counts from)
+      gw2_map_.publish(ctx_state.cmd_queue.CurrentSeqId());
     gw2_pso_.publish();   // gw2 (#149)
   };
 

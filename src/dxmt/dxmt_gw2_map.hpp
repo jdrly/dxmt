@@ -72,9 +72,20 @@ struct MapCounters {
   uint32_t created = 0; // ... and it was a new Metal buffer (none was free)
   uint32_t grown = 0;   // ... and DXMT_MAP_FAST doubled the buffer's page
   uint32_t dropped = 0; // free allocations dropped instead of reused (a smaller page, or other flags)
-  // Adds the counters to the shared totals and clears them (once per chunk).
-  void publish();
+  // Adds the counters to the shared totals and clears them (once per chunk). Called only when `on`.
+  // gw2 (#251): current_seq_id is the chunk MAP's queued.age counts from.
+  void publish(uint64_t current_seq_id);
 };
+
+// gw2 (#251): the allocations queued for reuse in every live dynamic buffer and dynamic linear
+// texture, read once per window by the MAP section. With DXMT_STATS=0 no resource is listed.
+struct RenameQueues {
+  uint64_t pages = 0;
+  uint64_t bytes = 0;
+  uint64_t oldest = UINT64_MAX; // the lowest will_free_at (sequence id) of any queued allocation
+};
+// Defined in dxmt_dynamic.cpp, which keeps the list: locks each listed resource's mutex in turn.
+RenameQueues renameQueues();
 
 // One Map or Unmap: counts it in the bucket set last, timing it as the header says. Destroyed before
 // its ApiScope, under the device lock.
