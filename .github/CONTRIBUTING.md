@@ -45,7 +45,8 @@ If two sources conflict, report the conflict instead of silently choosing one.
   or from d9mt), `diag`, `exp` (an experiment behind a switch, off by default), `chore`, `docs`.
 - One branch is one issue. Measurement variants (`tmp/…`) are never merged.
 - **Upstream syncs** merge `upstream/main` into `gw2-on-mac` through their own pull request
-  (`chore/sync-upstream-<short sha>`), with a GW2 session before and after.
+  (`chore/sync-upstream-<short sha>`), with a GW2 session before and after. The steps are in
+  [upstream-sync.md](../docs/agents/upstream-sync.md).
 
 ## Commits
 
