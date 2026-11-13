@@ -14,6 +14,9 @@
 # - every export of the engine's DLL, in each view of an ARM64X image, is exported by mine
 # - an ARM64X DLL has no more exclusive-pair instructions (ldxr, stxr...) than the toolchain's
 #   libraries bring (#200)
+# - in an ARM64X DLL, no x64 entry's ARM64EC code (a hotpatchable function's or an export's)
+#   reaches another through direct calls, so a hook on both runs once a call (#248,
+#   patchable-calls.py)
 # - every name winemetal.dll imports from ntdll.dll is exported by the engine's ntdll.dll in the same
 #   view, and so is __wine_unix_call_dispatcher, which winecrt0 looks up at the first unix call (#205)
 # - winemetal.so is an arm64-only dylib, no newer macOS than the engine's own needs, and loads only
@@ -110,6 +113,17 @@ for tree in aarch64-windows i386-windows; do
         else
           fail "$tree/$dll.dll has $n exclusive-pair instructions ($detail), more than the toolchain's libraries' ${pair_ceiling[$dll]}: code built without LSE, or more of the libraries linked in"
         fi
+      fi
+
+      # #248: "<name> <entries> <crossings>", then a line per crossing
+      crossings=("${(@f)$(python3 -I "${0:A:h}/patchable-calls.py" "$readobj" "$mine" || true)}")
+      summary=(${=crossings[1]})
+      if (( ${#summary} != 3 )); then
+        fail "$tree/$dll.dll's x64 entries unread: ${crossings[1]:-no output}"
+      elif (( summary[3] == 0 )); then
+        ok "$tree/$dll.dll: the ARM64EC code of none of its ${summary[2]} x64 entries reaches another of them"
+      else
+        fail "$tree/$dll.dll: an x64 entry's ARM64EC code enters another, so a hook on both runs twice:"$'\n'"      ${(pj:\n      :)crossings[2,-1]}"
       fi
     fi
   done

@@ -1291,11 +1291,21 @@ so only the first run after a version change builds LLVM (about 25 minutes per a
   fixed ceiling: the loops of the static libraries built for ARMv8.0, which aren't rebuilt (libc++ and
   libc++abi, the mingw-w64 CRT, Mach9's winecrt0). The ceilings are 1,842 for `d3d11.dll`, 1,822 for
   `dxgi.dll`, 1,774 for `d3d10core.dll` and 30 for `winemetal.dll`; without the flag `d3d11.dll` had
-  6,308. The job then breaks a copy (`.github/gw2/zero-export.py` clears two exports' addresses, an
-  i386 DLL takes an ARM64X one's place, the i386 `winemetal.dll`'s import of `NtQueryVirtualMemory`
-  gets another name, and the published 2483559 build's `dxgi.dll`, built without the flag, replaces
-  the ARM64X one) and requires the script to fail on exactly seven checks: those five, the misplaced
-  i386 DLL's exclusive pairs, which it can't count, and the old `dxgi.dll`'s. Before that, `.github/gw2/unix-call.py`
+  6,308. `.github/gw2/patchable-calls.py` (#248) reads each ARM64X DLL's x64 entries, those of its
+  `DXMT_HOTPATCHABLE` functions and exports, from the CHPE redirection metadata, follows every direct
+  call and tail call from each entry's ARM64EC body, and fails when one reaches another entry's x64
+  address. On ARM64EC a call to a patchable function enters its x64 entry even from inside the
+  module, so `Present` calling `Present1` ran a hook on both (the Steam overlay's) twice a frame.
+  `DXMT_HOTPATCHABLE_SHARED` in `src/util/util_hotpatch.h` gives such a pair a shared body on ARM64EC
+  only, so the x86_64 and i386 builds compile as before. The job then breaks a copy
+  (`.github/gw2/zero-export.py` clears two exports' addresses, an i386 DLL takes an ARM64X one's
+  place, the i386 `winemetal.dll`'s import of `NtQueryVirtualMemory` gets another name, and the
+  published 2483559 build's `dxgi.dll`, built without the flag and before #248, replaces the ARM64X
+  one) and requires the script to fail on exactly nine checks: those five, the misplaced i386 DLL's
+  exclusive pairs and x64 entries, which it can't read, and the old `dxgi.dll`'s exclusive pairs and
+  `CreateSwapChain` entering `CreateSwapChainForHwnd`. It also requires `patchable-calls.py` to find
+  the four crossings of that build's `d3d11.dll`, `Present` to `Present1` and `ResizeBuffers1` to
+  `ResizeBuffers` in both swap chains. Before that, `.github/gw2/unix-call.py`
   shows what a bridge thunk calls in each tree: the ARM64EC half has to preprocess to
   `__wine_unix_call_arm64ec`, and `#NSObject_retain`, disassembled from the unstripped
   `winemetal.dll`, has to make no indirect call and branch straight to winecrt0's ARM64EC routine.
