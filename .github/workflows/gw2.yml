@@ -8,11 +8,12 @@
 #   $WINE_VERSION, as in upstream's CI, since the CrossOver engine I build against locally isn't
 #   downloadable. .github/gw2/unix-call.py shows what a bridge thunk calls (#205).
 # arm64 (#182): the build for GW2 on Mac 0.2's engine, Mach9 $MACH9_VERSION, the way Mach9 builds its
-#   DXMT: one ARM64X tree (build-arm64ec.txt, so the arm64 winemetal.so too) and one i386 tree, with
-#   llvm-mingw $LLVM_MINGW_VERSION (Mach9's pin), linked against the engine's own Wine files from its
+#   DXMT: one ARM64X tree (build-arm64ec.txt, so the arm64 winemetal.so too; the DLLs for armv8.4-a
+#   since #200) and one i386 tree, with llvm-mingw $LLVM_MINGW_VERSION (Mach9's pin), linked against the engine's own Wine files from its
 #   release tarball. unix-call.py checks that the ARM64EC thunks call winecrt0's
 #   __wine_unix_call_arm64ec directly (#205). Then .github/gw2/check-mach9.zsh compares the result
-#   with the engine's DXMT and ntdll.dll without running anything. Artifact dxmt-arm64-<commit>:
+#   with the engine's DXMT and ntdll.dll without running anything, and counts the exclusive pairs
+#   left in the ARM64X DLLs (#200). Artifact dxmt-arm64-<commit>:
 #   aarch64-windows, i386-windows, aarch64-unix, VERSION, kept 7 days.
 # tests: zsh -n for the zsh scripts and warnings.zsh's self-check, then tests/gw2/run.zsh pure,
 #   and metal on the runner's Metal device. The display tests only build here (#225).
@@ -328,10 +329,16 @@ jobs:
       - name: Checks without Wine
         run: .github/gw2/check-mach9.zsh dist toolchains/mach9 toolchains/llvm-mingw/bin/llvm-readobj | tee -a "$GITHUB_STEP_SUMMARY"
       - name: The checks fail on a broken copy
+        env:
+          # #200: the published build of 2483559, from before build-arm64ec.txt targeted armv8.4-a
+          UNFLAGGED: https://github.com/jdrly/dxmt/releases/download/mach9-builds/dxmt-mach9-2483559b9ebe6c4b4e851ddd6df9dc7d603da561.tar.xz
+          UNFLAGGED_SHA256: e4fa20097890b4c6d441b4d2feb2b5a8d87840b6163c14487b30c8153b245d47
         run: |
-          # an export without an address in each tree, an i386 DLL where an ARM64X one belongs, and an
-          # import from ntdll.dll that the engine's doesn't export (the name renamed in place)
+          # an export without an address in each tree, an i386 DLL where an ARM64X one belongs (which
+          # has no ARM64 code to count exclusive pairs in), an import from ntdll.dll that the engine's
+          # doesn't export (the name renamed in place), and a dxgi.dll built without LSE
           cp -R dist "$RUNNER_TEMP/broken"
+          .github/gw2/toolchain.zsh fetch "$UNFLAGGED" "$UNFLAGGED_SHA256" "$RUNNER_TEMP/broken" aarch64-windows/dxgi.dll
           python3 -I .github/gw2/zero-export.py "$RUNNER_TEMP/broken/aarch64-windows/d3d11.dll" D3D11CreateDevice
           python3 -I .github/gw2/zero-export.py "$RUNNER_TEMP/broken/i386-windows/dxgi.dll" CreateDXGIFactory
           cp "$RUNNER_TEMP/broken/i386-windows/d3d10core.dll" "$RUNNER_TEMP/broken/aarch64-windows/d3d10core.dll"
@@ -339,8 +346,9 @@ jobs:
           status=0
           .github/gw2/check-mach9.zsh "$RUNNER_TEMP/broken" toolchains/mach9 toolchains/llvm-mingw/bin/llvm-readobj >"$RUNNER_TEMP/broken.txt" || status=$?
           grep FAIL "$RUNNER_TEMP/broken.txt"
-          [[ $status == 1 ]] && [[ $(grep -c '^FAIL' "$RUNNER_TEMP/broken.txt") == 5 ]]
+          [[ $status == 1 ]] && [[ $(grep -c '^FAIL' "$RUNNER_TEMP/broken.txt") == 7 ]]
           grep -q '^FAIL  i386-windows/winemetal.dll imports from ntdll.dll' "$RUNNER_TEMP/broken.txt"
+          grep -q '^FAIL  aarch64-windows/dxgi.dll has [0-9]* exclusive-pair instructions' "$RUNNER_TEMP/broken.txt"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dxmt-arm64-${{ env.COMMIT }}

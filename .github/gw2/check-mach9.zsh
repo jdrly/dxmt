@@ -12,6 +12,8 @@
 #   ARM64EC view, so a game's x64 process loads its ARM64EC half natively) or i386, and Wine's
 #   builtin marker
 # - every export of the engine's DLL, in each view of an ARM64X image, is exported by mine
+# - an ARM64X DLL has no more exclusive-pair instructions (ldxr, stxr...) than the toolchain's
+#   libraries bring (#200)
 # - every name winemetal.dll imports from ntdll.dll is exported by the engine's ntdll.dll in the same
 #   view, and so is __wine_unix_call_dispatcher, which winecrt0 looks up at the first unix call (#205)
 # - winemetal.so is an arm64-only dylib, no newer macOS than the engine's own needs, and loads only
@@ -28,6 +30,15 @@ dist=${1:A} engine=${2:A} readobj=$3
 mine_dxmt=$dist engine_dxmt=$engine/lib/wine/dxgi/dxmt engine_unix=$engine/lib/wine/aarch64-unix
 dlls=(d3d11 dxgi d3d10core winemetal)
 integer failed=0
+
+# #200: build-arm64ec.txt targets armv8.4-a, so my code's atomics are LSE instructions (ldadd, cas,
+# swp...), never a load-exclusive/store-exclusive loop. The loops left come from the static libraries
+# built for ARMv8.0, which I don't rebuild: libc++ and libc++abi (locale, exceptions, future, atomic
+# wait), the mingw-w64 CRT (_CRT_INIT, gdtoa) and Mach9's winecrt0 (unix_call_init). Their count per
+# DLL, ARM64 and ARM64EC code together, with llvm-mingw 20261104 and Mach9 v0.3.1, is the ceiling.
+# The build without the flag had 6,308 in d3d11.dll and 1,914 in dxgi.dll; d3d10core.dll and
+# winemetal.dll have none of their own, so theirs don't move.
+typeset -A pair_ceiling=(d3d11 1842 dxgi 1822 d3d10core 1774 winemetal 30)
 
 ok() { print -r -- "ok    $*" }
 fail() { print -r -- "FAIL  $*"; failed+=1 }
@@ -84,6 +95,22 @@ for tree in aarch64-windows i386-windows; do
       ok "$tree/$dll.dll exports all $(pe_exports "$theirs" | wc -l | tr -d ' ') of the engine's (view name), $extra more"
     else
       fail "$tree/$dll.dll lacks exports the engine's has:"$'\n'"      ${(pj:\n      :)${(f)missing}}"
+    fi
+
+    if [[ $tree == aarch64-windows ]]; then
+      # "<name> <ARM64 loads> <ARM64 stores> <ARM64EC loads> <ARM64EC stores>"
+      counts=(${=$(python3 -I "${0:A:h}/exclusive-pairs.py" "$readobj" "$mine" || true)})
+      if (( ${#counts} != 5 )); then
+        fail "$tree/$dll.dll's exclusive pairs unread: ${counts[2,-1]:-no output}"
+      else
+        n=$(( counts[2] + counts[3] + counts[4] + counts[5] ))
+        detail="ldxr/stxr ${counts[2]}/${counts[3]} in ARM64, ${counts[4]}/${counts[5]} in ARM64EC"
+        if (( n <= ${pair_ceiling[$dll]} )); then
+          ok "$tree/$dll.dll has $n exclusive-pair instructions ($detail), within the toolchain's libraries' ${pair_ceiling[$dll]}"
+        else
+          fail "$tree/$dll.dll has $n exclusive-pair instructions ($detail), more than the toolchain's libraries' ${pair_ceiling[$dll]}: code built without LSE, or more of the libraries linked in"
+        fi
+      fi
     fi
   done
 

@@ -1258,7 +1258,12 @@ so only the first run after a version change builds LLVM (about 25 minutes per a
 - **Build arm64** (#182, #215): the build for GW2 on Mac 0.2's engine, Mach9 0.3.1, made the way
   Mach9's `bin/build-dxmt.sh` makes its own DXMT. One meson tree with `build-arm64ec.txt` builds the
   ARM64X DLLs and the arm64 `winemetal.so`, a second with `build-win32.txt` the i386 DLLs, both with
-  llvm-mingw 20261104 (Mach9's pin). They link against the engine's own `winemac.so`, `ntdll.so` and
+  llvm-mingw 20261104 (Mach9's pin). `build-arm64ec.txt` compiles for `-march=armv8.4-a` (#200). An M1
+  has every instruction that allows, and the ARM64X DLLs' atomics become LSE instructions (`ldadd`,
+  `cas`, `swp`) instead of load-exclusive/store-exclusive loops. `-mcpu=apple-m1` would be the exact
+  target, but llvm-mingw 20261104's clang stops with "Failed to evaluate function length in SEH unwind
+  info" on any Windows ARM64 target with Apple's tuning. `winemetal.so` is built by Apple's clang,
+  which targets Apple's cores already. They link against the engine's own `winemac.so`, `ntdll.so` and
   import libraries, taken from its release tarball (pinned by SHA-256). `winebuild` comes from 3Shain's
   Wine 11.2, since nothing of Mach9's engine is ever run. Then `.github/gw2/check-mach9.zsh` compares the
   result with the engine's DXMT, without Wine: every DLL's machine (ARM64X or i386, as the engine's) and
@@ -1266,10 +1271,17 @@ so only the first run after a version change builds LLVM (about 25 minutes per a
   architecture, macOS floor and libraries, every symbol it imports from `winemac.so` and `ntdll.so`, and
   `macdrv_functions`. It also compares `winemetal.dll` with the engine's `ntdll.dll`, per view: every
   name it imports from it, and `__wine_unix_call_dispatcher`, which winecrt0 looks up at the first unix
-  call (#205). An export counts only with an address. The job then breaks a copy
-  (`.github/gw2/zero-export.py` clears two exports' addresses, an i386 DLL takes an ARM64X one's
-  place, and the i386 `winemetal.dll`'s import of `NtQueryVirtualMemory` gets another name) and
-  requires the script to fail on exactly those five checks. Before that, `.github/gw2/unix-call.py`
+  call (#205). An export counts only with an address. `.github/gw2/exclusive-pairs.py` counts the
+  `ldxr`/`ldaxr` and `stxr`/`stlxr` in each ARM64X DLL's ARM64 and ARM64EC code (the CHPE code map's
+  ranges, so the x64 thunks aren't read), and the script prints the count per DLL and fails above a
+  fixed ceiling: the loops of the static libraries built for ARMv8.0, which aren't rebuilt (libc++ and
+  libc++abi, the mingw-w64 CRT, Mach9's winecrt0). The ceilings are 1,842 for `d3d11.dll`, 1,822 for
+  `dxgi.dll`, 1,774 for `d3d10core.dll` and 30 for `winemetal.dll`; without the flag `d3d11.dll` had
+  6,308. The job then breaks a copy (`.github/gw2/zero-export.py` clears two exports' addresses, an
+  i386 DLL takes an ARM64X one's place, the i386 `winemetal.dll`'s import of `NtQueryVirtualMemory`
+  gets another name, and the published 2483559 build's `dxgi.dll`, built without the flag, replaces
+  the ARM64X one) and requires the script to fail on exactly seven checks: those five, the misplaced
+  i386 DLL's exclusive pairs, which it can't count, and the old `dxgi.dll`'s. Before that, `.github/gw2/unix-call.py`
   shows what a bridge thunk calls in each tree: the ARM64EC half has to preprocess to
   `__wine_unix_call_arm64ec`, and `#NSObject_retain`, disassembled from the unstripped
   `winemetal.dll`, has to make no indirect call and branch straight to winecrt0's ARM64EC routine.
