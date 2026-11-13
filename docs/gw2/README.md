@@ -761,7 +761,7 @@ and `exact` (as upstream); in `estimate` it no longer asks for a commit for them
 
 ### MAP
 
-`MAP fast= calls= ms= renames= created= grown= dropped= <kind>.<op>=calls/ms …` (jdrly/dxmt #25).
+`MAP fast= calls= ms= renames= created= grown= dropped= queued= queued.mb= queued.age= <kind>.<op>=calls/ms …` (jdrly/dxmt #25, #251).
 The game's `Map` and `Unmap` calls on the immediate context, per frame, by what they map and how.
 Every call is counted. A call on a buffer (dynamic or default usage) is timed when `PACE`'s `map`
 times it, one in 64 with `DXMT_MAP_FAST` and scaled by 64, every other call (textures, staging,
@@ -774,7 +774,14 @@ call `PACE` doesn't time (a texture's or staging map the sampler skipped) is tim
 after the lock. Every interval loses the clock's own cost (`clockfloor` on the startup line), so an
 empty `Unmap` reads near 0 ms instead of one clock read, and a bucket can read a hair below 0. Counted
 with plain increments in the immediate context and handed over once per chunk; with `DXMT_STATS=0`
-nothing is counted. Deferred contexts' maps aren't in it.
+nothing is counted. Deferred contexts' maps aren't in it. The `queued` fields (#251) come from a list of
+the live dynamic buffers and linear textures that DXMT keeps with `DXMT_STATS` on (a resource enters it
+when it is created and leaves when it is destroyed). A thread of their own, `dxmt-rename-queues`,
+started with the first listed resource, sleeps 2 s between walks. A walk takes each resource's lock in
+turn and adds up its queue, and holds the list's lock for 256 resources at a time, which is what
+creating or destroying a resource can wait for. The `MAP` line shows the last finished walk's totals;
+the presenting thread does no walking. A resource destroyed during a walk can make that walk miss one other resource. `Map`
+itself does nothing new for them; the immediate context stores its sequence id once per chunk.
 
 | Field | Meaning |
 |---|---|
@@ -783,6 +790,7 @@ nothing is counted. Deferred contexts' maps aren't in it.
 | `renames` | Map(`WRITE_DISCARD`)s per frame that used up the buffer's page and took a new allocation (the others step to the next suballocation of the page) |
 | `created` | Of those, the ones that found no free allocation and made a new Metal buffer, per frame (should be near 0 after the first seconds) |
 | `grown`, `dropped` | Window totals: renames that doubled a buffer's page (`DXMT_MAP_FAST`), and renames that dropped free allocations instead of reusing them (smaller pages after growth, a default-usage buffer's first allocation) |
+| `queued`, `queued.mb`, `queued.age` | (#251) At the last walk (walks are 2 s apart), not per frame: the allocations waiting in the rename queues of every live dynamic buffer (dynamic textures that `Map` through a buffer included) and dynamic linear texture, their bytes in MB (10⁶ bytes, as `RESIDENCY`'s `mb`: a buffer's whole page, a linear texture's image), and the oldest one's age in sequence ids (chunks): the immediate context's sequence id at its last commit before the walk ended, minus the id the allocation was given back in. 0 when nothing is queued. Reuse doesn't shrink a queue: a rename takes one allocation for each it gives back, and drops others only when they no longer fit (`dropped`), so a buffer keeps the queue of its busiest moment until it's destroyed. Counted are the allocations the GPU may still use too (given back within the last few chunks) and the ones a deferred context's command list gave back; a resource's current allocation isn't. Read next to `RESIDENCY`'s `mb`: `queued.mb` is the memory a trim of the queues could give back at most, and a large `queued.age` means queues no `Map` reaches any more |
 | `<kind>.<op>` | A bucket that had calls: calls per frame / ms per frame. Kinds: `cb`, `vb`, `ib`, `buf` (dynamic-usage buffers by bind flag: constant, else vertex, else index, else other), `dcb`, `dvb`, `dib`, `dbuf` (default-usage buffers by the same flags: their maps are `UpdateSubresource`'s, a whole-buffer update is a `discard`), `tex` (dynamic texture), `lintex` (dynamic linear texture), `staging` (staging buffer or texture), `other` (nothing `Map` maps). Ops: `discard` (`WRITE_DISCARD`), `nooverwrite`, `read`, `write`, `readwrite`, `invalid` (another map type), `unmap` |
 
 `UpdateSubresource` of a buffer counts as one `Map` and one `Unmap`, as in `PACE`. With

@@ -1,9 +1,12 @@
 #pragma once
 #include "dxmt_buffer.hpp"
 #include "dxmt_texture.hpp"
-#include <queue>
+#include <deque>
 
 namespace dxmt {
+namespace gw2 {
+struct RenameQueues;
+}
 
 class DynamicBuffer {
 public:
@@ -63,11 +66,16 @@ public:
   }
 
   DynamicBuffer(Buffer *buffer, Flags<BufferAllocationFlag> flags);
+  ~DynamicBuffer();
 
   struct QueueEntry {
     Rc<BufferAllocation> allocation;
     uint64_t will_free_at;
   };
+
+  // gw2 (#251): adds this buffer's queued allocations to MAP's queued (gw2::renameQueues)
+  void gw2AddQueued(gw2::RenameQueues &queues);
+  size_t gw2_list_index_ = 0; // gw2 (#251): its slot in the stats list (dxmt_dynamic.cpp)
 
   /**
    * readonly
@@ -79,7 +87,7 @@ private:
 
   Flags<BufferAllocationFlag> flags_;
   std::atomic<uint32_t> refcount_ = {0u};
-  std::queue<QueueEntry> fifo;
+  std::deque<QueueEntry> fifo; // gw2 (#251): a deque, so gw2AddQueued can sum its pages' lengths
   dxmt::mutex mutex_;
   Rc<BufferAllocation> name_;
   uint32_t name_suballocation_ = 0;
@@ -110,11 +118,16 @@ public:
   }
 
   DynamicLinearTexture(Texture *buffer, Flags<TextureAllocationFlag> flags);
+  ~DynamicLinearTexture();
 
   struct QueueEntry {
     Rc<TextureAllocation> allocation;
     uint64_t will_free_at;
   };
+
+  // gw2 (#251): adds this texture's queued allocations to MAP's queued (gw2::renameQueues)
+  void gw2AddQueued(gw2::RenameQueues &queues);
+  size_t gw2_list_index_ = 0; // gw2 (#251): its slot in the stats list (dxmt_dynamic.cpp)
   /**
    * readonly
    */
@@ -123,10 +136,11 @@ public:
 private:
   Flags<TextureAllocationFlag> flags_;
   std::atomic<uint32_t> refcount_ = {0u};
-  std::queue<QueueEntry> fifo;
+  std::deque<QueueEntry> fifo; // gw2 (#251): a deque, so gw2AddQueued can walk it
   dxmt::mutex mutex_;
   Rc<TextureAllocation> name_;
   bool owned_by_command_list_ = false;
+  uint64_t gw2_image_bytes_ = 0; // gw2 (#251): an allocation's bytes, read at creation with DXMT_STATS on
 };
 
 } // namespace dxmt
