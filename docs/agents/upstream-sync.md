@@ -9,9 +9,11 @@ Nothing goes the other way: never push, open or comment anything in 3Shain/dxmt.
    sides; the fork's switches stay as they are. The merge commit's body says an AI agent made it,
    when one did.
 3. Check the merge before the PR:
-   - each changed file's `git diff origin/gw2-on-mac HEAD -- <file> | git patch-id --stable` equals
-     upstream's own diff for it since the last sync, except where a conflict was resolved;
-   - a commit already ported by hand (like `0df8610` in #165) adds no second copy;
+   - for each file upstream changed since the last sync, `git diff origin/gw2-on-mac HEAD -- <file>
+     | git patch-id --stable` equals the same for upstream's own diff, except a file with a resolved
+     conflict (read that diff whole) or one whose upstream change I already ported by hand;
+   - a commit already ported by hand (like `0df8610` in #165) adds no second copy: its files show no
+     change from that commit in the merge;
    - `AIRCONV_VERSION` (`src/airconv/airconv_public.h`) is unchanged, or the PR says why not;
    - `scripts/shader-warm.zsh`'s parity check (GW2 on Mac workspace) and a GW2 session before and
      after, on my Mac.
@@ -22,7 +24,7 @@ Nothing goes the other way: never push, open or comment anything in 3Shain/dxmt.
 
 ## Upstream's workflow stays disabled
 
-Upstream's `.github/workflows/ci.yml` ("CI Build") runs four `macos-15` jobs on every push to
+Upstream's `.github/workflows/ci.yml` ("CI Build") runs 16 `macos-15` jobs on every push to
 `main`. I disabled it in the fork (#249); only `gw2.yml` runs here. Before step 5, check it still reads
 `disabled_manually`:
 
