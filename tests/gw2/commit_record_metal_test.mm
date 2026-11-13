@@ -16,7 +16,7 @@
 // - an empty chunk (one command buffer with no encoder), and 0, 1 and 3 split buffers with GPU work;
 // - every record is in commit order (ordinals 0..n-1), and every buffer completed without an error
 //   once the records are built (the builder waited for each);
-// - with timing: GPU times for every buffer with work (end >= start, starts in commit order);
+// - with timing: GPU times for every buffer with work (end >= start, each record its own buffer's);
 //   without: none read, and no logs for a split buffer without an error;
 // - the report: one GPU span per record and the last one's end as aftergpu, with DXMT_STATS only;
 //   no device-error line.
@@ -161,9 +161,12 @@ chunk(id<MTLCommandQueue> queue, id<MTLBuffer> buffer, const char *name, int spl
       CHECK(records[i].gpu_start_ns && records[i].gpu_end_ns && *records[i].gpu_end_ns >= *records[i].gpu_start_ns,
             "%s: buffer %zu: no GPU span (%llu, %llu)", name, i,
             (unsigned long long)records[i].gpu_start_ns.value_or(0), (unsigned long long)records[i].gpu_end_ns.value_or(0));
-      if (i > 0 && records[i].gpu_start_ns && records[i - 1].gpu_start_ns)
-        CHECK(*records[i].gpu_start_ns >= *records[i - 1].gpu_start_ns, "%s: buffer %zu started before %zu", name, i,
-              i - 1);
+      // gw2 (#257): each record has its own buffer's times. One queue runs its buffers in commit order, but
+      // Metal doesn't promise that their GPUStartTimes rise in that order: the GitHub runner's paravirtual GPU
+      // gave buffer 2 of "3 splits" an earlier start than buffer 1.
+      CHECK(records[i].gpu_start_ns == uint64_t(buffers[i].cmdbuf.GPUStartTime * 1000000000.0) &&
+                records[i].gpu_end_ns == uint64_t(buffers[i].cmdbuf.GPUEndTime * 1000000000.0),
+            "%s: record %zu doesn't have buffer %zu's times", name, i, i);
     }
   }
   CHECK(timing ? time_reads == 2 * int(buffers.size()) : time_reads == 0, "%s: %d GPU time reads", name, time_reads);
