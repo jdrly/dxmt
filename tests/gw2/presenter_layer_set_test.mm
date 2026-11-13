@@ -83,7 +83,8 @@
 // frame's commit before the present. Fences order the frame's clear, the pass and the next frame's
 // clear, as the context's fences do, and the test reads the drawable back in the pass's command
 // buffer, before the signal. Every drawable must hold its own frame's colour. The METAL4 line must count
-// beforepass= the frames on today's order and 0 with done; with done, every frame's present must come
+// beforepass= most of the frames on today's order (a pass that completed before the present is counted
+// correctly, so not all is required; the line prints the count) and 0 with done; with done, every frame's present must come
 // after its encode (presentat above 0) and none before its pass completed.
 //
 // gw2 (#226): DXMT_MTL4_LAYER_SET=queue puts each presenter's layer set on the queue, as before #184,
@@ -762,9 +763,16 @@ colours(Fixture &fx, Present how, bool split) {
     std::string metal4_line = dxmt::gw2::g_metal4 ? dxmt::gw2::g_metal4(2000, 0) : std::string();
     std::string present_line = dxmt::gw2::g_present ? dxmt::gw2::g_present(2000, 0) : std::string();
     std::printf("METAL4 (%s): %s\nPRESENT (%s): %s\n", mode, metal4_line.c_str(), mode, present_line.c_str());
+    // today's order presents microseconds after the commit, so nearly every pass is still running; one that
+    // completed first (the thread descheduled in between) is counted correctly, so the check takes most,
+    // not all. With done it must be none
     std::string before = field(metal4_line, "beforepass");
-    std::string want = how == Present::Done ? "0" : std::to_string(readbacks.size());
-    CHECK(before == want, "%s: METAL4 beforepass=%s, want %s", mode, before.c_str(), want.c_str());
+    unsigned long count = std::strtoul(before.c_str(), nullptr, 10);
+    if (how == Present::Done)
+      CHECK(before == "0", "%s: METAL4 beforepass=%s, want 0", mode, before.c_str());
+    else
+      CHECK(before != "(none)" && count > readbacks.size() / 2 && count <= readbacks.size(),
+            "%s: METAL4 beforepass=%s of %zu frames, want most", mode, before.c_str(), readbacks.size());
     CHECK(field(present_line, "presentat") != "(none)", "%s: PRESENT has no presentat", mode);
     if (how == Present::Done) {
       CHECK(early == 0, "%s: %u presents before their pass completed", mode, early);

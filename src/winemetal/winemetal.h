@@ -2514,7 +2514,8 @@ WINEMETAL_API void MetalDrawable_present(obj_handle_t drawable, enum WMTDrawable
    from its own thread (the handler's is a Metal thread). The present is MetalDrawable_present's for
    mode and value, but a deadline counts from the time taken after signalDrawable in this call, not
    from the present. The drawable is retained until it is presented; a commit with an error presents
-   all the same. */
+   all the same. If the unix side can't allocate its gate (a few bytes), that present is today's: right after
+   the signal, from the call. */
 WINEMETAL_API void MTL4CommandQueue_commitPresent(
     obj_handle_t queue, obj_handle_t cmdbuf, struct WMTMtl4CommitFeedback *feedback, obj_handle_t event,
     uint64_t event_value, obj_handle_t drawable, enum WMTDrawablePresentMode mode, double value
