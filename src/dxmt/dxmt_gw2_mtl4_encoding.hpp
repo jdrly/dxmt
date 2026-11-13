@@ -62,6 +62,14 @@ public:
   void waitForDrawable(WMT::MetalDrawable drawable);
   // commits the open command buffer (the present pass), then signals the drawable at the queue
   void signalDrawable(WMT::MetalDrawable drawable);
+  // gw2 (#242): after signalDrawable, the drawable's present from this thread (MetalDrawable::present),
+  // the Metal 4 order (DXMT_MTL4_PRESENT unset or mtl4). With DXMT_STATS it counts in METAL4 beforepass
+  // if the present pass's commit hadn't completed, and as 0 in PRESENT presentat.
+  void present(WMT::MetalDrawable drawable, WMTDrawablePresentMode mode, double value);
+  // gw2 (#242): DXMT_MTL4_PRESENT=done, in place of signalDrawable and present: commits the open command
+  // buffer (the present pass) with the drawable's signal and present (Mtl4Queue::commitPresent). The
+  // unix side presents once the commit has completed; Mtl4Queue::wait counts it.
+  void presentWhenDone(WMT::MetalDrawable drawable, WMTDrawablePresentMode mode, double value);
 
   // --- gw2 (#227): present through a Metal 3 command buffer (DXMT_MTL4_PRESENT=mtl3, the queue's
   // metal3Present()). In place of waitForDrawable, the pass, signalDrawable and the drawable's present:
@@ -128,6 +136,7 @@ private:
   WMTMtl4BindingState state_{};
   uint32_t bytes_flags_ = 0; // gw2 (#153): WMT_MTL4_BYTES_RESIDENT for the current arena
   bool waited_ = false;      // gw2 (#154): a queue-level wait after the last command buffer began
+  const Mtl4Commit *signalled_ = nullptr; // gw2 (#242): the present pass signalDrawable committed
 };
 
 } // namespace dxmt::gw2

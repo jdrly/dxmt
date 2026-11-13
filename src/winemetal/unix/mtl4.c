@@ -11,6 +11,8 @@
  */
 #include <os/lock.h>
 #include <stdatomic.h>
+#include <stdbool.h>
+#include <stdlib.h>
 #include <string.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/QuartzCore.h>
@@ -113,18 +115,58 @@ _MTL4CommandBuffer_useResidencySet(void *obj) {
 
 static os_unfair_lock g_event_lock = OS_UNFAIR_LOCK_INIT;
 
-NTSTATUS
-_MTL4CommandQueue_commit(void *obj) {
-  struct unixcall_mtl4_queue_commit *params = obj;
-  id<MTL4CommandQueue> queue = (id<MTL4CommandQueue>)params->queue;
-  const id<MTL4CommandBuffer> *cmdbufs = (const id<MTL4CommandBuffer> *)params->cmdbufs.ptr;
-  struct WMTMtl4CommitFeedback *feedback = params->feedback.ptr;
-  if (!feedback) {
-    [queue commit:cmdbufs count:params->count];
-    return STATUS_SUCCESS;
+/* gw2 (#242): DXMT_MTL4_PRESENT=done. The drawable's present once its pass's commit has completed (the
+   feedback handler) and signalDrawable has been called (MTL4CommandQueue_commitPresent): whichever of
+   the two arrives second presents, exactly once, and frees the gate. Apple's reference says a signal
+   after the present fails, so the order isn't left to timing. */
+struct present_gate {
+  _Atomic uint32_t arrived;   /* the handler and the call, one each */
+  _Atomic uint32_t completed; /* the handler has run (present_early) */
+  id<MTLDrawable> drawable;   /* retained until presented */
+  uint64_t mode;
+  double value; /* the minimum duration, or the deadline's time; set by the call before it arrives */
+  struct WMTMtl4CommitFeedback *feedback;
+};
+
+/* value: the minimum duration, or the deadline's time (CACurrentMediaTime's clock) */
+static void
+present_drawable(id<MTLDrawable> drawable, uint64_t mode, double value, struct WMTMtl4CommitFeedback *feedback,
+                 bool early) {
+  feedback->present_early = early;
+  feedback->present_time = CACurrentMediaTime();
+  switch ((enum WMTDrawablePresentMode)mode) {
+  case WMTDrawablePresentAfterMinimumDuration:
+    [drawable presentAfterMinimumDuration:value];
+    break;
+  case WMTDrawablePresentWithDeadline:
+    [drawable presentAtTime:value];
+    break;
+  default:
+    [drawable present];
+    break;
   }
-  id<MTLSharedEvent> event = (id<MTLSharedEvent>)params->event;
-  uint64_t value = params->event_value;
+}
+
+static void
+present_gate_present(struct present_gate *gate) {
+  bool early = !atomic_load_explicit(&gate->completed, memory_order_acquire);
+  present_drawable(gate->drawable, gate->mode, gate->value, gate->feedback, early);
+  [gate->drawable release];
+  free(gate);
+}
+
+static void
+present_gate_arrive(struct present_gate *gate) {
+  if (atomic_fetch_add_explicit(&gate->arrived, 1, memory_order_acq_rel) == 1)
+    present_gate_present(gate); /* the other one came first */
+}
+
+/* one commit with feedback; gate (gw2 #242), if any, arrives from the handler before done is set */
+static void
+commit_with_feedback(
+    id<MTL4CommandQueue> queue, const id<MTL4CommandBuffer> *cmdbufs, uint64_t count,
+    struct WMTMtl4CommitFeedback *feedback, id<MTLSharedEvent> event, uint64_t value, struct present_gate *gate
+) {
   /* one options object per commit: a reused one runs its handlers for its first commit only
      (measured by d9mt on macOS 27). The block (copied by Metal) retains the event. */
   MTL4CommitOptions *options = [[MTL4CommitOptions alloc] init];
@@ -132,6 +174,10 @@ _MTL4CommandQueue_commit(void *obj) {
     feedback->gpu_start = fb.GPUStartTime;
     feedback->gpu_end = fb.GPUEndTime;
     feedback->error = (obj_handle_t)[fb.error retain];
+    if (gate) {
+      atomic_store_explicit(&gate->completed, 1, memory_order_release);
+      present_gate_arrive(gate);
+    }
     atomic_store_explicit((_Atomic uint64_t *)&feedback->done, 1, memory_order_release);
     if (event) {
       /* only forward: should handlers of two commits run at once, a waiter for the later value
@@ -142,8 +188,54 @@ _MTL4CommandQueue_commit(void *obj) {
       os_unfair_lock_unlock(&g_event_lock);
     }
   }];
-  [queue commit:cmdbufs count:params->count options:options];
+  [queue commit:cmdbufs count:count options:options];
   [options release];
+}
+
+NTSTATUS
+_MTL4CommandQueue_commit(void *obj) {
+  struct unixcall_mtl4_queue_commit *params = obj;
+  id<MTL4CommandQueue> queue = (id<MTL4CommandQueue>)params->queue;
+  const id<MTL4CommandBuffer> *cmdbufs = (const id<MTL4CommandBuffer> *)params->cmdbufs.ptr;
+  struct WMTMtl4CommitFeedback *feedback = params->feedback.ptr;
+  if (!feedback) {
+    [queue commit:cmdbufs count:params->count];
+    return STATUS_SUCCESS;
+  }
+  commit_with_feedback(
+      queue, cmdbufs, params->count, feedback, (id<MTLSharedEvent>)params->event, params->event_value, NULL
+  );
+  return STATUS_SUCCESS;
+}
+
+NTSTATUS
+_MTL4CommandQueue_commitPresent(void *obj) {
+  struct unixcall_mtl4_queue_commit_present *params = obj;
+  id<MTL4CommandQueue> queue = (id<MTL4CommandQueue>)params->queue;
+  id<MTL4CommandBuffer> cmdbuf = (id<MTL4CommandBuffer>)params->cmdbuf;
+  id<MTLDrawable> drawable = (id<MTLDrawable>)params->drawable;
+  struct WMTMtl4CommitFeedback *feedback = params->feedback.ptr;
+  struct present_gate *gate = calloc(1, sizeof(*gate));
+  if (gate) {
+    gate->drawable = [drawable retain];
+    gate->mode = params->mode;
+    gate->feedback = feedback;
+  }
+  /* without a gate (no memory): today's order, the present right after the signal (below) */
+  commit_with_feedback(
+      queue, &cmdbuf, 1, feedback, (id<MTLSharedEvent>)params->event, params->event_value, gate
+  );
+  [queue signalDrawable:drawable];
+  double now = CACurrentMediaTime();
+  feedback->present_encode = now;
+  double value = params->mode == WMTDrawablePresentWithDeadline ? now + params->value : params->value;
+  if (!gate) {
+    bool early = !atomic_load_explicit((_Atomic uint64_t *)&feedback->done, memory_order_acquire);
+    present_drawable(drawable, params->mode, value, feedback, early);
+    return STATUS_SUCCESS;
+  }
+  gate->value = value;
+  present_gate_arrive(gate);
   return STATUS_SUCCESS;
 }
 

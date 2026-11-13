@@ -5,6 +5,7 @@
 // time its present was encoded, and (gw2 #224) the drawable's surface; the encode thread collects
 // the finished records at each present. Off with DXMT_STATS=0, like all of the fork's measuring.
 
+#include <atomic>
 #include <cstdint>
 #include <string>
 
@@ -38,10 +39,29 @@ PresentQueue presentQueue();
 bool presentPaceOn();
 
 // gw2 (#227): DXMT_MTL4_PRESENT's grammar: exactly `mtl3` presents through a Metal 3 command buffer on a
-// Metal 4 device; anything else, unset included, is the fallback, `mtl4` (today's Metal 4 present).
+// Metal 4 device; gw2 (#242): exactly `done` presents the drawable once its pass's commit has completed;
+// anything else, unset included, is the fallback, `mtl4` (today's Metal 4 present).
 inline std::string
 mtl4PresentGrammar(const std::string &raw, const std::string &fallback) {
-  return raw == "mtl3" ? raw : fallback;
+  return raw == "mtl3" || raw == "done" ? raw : fallback;
+}
+
+// gw2 (#242): PRESENT presentat, Metal 4's drawable present call minus its encode: the window's count,
+// sum and maximum in ns. Inline, so the Metal 4 queue (dxmt_gw2_mtl4_queue.cpp) adds to it without
+// linking this file's section.
+struct PresentAt {
+  std::atomic<uint64_t> n{0}, sum_ns{0}, max_ns{0};
+};
+inline PresentAt g_present_at;
+
+// any thread
+inline void
+presentAtSample(uint64_t ns) {
+  g_present_at.n.fetch_add(1, std::memory_order_relaxed);
+  g_present_at.sum_ns.fetch_add(ns, std::memory_order_relaxed);
+  uint64_t seen = g_present_at.max_ns.load(std::memory_order_relaxed);
+  while (ns > seen && !g_present_at.max_ns.compare_exchange_weak(seen, ns, std::memory_order_relaxed))
+    ;
 }
 
 // Encode thread, with presentPaceOn(): how long the nextDrawable of present `seq` blocked.

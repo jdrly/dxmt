@@ -15,6 +15,7 @@ NTSTATUS _MTL4CommandBuffer_beginCommandBuffer(void *obj);
 NTSTATUS _MTL4CommandBuffer_endCommandBuffer(void *obj);
 NTSTATUS _MTL4CommandBuffer_useResidencySet(void *obj);
 NTSTATUS _MTL4CommandQueue_commit(void *obj);
+NTSTATUS _MTL4CommandQueue_commitPresent(void *obj); /* gw2 (#242) */
 NTSTATUS _MTL4CommandQueue_waitForDrawable(void *obj);
 NTSTATUS _MTL4CommandQueue_signalDrawable(void *obj);
 NTSTATUS _MTL4CommandQueue_signalEvent(void *obj);

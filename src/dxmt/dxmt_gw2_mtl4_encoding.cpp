@@ -143,8 +143,22 @@ Mtl4Encoding::waitForDrawable(WMT::MetalDrawable drawable) {
 
 void
 Mtl4Encoding::signalDrawable(WMT::MetalDrawable drawable) {
+  signalled_ = queue_.current(seq_); // gw2 (#242): its record stays valid until the chunk retires
   commitOpen();
   queue_.queue().signalDrawable(drawable);
+}
+
+void
+Mtl4Encoding::present(WMT::MetalDrawable drawable, WMTDrawablePresentMode mode, double value) {
+  bool before_pass = signalled_ && !signalled_->done(); // gw2 (#242): read before the call
+  drawable.present(mode, value);
+  metal4PresentCounted(before_pass, 0);
+}
+
+void
+Mtl4Encoding::presentWhenDone(WMT::MetalDrawable drawable, WMTDrawablePresentMode mode, double value) {
+  open(); // the present pass's (encodeCommandsMetal4 began it), so the present always has a commit
+  queue_.commitPresent(seq_, drawable, mode, value);
 }
 
 uint64_t

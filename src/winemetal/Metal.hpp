@@ -1120,6 +1120,14 @@ public:
     );
   }
 
+  // gw2 (#242): DXMT_MTL4_PRESENT=done. Commits cmdbuf with feedback (as commit), signals the drawable,
+  // and presents it (mode, value as MetalDrawable::present) once both have happened, from the unix side
+  void
+  commitPresent(MTL4CommandBuffer cmdbuf, WMTMtl4CommitFeedback *feedback, Event event, uint64_t event_value,
+                MetalDrawable drawable, WMTDrawablePresentMode mode, double value) {
+    MTL4CommandQueue_commitPresent(handle, cmdbuf, feedback, event.handle, event_value, drawable, mode, value);
+  }
+
   void
   waitForDrawable(MetalDrawable drawable) {
     MTL4CommandQueue_waitForDrawable(handle, drawable);

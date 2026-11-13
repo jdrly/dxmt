@@ -26,6 +26,8 @@
 //   queues: this queue signals `frame` after the frame's commits, the Metal 3 buffer waits for it and
 //   signals `shown` after the present pass, and this queue waits for `shown` before its next commit.
 //   The Metal 3 buffer belongs to its chunk's slot: wait() waits for it, retire() lets it go.
+// - gw2 (#242), DXMT_MTL4_PRESENT=done: the present pass's commit carries the drawable's signal and
+//   present (commitPresent); the unix side presents once the commit has completed. wait() reads when.
 //
 // Threads: begin/commit/waitForEvent/signalEvent on the encode thread, for the chunk being encoded;
 // wait/retire on the finish thread, for the oldest chunk not retired; waitIdle at teardown, once
@@ -34,7 +36,8 @@
 //
 // The METAL4 section (2 s, with DXMT_STATS): commits= buffers=<per chunk, max> allocmb=<largest
 // allocator at reset> allocators=<alive now> allocheld=<their sizes at their last reset, MB>
-// slow=<chunks the finish thread waited for over 1 s> errors=.
+// slow=<chunks the finish thread waited for over 1 s> errors=. gw2 (#242): beforepass=<presents called
+// before their pass's commit had completed>.
 
 #include "Metal.hpp"
 #include <atomic>
@@ -83,6 +86,10 @@ struct Mtl4Tables {
 
 // part 3: a chunk's binding-state counters, into the METAL4 section (encode thread)
 void metal4EncodeCounters(const WMTMtl4BindingState &state);
+
+// gw2 (#242), with DXMT_STATS: a drawable's present, `at_ns` after its encode, for PRESENT presentat;
+// `before_pass`: its pass's commit hadn't completed (METAL4 beforepass). Any thread.
+void metal4PresentCounted(bool before_pass, uint64_t at_ns);
 
 class Mtl4Queue {
 public:
@@ -149,6 +156,10 @@ public:
   // device set's and the slot set's pending changes are committed and the command buffer uses the
   // slot's set (gw2 #153, DXMT_MTL4_DEVICE_RESIDENCY=1: if it has allocations).
   void commit(uint64_t seq);
+  // gw2 (#242), DXMT_MTL4_PRESENT=done: as commit(seq), for the open command buffer (one must be open),
+  // then the drawable is signalled at the queue and presented (mode, value as MetalDrawable::present)
+  // once the commit has completed (MTL4CommandQueue_commitPresent)
+  void commitPresent(uint64_t seq, WMT::MetalDrawable drawable, WMTDrawablePresentMode mode, double value);
 
   // The residency set of chunk `seq`'s slot (WMTMtl4BindingState::residency_set)
   WMT::ResidencySet
@@ -196,11 +207,21 @@ public:
     return slot(seq).metal3;
   }
 
+  // --- gw2 (#242): DXMT_MTL4_PRESENT=done
+
+  // Before the first chunk: the context presents with commitPresent
+  void enablePresentWhenDone();
+  bool
+  presentWhenDone() const {
+    return present_done_;
+  }
+
   // --- finish thread
 
   // Blocks until every command buffer chunk `seq` committed has completed and its feedback is
   // written; returns them in commit order (valid until retire(seq)). gw2 (#227): the chunk's Metal 3
-  // present buffers are waited for first (metal3Presents).
+  // present buffers are waited for first (metal3Presents). gw2 (#242): with DXMT_STATS, a commit that
+  // carried a present counts it (metal4PresentCounted).
   const std::vector<Mtl4Commit *> &wait(uint64_t seq);
 
   // After wait(seq), once nothing reads the records: releases their errors, resets the slot's
@@ -231,6 +252,8 @@ private:
     return slots_[seq % slots_.size()];
   }
 
+  struct Present; // gw2 (#242)
+  void submit(uint64_t seq, const Present *present);
   Mtl4Commit *acquire();
   void recycle(Mtl4Commit *commit);
   // gw2 (#204)
@@ -245,6 +268,7 @@ private:
   // gw2 (#227)
   WMT::Reference<WMT::SharedEvent> frame_event_, shown_event_;
   bool metal3_present_ = false;
+  bool present_done_ = false; // gw2 (#242)
   uint64_t metal3_value_ = 0; // encode thread
   WMT::Reference<WMT::MTL4CommandQueue> queue_;
   WMT::Reference<WMT::SharedEvent> event_;
