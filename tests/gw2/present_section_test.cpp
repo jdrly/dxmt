@@ -9,7 +9,8 @@
 //   last showed the frame three before it, and that frame left the screen when the one after it was
 //   presented. Passes ending before, at and after that moment; a surface seen the first time; a frame
 //   without a present pass time; a frame whose GPU times aren't final yet (it waits a window, as
-//   aftergpu does); a gap in the frame numbers; a dropped frame.
+//   aftergpu does); a dropped frame; a gap in the frame numbers, after which every surface is seen
+//   anew (a lost frame may have shown on any of them).
 // - parity: the fields the section had before #224 (presented, aftergpu, nogpu, missed, starved,
 //   target, n, dropped, lost) keep their values. The section of 215e15a is copied below as the
 //   oracle, fed the same records and GPU ends window by window (made-up sessions with drops, losses,
@@ -338,10 +339,11 @@ fields() {
   CHECK(field(line, "early") == "1", "early {} (frame 9)", field(line, "early"));
   CHECK(field(line, "inuse") == "0", "inuse {}", field(line, "inuse"));
 
-  // window 3: frame 11's record is lost, then 12 to 15, 14 dropped.
+  // window 3: frame 11's record is lost, then 12 to 15, 14 dropped. The gap starts every surface's
+  // history over: the lost frame may have shown on any of them.
   // - 10 (waiting since window 2): its pass ends exactly when frame 8 was presented: not early.
-  // - 12 (surface 103): it last showed 9, which left when 10 was presented (window 2): early.
-  // - 13 (surface 101): it last showed 10, whose successor 11 is missing: unknown, not counted.
+  // - 12 (surface 103) and 13 (surface 101): first seen after the gap: unknown, not counted, though
+  //   both passes end before the times their surfaces' history from before the gap would give.
   // - 14 is dropped: it never shows, so 13 stays on screen until 15.
   // - 15 (surface 103): it last showed 12, which left when 13 was presented: early.
   pass(10, 0, 0);
@@ -355,9 +357,23 @@ fields() {
            rec(14, encoded(14), 0, surface(14)), rec(15, encoded(15), presented(15), surface(15))});
   line = window("fields, window 3");
   std::printf("fields 3: %s\n", line.c_str());
-  CHECK(field(line, "early") == "2", "early {} (frames 12 and 15)", field(line, "early"));
+  CHECK(field(line, "early") == "1", "early {} (frame 15)", field(line, "early"));
   CHECK(field(line, "drawwait") == "0.0/0.0", "drawwait {} (frames 10, 12, 13, 15 start at the encode)",
         field(line, "drawwait"));
+
+  // window 4: frame 16's record is lost, and 16 showed on surface 101, which last showed 13 before it
+  // (replaced at presented(15)). Frame 19 shows on 101 again. Measured against 101's history from
+  // before the gap, its pass (made to end before presented(15)) would count early; after the gap 101
+  // is seen anew, so it doesn't count.
+  dxmt::gw2::presentPassGpu(19, encoded(19), presented(15) - kMs);
+  for (uint64_t f = 17; f <= 20; f++)
+    gpuEnd(f, presented(f) - 30 * kMs);
+  deliver({rec(17, encoded(17), presented(17), surface(17)), rec(18, encoded(18), presented(18), surface(18)),
+           rec(19, encoded(19), presented(19), surface(19))});
+  line = window("fields, window 4");
+  std::printf("fields 4: %s\n", line.c_str());
+  CHECK(field(line, "early") == "0", "early {} (frame 19 after the gap: its surface seen anew)",
+        field(line, "early"));
 }
 
 // made-up sessions: the new section and the oracle get the same records and GPU ends each window

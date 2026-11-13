@@ -42,8 +42,8 @@
 //   - early: shown frames whose pass ended on the GPU before the surface's last frame left the
 //     screen, that is before the frame after that one was presented (the layer's own clock). The
 //     surface is the drawable texture's IOSurface id. A frame is left out when either time is
-//     unknown, when its surface is seen for the first time, and across a gap in the frame numbers
-//     (a lost record).
+//     unknown and when its surface is seen for the first time. A gap in the frame numbers (a lost
+//     record) starts every surface's history over.
 //   - inuse: drawables whose surface IOSurfaceIsInUse called in use when the present was tracked.
 
 namespace dxmt::gw2 {
@@ -104,8 +104,12 @@ SectionRegistrar g_registrar("PRESENT", section);
 // the first time, a gap in the frame numbers)
 uint64_t
 surfaceStep(const WMTPresentedRecord &r) {
-  if (!g_prev_valid || r.frame != g_prev_frame + 1)
-    g_shown_valid = false; // a record is missing: the last shown frame's successor is unknown
+  if (!g_prev_valid || r.frame != g_prev_frame + 1) {
+    // a record is missing: the last shown frame's successor is unknown, and the missing frame may have
+    // shown on any surface, so every surface's history starts over
+    g_shown_valid = false;
+    g_surfaces.clear();
+  }
   g_prev_valid = true;
   g_prev_frame = r.frame;
   if (!r.presented_ns)
