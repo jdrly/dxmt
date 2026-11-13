@@ -101,27 +101,39 @@ main() {
     CHECK(apiThread().depth == 0);
   }
 
-  // Time: 1 in 64 timed and scaled by 64 (#150), so the estimate lands near the true total; MAP and
-  // PACE take the same interval.
+  // Time: 1 in 64 timed and scaled by 64 (#150); MAP and PACE take the same interval. Each timed
+  // update is checked against the same clock, read right before and after it (#239): its interval,
+  // less the floor, lies inside that bracket and holds the spin. A pause on the runner only widens
+  // the bracket, so it can't fail this. Against the loop's wall time it could: a pause inside a timed
+  // update counts 64 times in the estimate and once in the wall time. A scale applied twice or not at
+  // all puts the timed updates outside (all 61 when I tried both; a pause can let one of them in).
   {
     ApiThreadCache cache;
     MapCounters one;
     otherDrain();
     constexpr int kUpdates = 4096;
-    constexpr int64_t kSpin = 2000;
-    int64_t t0 = nowNs();
+    constexpr int64_t kSpin = 2000, kScale = 64;
+    int64_t floor_ns = clockFloorNs();
+    int timed = 0, outside = 0;
     for (int i = 0; i < kUpdates; i++) {
-      UpdateScope u(one, MapKind::DefCb, MapOp::Discard, cache);
-      spinNs(kSpin);
+      int64_t before = one.ns[kDefCb][kDiscard], b0 = nowNs();
+      {
+        UpdateScope u(one, MapKind::DefCb, MapOp::Discard, cache);
+        spinNs(kSpin);
+      }
+      int64_t bracket = nowNs() - b0, ns = one.ns[kDefCb][kDiscard] - before;
+      if (ns) {
+        timed++;
+        outside += ns < kScale * (kSpin - floor_ns) || ns > kScale * bracket;
+      }
     }
-    double wall = double(nowNs() - t0);
     int64_t pace_ns = otherDrain().ns[kMap];
     int64_t map_ns = one.ns[kDefCb][kDiscard];
     CHECK(pace_ns == map_ns);
-    CHECK(map_ns > 0.6 * kUpdates * kSpin);
-    CHECK(map_ns < 1.6 * wall);
-    std::printf("timed estimate %.2f ms, spun %.2f ms, wall %.2f ms\n", map_ns / 1e6, kUpdates * kSpin / 1e6,
-                wall / 1e6);
+    CHECK(outside == 0);
+    CHECK(timed > kUpdates / kScale / 2 && timed < kUpdates / kScale * 2); // the thread's draws: the same every run
+    std::printf("timed estimate %.2f ms: %d of %d updates timed, %d outside their bracket\n", map_ns / 1e6, timed,
+                kUpdates, outside);
   }
 
   // gw2 (#150): the clock's floor is its own cost, and sinceNs takes it off once. The interval's end,
