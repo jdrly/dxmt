@@ -8,19 +8,23 @@
 // gw2-build: cp tests/gw2/fixtures/present_cursor_test.plist ${OUT}.app/Contents/Info.plist
 // gw2-build: codesign -s - -f ${OUT}.app
 // gw2-run: R=(tests/gw2/present_cursor.zsh --dir $T --no-sample --pointer still)
+// gw2-run: failed=() skipped=0 # each run's own RESULT line, then the failed runs; exit 3 is a variant's result
+// gw2-run: run() { "$@" && return; local rc=$?; (( rc == 3 )) && return 0; (( rc == 77 )) && { skipped=1; return 0 }; failed+=("exit $rc: ${(j: :)@[2,-1]}"); return 0 }
 // gw2-run: for arch in arm64 x86_64; do
 // gw2-run:   for v in "--present mtl3" "--present mtl4" "--present mtl4 --layer-set queue" "--present mtl4 --empty-commit off" "--present mtl4 --present-thread queue" "--present mtl3-on-mtl4" "--present mtl4 --present-at done" "--present mtl3 --encode-thread wine" "--present mtl4 --encode-thread wine" "--present mtl3 --layer wine" "--present mtl4 --layer wine"; do
-// gw2-run:     MTL_DEBUG_LAYER=1 $R --arch $arch ${=v}
+// gw2-run:     MTL_DEBUG_LAYER=1 run $R --arch $arch ${=v}
 // gw2-run:   done
 // gw2-run:   for v in "--framebuffer-only on" "--colorspace none" "--transaction on" "--drawable link"; do
-// gw2-run:     for p in mtl3 mtl4; do MTL_DEBUG_LAYER=1 $R --arch $arch --present $p ${=v}; done
+// gw2-run:     for p in mtl3 mtl4; do MTL_DEBUG_LAYER=1 run $R --arch $arch --present $p ${=v}; done
 // gw2-run:   done
-// gw2-run:   for v in "--framebuffer-only on" "--colorspace none"; do MTL_DEBUG_LAYER=1 $R --arch $arch --present mtl3-on-mtl4 ${=v}; done
-// gw2-run:   for p in mtl3 mtl4; do MTL_HUD_ENABLED=1 MTL_DEBUG_LAYER=1 $R --arch $arch --present $p --hud-lines on; done
-// gw2-run:   $R --arch $arch --present mtl4 --wait-for-drawable off
+// gw2-run:   for v in "--framebuffer-only on" "--colorspace none"; do MTL_DEBUG_LAYER=1 run $R --arch $arch --present mtl3-on-mtl4 ${=v}; done
+// gw2-run:   for p in mtl3 mtl4; do MTL_HUD_ENABLED=1 MTL_DEBUG_LAYER=1 run $R --arch $arch --present $p --hud-lines on; done
+// gw2-run:   run $R --arch $arch --present mtl4 --wait-for-drawable off
 // gw2-run:   MTL_DEBUG_LAYER=1 $R --arch $arch --present mtl4 --wait-for-drawable off || true # the layer may stop it
 // gw2-run: done
-// gw2-run: for p in mtl3 mtl4; do MTL_DEBUG_LAYER=1 $R --bundle --present $p; done
+// gw2-run: for p in mtl3 mtl4; do MTL_DEBUG_LAYER=1 run $R --bundle --present $p; done
+// gw2-run: (( ! ${#failed} )) || { print "failed runs:"; print -l -- $failed; exit 1 }
+// gw2-run: (( ! skipped )) || exit 77
 //
 // gw2 (#225, for #223): on the arm64 engine with Metal 4, moving the cursor makes every frame a
 // refresh late (40 fps at 60 Hz with three drawables), and with Metal 3 it doesn't. This is the
@@ -132,10 +136,14 @@
 //      --colorspace none         the layer's colorspace left nil, and wantsExtendedDynamicRangeContent not set
 //      --transaction on          the layer's presentsWithTransaction on, and the present as Apple's rule for it
 //                                says: mtl3 commits the buffer, waits until it is scheduled, then calls the
-//                                drawable's present; mtl4 commits the pass and calls signalDrawable, then the
-//                                present. Both from the encoding thread, inside an explicit CATransaction (that
-//                                thread has no run loop to commit an implicit one), with no time. So not with
-//                                --present-at done or --present-thread queue
+//                                drawable's present. A Metal 4 queue has no waitUntilScheduled, and Apple's docs
+//                                say nothing of Metal 4 with this layer, so mtl4 commits the pass, calls
+//                                signalDrawable, signals a shared event on the queue and waits for it (the pass
+//                                and the signal have run, later than scheduled), then presents. Both from the
+//                                encoding thread, inside an explicit CATransaction (that thread has no run loop
+//                                to commit an implicit one), with no time. So not with --present-at done or
+//                                --present-thread queue. If mtl4 presents no frame this way, that is the
+//                                variant's result: a result: line, exit 3
 //      --drawable link           the drawable from a CAMetalDisplayLink on the layer, not from nextDrawable.
 //                                The link runs on the encoding thread's run loop at the display's refresh rate,
 //                                with --link-latency 1|2 (default 2; Apple takes no other) as its
@@ -206,7 +214,8 @@
 //
 // Exit: 0 when every frame was encoded and no command buffer reported an error; 1 on a Metal error, if no
 // frame was presented, or if the display link stopped before the last frame; 2 on a bad argument or a
-// flag the present way doesn't take; 77 (skipped) without a GUI session, without a
+// flag the present way doesn't take; 3 when --present mtl4 --transaction on presented no frame (the
+// variant's result, not a failure); 77 (skipped) without a GUI session, without a
 // display, without a Metal device, without Metal 4 for either Metal 4 way, without the permission for
 // --move event, or when the layer gives no drawable three times in a row (the window isn't on a
 // display); 130 after Ctrl-C.
@@ -302,6 +311,7 @@ static id<MTLFence> g_raw, g_war; // frame pass -> present pass, present pass ->
 static bool g_war_updated;
 static id<MTLResidencySet> g_layer_set;
 static id<MTLSharedEvent> g_frame_event, g_shown_event; // --present mtl3-on-mtl4
+static id<MTLSharedEvent> g_drawn_event; // --transaction on: the queue has run a frame's pass and signalDrawable
 static dispatch_queue_t g_present_queue;
 // --drawable link: the update the callback is encoding, on the link's thread
 static id<CAMetalDrawable> g_link_drawable;
@@ -701,6 +711,13 @@ present_mtl4(uint64_t k, unsigned s) {
   commit4(k, pcb, kPresentPass, nil);
   [g_q4 signalDrawable:d];
   if (opt.transaction) {
+    // Apple's rule presents after the pass is scheduled; a Metal 4 queue has no waitUntilScheduled, so wait
+    // until it has run the pass and signalDrawable (later than scheduled), then present
+    [g_q4 signalEvent:g_drawn_event value:k + 1];
+    static int late;
+    if (![g_drawn_event waitUntilSignaledValue:k + 1 timeoutMS:1000] && late++ < 5)
+      printf("transaction: frame %llu: the queue hadn't run the pass and signalDrawable in 1 s; presenting anyway\n",
+             (unsigned long long)k);
     present_in_transaction(d);
   } else if (opt.present_on_queue) {
     dispatch_async(g_present_queue, ^{
@@ -1128,6 +1145,11 @@ finish(int code) {
   if (errors) {
     printf("FAIL: %d command buffers reported a Metal error\n", errors);
     code = 1;
+  } else if (!g_presented_all && opt.mtl4 && opt.transaction) {
+    // the variant's result, not the test's failure (#245): the present followed Apple's rule as far as Metal 4 can
+    printf("result: no frame was presented: Metal 4 doesn't present a drawable of a layer with "
+           "presentsWithTransaction this way\n");
+    code = 3;
   } else if (!g_presented_all) {
     printf("FAIL: no frame was presented\n");
     code = 1;
@@ -1417,7 +1439,8 @@ setup_metal4(void) {
     [g_q4 addResidencySet:g_layer_set];
   g_frame_event = [g_device newSharedEvent];
   g_shown_event = [g_device newSharedEvent];
-  if (!g_frame_event || !g_shown_event)
+  g_drawn_event = [g_device newSharedEvent];
+  if (!g_frame_event || !g_shown_event || !g_drawn_event)
     return false;
   g_present_queue =
       dispatch_queue_create("present", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0));
@@ -1593,7 +1616,8 @@ main(int argc, const char **argv) {
     if (opt.transaction)
       printf("layer: presentsWithTransaction %d; each present is the drawable's plain present in a "
              "CATransaction on the encoding thread, after %s\n",
-             g_layer.presentsWithTransaction, opt.mtl4 ? "signalDrawable" : "waitUntilScheduled");
+             g_layer.presentsWithTransaction,
+             opt.mtl4 ? "signalDrawable and a shared event the queue signals after it" : "waitUntilScheduled");
     if (opt.link)
       printf("drawable: from a CAMetalDisplayLink on the encoding thread's run loop, preferredFrameLatency %d, at "
              "%.2f Hz; a frame starts when the link hands its drawable out (DXMT takes the drawable after the "

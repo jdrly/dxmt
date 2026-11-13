@@ -22,7 +22,8 @@
 # busy: 11 or more), the interval and missed refreshes, the layer's path, the display, the test's start
 # line (every variant in effect), the rest of the summary, the exit code, then (#245) inuse n/m, after the
 # fields from before so a reader of the old lines finds them where they were (inuse=none from a binary
-# without it). Exit: the test's.
+# without it), and the test's result: line when it has one (a variant that presented nothing, exit 3).
+# Exit: the test's.
 
 emulate -L zsh
 setopt pipefail
@@ -37,7 +38,7 @@ while (( $# )); do
     --bundle) bundle=1 ;;
     --no-sample) sample=0 ;;
     --dir) dir=$2; shift ;;
-    -h|--help) sed -n '2,25p' "${0:A}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,26p' "${0:A}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) args+=("$1") ;;
   esac
   shift
@@ -128,6 +129,8 @@ fi
 r+=("${start#present_cursor_test: }")
 [[ -n $rest ]] && r+=("${(j: :)${=${rest#summary }}}")
 r+=("exit $rc" "$inuse")
+result=$(line 'result: ')
+[[ -n $result ]] && r+=("$result")
 print -r -- "${(j: | :)r}"
 (( sample )) && print "files: $out $ws"
 exit $rc
