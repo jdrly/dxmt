@@ -13,9 +13,9 @@ namespace dxmt {
 namespace {
 // gw2 (#251): every live dynamic buffer and dynamic linear texture, for MAP's queued. Listed at
 // creation and unlisted at destruction (swapped with the last one), only with DXMT_STATS on; nothing
-// on the Map path touches it. The first listing starts a thread that walks the lists every 2 s, off
-// the presenting thread, kBatch resources per hold of the mutex, so a create or destroy waits for one
-// batch at most. Lock order: this mutex, then a resource's mutex_. A destructor takes it without its
+// on the Map path touches it. The first listing starts a thread that walks the lists with 2 s between
+// walks, off the presenting thread, kBatch resources per hold of the mutex (what a create or destroy
+// can wait for). Lock order: this mutex, then a resource's mutex_. A destructor takes it without its
 // own mutex_, so a resource the walk reaches isn't destroyed under it. A resource that dies between
 // batches can move one not yet walked to a walked slot: that walk misses it. Never destroyed
 // (resources can die while static objects are destroyed at exit).
