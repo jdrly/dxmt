@@ -146,8 +146,10 @@
 //   path               the layer's private displayCompositingInternalStatus, read on the main thread if
 //                      the layer responds to it: 0 is direct (athei found it 0 whenever the Metal HUD
 //                      said Direct), anything else is composited. A composited line says so.
-// At the end, one summary line over the frames after the first second, and, if any second was
-// composited or unknown, a line that says this run can't show #223.
+// At the end, one summary line over the frames after the first second, then (#237) an intervals line
+// over the same intervals: n, p50, p95 and max in ms, and how many were 1, 2, 3, and 4 or more refreshes
+// (the interval over the display's refresh period, rounded), with that period. If any second was
+// composited or unknown, a line says this run can't show #223.
 //
 // What it can't tell: whether the cursor is a hardware plane (no public read-out; the window server's
 // sample shows cursor_callback and set_cursor_surface), and a flip from a copy on the direct path (the
@@ -933,6 +935,15 @@ finish(int code) {
     print_second();
   pointer_stop();
   print_window("summary", &g_sum, NULL);
+  // the summary's intervals by whole refreshes of the display's own rate; pct() sorts, so after the summary
+  long refreshes[5] = {0};
+  for (size_t i = 0; i < g_sum.interval.n; i++) {
+    long r = lround(g_sum.interval.v[i] / g_period);
+    refreshes[r < 1 ? 1 : r > 4 ? 4 : r]++;
+  }
+  printf("intervals: n=%zu p50=%.1f p95=%.1f max=%.1f refreshes 1=%ld 2=%ld 3=%ld 4+=%ld (period %.2f ms)\n",
+         g_sum.interval.n, pct(&g_sum.interval, 0.5), pct(&g_sum.interval, 0.95), pct(&g_sum.interval, 1),
+         refreshes[1], refreshes[2], refreshes[3], refreshes[4], g_period * 1e3);
   printf("summary: %llu frames encoded, %d seconds direct, %d composited, %d unknown\n",
          (unsigned long long)atomic_load(&g_taken), g_direct, g_composited, g_unknown);
   if (g_composited || g_unknown)

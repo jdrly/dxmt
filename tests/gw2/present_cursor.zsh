@@ -16,10 +16,11 @@
 #
 # The RESULT line: date, Mac model and macOS, the process (arch, bundle), MTL_HUD_ENABLED and
 # MTL_DEBUG_LAYER, then passwait and early first (my Mac's state: Metal 3's passwait 13 to 17 ms with
-# early 0, Metal 4's under 2 ms; on the rented M1 both were 0.5 ms), the window server's frame-info
-# thread (quiet: 2 or 3 in 600; busy: 11 or more), the interval and missed refreshes, the layer's path,
-# the display, the test's start line (every variant in effect), the rest of the summary, the exit code.
-# Exit: the test's.
+# early 0, Metal 4's under 2 ms; on the rented M1 both were 0.5 ms), the intervals by whole refreshes
+# and the longest (refreshes 1=… 2=… 3=… 4+=… max=…, from the intervals line; refreshes=none from a
+# binary without it), shown p50 and p95, the window server's frame-info thread (quiet: 2 or 3 in 600;
+# busy: 11 or more), the interval and missed refreshes, the layer's path, the display, the test's start
+# line (every variant in effect), the rest of the summary, the exit code. Exit: the test's.
 
 emulate -L zsh
 setopt pipefail
@@ -34,7 +35,7 @@ while (( $# )); do
     --bundle) bundle=1 ;;
     --no-sample) sample=0 ;;
     --dir) dir=$2; shift ;;
-    -h|--help) sed -n '2,22p' "${0:A}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,23p' "${0:A}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) args+=("$1") ;;
   esac
   shift
@@ -99,6 +100,12 @@ else
   r+=("no summary: $(grep -v '^ *$' "$out" | tail -n 1)")
   rest=
 fi
+if [[ $(line 'intervals: ') =~ 'max=([^ ]+) refreshes (1=[0-9]+ 2=[0-9]+ 3=[0-9]+ 4\+=[0-9]+)' ]]; then
+  r+=("refreshes $match[2] max=$match[1]")
+else
+  r+=("refreshes=none") # a binary from before #237
+fi
+[[ $rest =~ 'shown p50=[^ ]+ p95=[^ ]+' ]] && { r+=("$MATCH"); rest=${rest/$MATCH/} }
 if (( ! sample )); then
   r+=("ws=none")
 elif [[ -s $ws ]]; then

@@ -1559,8 +1559,10 @@ and the arm64 binary in a bundle with Game Mode's keys. `tests/gw2/run.zsh displ
 variant for 600 frames with `MTL_DEBUG_LAYER=1` (`--wait-for-drawable off` plain, and once with the layer,
 whose stop doesn't fail the run), as arm64 and x86_64, with the pointer still, and prints one `RESULT` line
 a run. `tests/gw2/present_cursor.zsh <test arguments>` is one run with `sudo sample WindowServer 10 10`
-beside it: its `RESULT` line puts `passwait` and `early` first, then the window server's frame-info
-thread counted as in #223 (`tests/gw2/ws_sample_count.py`). It needs a logged-in GUI session, a display and,
+beside it: its `RESULT` line puts `passwait` and `early` first, then (#237) `refreshes 1=… 2=… 3=… 4+=…
+max=…` (the summary's intervals by whole refreshes of the display's rate, from the test's `intervals:`
+line; `refreshes=none` from a binary without it) and `shown p50=… p95=…`, then the window server's
+frame-info thread counted as in #223 (`tests/gw2/ws_sample_count.py`). It needs a logged-in GUI session, a display and,
 for the Metal 4 ways, Metal 4, and exits 77 without them. The source's header has the flags, the fields,
 what each #230 variant's result means and what it can't tell.
 
