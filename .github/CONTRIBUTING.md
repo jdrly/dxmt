@@ -39,13 +39,15 @@ If two sources conflict, report the conflict instead of silently choosing one.
 ## Branches
 
 - Never push to `gw2-on-mac` or `main` directly. Every change goes through a pull request into
-  `gw2-on-mac`. `main` only mirrors upstream.
+  `gw2-on-mac`. `main` only mirrors upstream: after an upstream sync merges, it is fast-forwarded
+  to the synced upstream commit, never forced, and that is the only push it gets.
 - Name the branch `<type>/<issue>-<short-description>`, in English `lower-case-kebab-case`, for
   example `fix/1-throttle-foreground-process`. Types: `feat`, `fix`, `perf`, `port` (from upstream
   or from d9mt), `diag`, `exp` (an experiment behind a switch, off by default), `chore`, `docs`.
 - One branch is one issue. Measurement variants (`tmp/…`) are never merged.
 - **Upstream syncs** merge `upstream/main` into `gw2-on-mac` through their own pull request
-  (`chore/sync-upstream-<short sha>`), with a GW2 session before and after.
+  (`chore/sync-upstream-<short sha>`), with a GW2 session before and after. The steps are in
+  [upstream-sync.md](../docs/agents/upstream-sync.md).
 
 ## Commits
 
@@ -66,7 +68,8 @@ If two sources conflict, report the conflict instead of silently choosing one.
 - **Review and merge.** Every PR gets an **independent agent review** (preferably
   GPT-6.1-Sol) by an agent that didn't write the change; its verdict goes into the PR. The PR is
   **squash-merged**, with the PR title as the commit subject and the description as its body,
-  once that verdict has no open `Blocker` or `High`. I don't review code by hand.
+  once that verdict has no open `Blocker` or `High`. An upstream sync is the exception: it merges
+  with a merge commit, so upstream's commits stay ancestors. I don't review code by hand.
 
 ## Code review
 
@@ -116,7 +119,8 @@ If two sources conflict, report the conflict instead of silently choosing one.
 ## Never do these things
 
 - Open anything in 3Shain/dxmt from this fork.
-- Push directly to `gw2-on-mac` or `main`.
+- Push directly to `gw2-on-mac`, or to `main` anything but the fast-forward to a synced upstream
+  commit.
 - Start Wine, Steam or GW2 while I may be playing, or without my go.
 - Merge a change that renders differently without the issue asking for it.
 - Commit logs, captures or traces with account data.

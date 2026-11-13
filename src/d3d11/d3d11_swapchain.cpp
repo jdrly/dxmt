@@ -1990,6 +1990,9 @@ CreateSwapChain(
       pDesc->BufferCount != 1) {
     WARN("CreateSwapChain: unsupported swap effect ", pDesc->SwapEffect, " with backbuffer size ", pDesc->BufferCount);
   }
+  if (ConvertSwapChainFormat(pDesc->Format) == WMTPixelFormatInvalid) {
+    return E_INVALIDARG;
+  }
   if (gw2::metalfxSpatialSwapchain()) { // gw2 (#60): the switch dxmt_gw2_metal4.cpp declares
     if (pDevice->GetMTLDevice().supportsFXSpatialScaler()) {
       *ppSwapChain = new MTLD3D11SwapChain<true>(
