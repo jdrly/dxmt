@@ -189,7 +189,9 @@ CommandQueue::CommandQueue(WMT::Device device) :
   // gw2 (#32): DXMT_METAL4 (on by default), decided once per process; with it =0 this does nothing
   gw2::metal4AttachQueue(device);
   if (gw2::metal4Active()) {
-    auto mtl4 = std::make_unique<gw2::Mtl4Queue>(device, chunk_count_);
+    // gw2 (#204): DXMT_MTL4_ALLOCATOR_POOL, read once per queue
+    const bool allocator_pool = gw2::mtl4AllocatorPool();
+    auto mtl4 = std::make_unique<gw2::Mtl4Queue>(device, chunk_count_, allocator_pool);
     if (!mtl4->valid())
       gw2::metal4Failed("creating the Metal 4 queue, its event or its allocators");
     else if (gw2::mtl4PresentMetal3() && !mtl4->enableMetal3Present())
@@ -199,10 +201,18 @@ CommandQueue::CommandQueue(WMT::Device device) :
     else {
       submission_ = std::make_unique<Metal4Submission>(std::move(mtl4), event); // gw2 (#78)
       metal4_ = true;
-      Logger::info(str::format(
-          "Metal 4: on (DXMT_METAL4=1, the default): this device's chunks go to an MTL4CommandQueue, with ", chunk_count_,
-          " command allocators (one per chunk slot) and commit feedback"
-      ));
+      // gw2 (#204): the allocator policy in effect
+      if (allocator_pool)
+        Logger::info(str::format(
+            "Metal 4: on (DXMT_METAL4=1, the default): this device's chunks go to an MTL4CommandQueue, with command "
+            "allocators from a pool (made when none is idle, at most ", gw2::Mtl4Queue::kIdleAllocators,
+            " kept idle; DXMT_MTL4_ALLOCATOR_POOL=1) and commit feedback"
+        ));
+      else
+        Logger::info(str::format(
+            "Metal 4: on (DXMT_METAL4=1, the default): this device's chunks go to an MTL4CommandQueue, with ",
+            chunk_count_, " command allocators (one per chunk slot) and commit feedback"
+        ));
       // gw2 (#184): the queue holds only the device's set; a queue takes at most 32. gw2 (#226): unless
       // DXMT_MTL4_LAYER_SET=queue, the placement before #184, for at most 16 presenters
       if (gw2::mtl4LayerSet() == gw2::LayerSet::Queue)
