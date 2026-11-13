@@ -1685,6 +1685,23 @@ MetalDrawable_present(obj_handle_t drawable, enum WMTDrawablePresentMode mode, d
   UNIX_CALL(MetalDrawable_present, &params);
 }
 
+WINEMETAL_API void
+MTL4CommandQueue_commitPresent(
+    obj_handle_t queue, obj_handle_t cmdbuf, struct WMTMtl4CommitFeedback *feedback, obj_handle_t event,
+    uint64_t event_value, obj_handle_t drawable, enum WMTDrawablePresentMode mode, double value
+) {
+  struct unixcall_mtl4_queue_commit_present params;
+  params.queue = queue;
+  params.cmdbuf = cmdbuf;
+  WMT_MEMPTR_SET(params.feedback, feedback);
+  params.event = event;
+  params.event_value = event_value;
+  params.drawable = drawable;
+  params.mode = mode;
+  params.value = value;
+  UNIX_CALL(MTL4CommandQueue_commitPresent, &params);
+}
+
 WINEMETAL_API obj_handle_t
 MTL4CommandBuffer_renderCommandEncoder(
     obj_handle_t cmdbuf, const struct WMTRenderPassInfo *info, struct WMTMtl4BindingState *state

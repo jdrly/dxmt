@@ -77,6 +77,12 @@
 // queries) and one Metal 3 buffer, all without an error. Its readbacks pass the CPU checks, and its
 // drawable is byte-identical to the Metal 4 run's.
 //
+// gw2 (#242): a fourth run, DXMT_MTL4_PRESENT=done: the same frame on its own Metal 4 queue, with the
+// present as the context encodes it with that switch (Mtl4Encoding::presentWhenDone: the pass's commit
+// carries the drawable's signal and present, which the unix side makes once the commit has completed).
+// Its chunk commits three buffers as the Metal 4 run's does, all without an error, its readbacks pass
+// the CPU checks, and its drawable is byte-identical to the Metal 4 run's.
+//
 // How much it sees (measured 2026-11-04 on an M5 Max by mutating a scratch copy of mtl4.c, arm64): each
 // of these made the run fail: Set*BufferOffset ignoring its offset, a Set*Bytes overflow skipped instead
 // of resumed, DrawIndexed without its index-buffer offset, an instanced draw without its base instance,
@@ -876,6 +882,14 @@ struct Metal4Mtl3Target : Metal4Target {
   }
 };
 
+// gw2 (#242): DXMT_MTL4_PRESENT=done: Metal 4's present, the drawable presented once the pass completed
+struct Metal4DoneTarget : Metal4Target {
+  void
+  present(WMT::MetalDrawable drawable) {
+    encoding.presentWhenDone(drawable, WMTDrawablePresent, 0); // commits the present pass with it
+  }
+};
+
 static void
 colorPass(WMTRenderPassInfo &info, obj_handle_t texture, WMTLoadAction load) {
   WMT::InitializeRenderPassInfo(info);
@@ -1341,10 +1355,49 @@ main() {
       mtl3.release();
     }
 
+    // --- gw2 (#242): Metal 4 with DXMT_MTL4_PRESENT=done, on a queue of its own
+    Resources r4d = makeResources(fx.device);
+    Stream s4d;
+    buildFrame(s4d, fx, r4d);
+    RunResult run4d;
+    {
+      Mtl4Queue queue(device, 2);
+      CHECK(queue.valid(), "Metal 4 queue (DXMT_MTL4_PRESENT=done)");
+      if (!queue.valid())
+        return 1;
+      CAMetalLayer *layer = newLayer(fx.device);
+      WMT::MetalLayer wmt_layer{H(layer)};
+      if (auto set = wmt_layer.residencySet()) // as the Metal 4 run
+        queue.queue().addResidencySet(WMT::ResidencySet{set.handle});
+      std::vector<id<MTLBuffer>> arenas;
+      auto bytes = [&](uint64_t size) {
+        id<MTLBuffer> b = [fx.device newBufferWithLength:size
+                                                 options:MTLResourceStorageModeShared |
+                                                         MTLResourceHazardTrackingModeUntracked];
+        arenas.push_back(b);
+        return Mtl4Encoding::Bytes{WMT::Buffer{H(b)}, 0, false};
+      };
+      {
+        Mtl4Encoding encoding(queue, 0, bytes);
+        Metal4Target target{encoding};
+        encodeLoad(target, s4d);
+      }
+      waitMetal4(queue, 0, 1, "Metal 4 load (DXMT_MTL4_PRESENT=done)");
+      {
+        Mtl4Encoding encoding(queue, 1, bytes);
+        Metal4DoneTarget target{{encoding}};
+        run4d = encodeFrame(target, s4d, fx, r4d, wmt_layer);
+      }
+      // as the Metal 4 run: the frame's, the present's (it carried the present), the empty one for the queries
+      waitMetal4(queue, 1, run4d.presented ? 3 : 2, "Metal 4 frame (DXMT_MTL4_PRESENT=done)");
+      queue.waitIdle();
+    }
+
     // --- the pairing
     CHECK(run3.types == run4.types, "the two backends were given different packet streams");
     CHECK(run3.presented == run4.presented, "a drawable for one backend only");
     CHECK(run4m.presented == run4.presented, "a drawable for one Metal 4 present only");
+    CHECK(run4d.presented == run4.presented, "a drawable for one Metal 4 present only (DXMT_MTL4_PRESENT=done)");
     presented = run3.presented && run4.presented;
     size_t packets = 0;
     for (auto &t : run3.types)
@@ -1363,6 +1416,11 @@ main() {
     expectFrame("Metal 4 (DXMT_MTL4_PRESENT=mtl3)", r4m, run4m.presented);
     if (run4.presented && run4m.presented)
       compare("drawable, Metal 4's present against DXMT_MTL4_PRESENT=mtl3", r4.rb_present, r4m.rb_present,
+              kSize * kSize * 4, kSize);
+    // gw2 (#242): the same with DXMT_MTL4_PRESENT=done
+    expectFrame("Metal 4 (DXMT_MTL4_PRESENT=done)", r4d, run4d.presented);
+    if (run4.presented && run4d.presented)
+      compare("drawable, Metal 4's present against DXMT_MTL4_PRESENT=done", r4.rb_present, r4d.rb_present,
               kSize * kSize * 4, kSize);
   }
   std::printf("%s (%d failures, %d xfail)\n", failures ? "FAILED" : "passed", failures, xfailed);

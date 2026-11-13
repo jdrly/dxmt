@@ -424,6 +424,21 @@ parity() {
   std::printf("parity: %d windows\n", windows);
 }
 
+// gw2 (#242): presentat, last on the line once Metal 4 counted a present (avg/max ms of the window); no
+// field without one, and the window starts over. Runs last: the oracle doesn't know the field.
+static void
+presentAt() {
+  std::string line = dxmt::gw2::g_present(2000, 0);
+  CHECK(line.find("presentat=") == std::string::npos, "presentat without a present: {}", line);
+  dxmt::gw2::presentAtSample(0); // the Metal 4 order
+  dxmt::gw2::presentAtSample(3'500'000);
+  dxmt::gw2::presentAtSample(1'000'000);
+  line = dxmt::gw2::g_present(2000, 0);
+  CHECK(line.ends_with(" presentat=1.50/3.50"), "presentat of 0, 3.5 and 1 ms: {}", line);
+  line = dxmt::gw2::g_present(2000, 0);
+  CHECK(line.find("presentat=") == std::string::npos, "presentat after its window: {}", line);
+}
+
 static void
 passRecord() {
   using dxmt::gw2::kNoPresentCommit;
@@ -446,6 +461,7 @@ main() {
   passRecord();
   fields();
   parity();
+  presentAt();
   if (failures) {
     std::printf("present_section_test: %d of %d checks failed\n", failures, checks);
     return 1;
