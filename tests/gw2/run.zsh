@@ -17,6 +17,7 @@
 # A failed build, or a nonzero exit, fails the run. Exit 77 is "skipped" (unsupported hardware or
 # OS), and a skipped test is never counted as passed. --build-only builds the selected tests and runs
 # none (the CI's check of the display tests). A test without the lines is listed as unregistered.
+# Lines of a test's log that start with "RESULT " are printed under its status line.
 # --meson <dir> also runs `meson test -C <dir> --suite gw2` (pure: the gw2 suite minus gw2-metal;
 # metal: gw2-metal), e.g. B1's bridge-native-smoke in <build>/x64.
 #
@@ -36,7 +37,7 @@ while (( $# )); do
     pure|metal|display|all) KIND=$1 ;;
     --meson) shift; MESON+=("$1") ;;
     --build-only) BUILD_ONLY=1 ;;
-    -h|--help) sed -n '2,24p' "${0:A}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,25p' "${0:A}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) print -u2 "run.zsh: unknown argument $1"; exit 2 ;;
   esac
   shift
@@ -78,6 +79,7 @@ for f in tests/gw2/*_test.*; do
     77) skipped+=("$name"); print "skip  $name ($kind): unsupported here ($log)" ;;
     *) failed+=("$name (exit $rc)"); print "FAIL  $name: exit $rc ($log)"; tail -n 15 "$log" | sed 's/^/      /' ;;
   esac
+  grep '^RESULT ' "$log" # a test's one-line results, if it prints them (present_cursor.zsh)
 done
 
 for dir in $MESON; do
