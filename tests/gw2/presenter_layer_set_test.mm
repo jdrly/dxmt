@@ -5,11 +5,13 @@
 // gw2-build:   for f in $U; do clang -c -x objective-c -std=gnu17 -fblocks -fno-objc-arc -arch $arch -mmacosx-version-min=26.0 -DDXMT_NATIVE=1 -Wno-unused-function -Isrc/airconv -Isrc/nativemetal -Isrc/winemetal src/winemetal/unix/$f -o $T/u_${f:r}_$arch.o; done
 // gw2-build:   clang -c -std=gnu17 -arch $arch -mmacosx-version-min=26.0 -DDXMT_NATIVE=1 -Isrc/nativemetal -Isrc/winemetal src/winemetal/winemetal_thunks.c -o $T/thunks_$arch.o
 // gw2-build:   clang -c -std=gnu17 -arch $arch -mmacosx-version-min=26.0 -Wno-ignored-attributes -Isrc/airconv tests/gw2/shim/airconv_absent.c -o $T/airconv_absent_$arch.o
-// gw2-build:   clang++ -std=c++20 -fobjc-arc -Wall -arch $arch -mmacosx-version-min=26.0 -DDXMT_PAGE_SIZE=4096 -Itests/gw2/shim -Isrc/winemetal -Isrc/dxmt -Isrc/util -Iinclude tests/gw2/presenter_layer_set_test.mm src/dxmt/dxmt_presenter.cpp src/dxmt/dxmt_gw2_switches.cpp src/dxmt/dxmt_gw2_mtl4_queue.cpp src/dxmt/dxmt_gw2_mtl4_encoding.cpp $T/thunks_$arch.o $T/u_*_$arch.o $T/airconv_absent_$arch.o -framework Metal -framework MetalFX -framework QuartzCore -framework Foundation -framework CoreGraphics -framework ColorSync -framework Cocoa -lsqlite3 -o ${OUT}_$arch
-// gw2-build:   clang++ -std=c++20 -fobjc-arc -Wall -arch $arch -mmacosx-version-min=26.0 -DDXMT_PAGE_SIZE=4096 -DDXMT_GW2_LIFETIME_CHECK=1 -DGW2_TEST_REAL_ENV=1 -Itests/gw2/shim -Isrc/winemetal -Isrc/dxmt -Isrc/util -Iinclude tests/gw2/presenter_layer_set_test.mm src/dxmt/dxmt_presenter.cpp src/dxmt/dxmt_gw2_mtl4_queue.cpp src/dxmt/dxmt_gw2_mtl4_encoding.cpp src/dxmt/dxmt_gw2_lifetime.cpp src/dxmt/dxmt_gw2_switches.cpp $T/thunks_$arch.o $T/u_*_$arch.o $T/airconv_absent_$arch.o -framework Metal -framework MetalFX -framework QuartzCore -framework Foundation -framework CoreGraphics -framework ColorSync -framework Cocoa -lsqlite3 -o ${OUT}_check_$arch
+// gw2-build:   clang++ -std=c++20 -fobjc-arc -Wall -arch $arch -mmacosx-version-min=26.0 -DDXMT_PAGE_SIZE=4096 -DGW2_TEST_REAL_ENV=1 -Itests/gw2/shim -Isrc/winemetal -Isrc/dxmt -Isrc/util -Iinclude tests/gw2/presenter_layer_set_test.mm src/dxmt/dxmt_presenter.cpp src/dxmt/dxmt_gw2_present.cpp src/dxmt/dxmt_gw2_switches.cpp src/dxmt/dxmt_gw2_mtl4_queue.cpp src/dxmt/dxmt_gw2_mtl4_encoding.cpp $T/thunks_$arch.o $T/u_*_$arch.o $T/airconv_absent_$arch.o -framework Metal -framework MetalFX -framework QuartzCore -framework Foundation -framework CoreGraphics -framework ColorSync -framework Cocoa -lsqlite3 -o ${OUT}_$arch
+// gw2-build:   clang++ -std=c++20 -fobjc-arc -Wall -arch $arch -mmacosx-version-min=26.0 -DDXMT_PAGE_SIZE=4096 -DDXMT_GW2_LIFETIME_CHECK=1 -DGW2_TEST_REAL_ENV=1 -Itests/gw2/shim -Isrc/winemetal -Isrc/dxmt -Isrc/util -Iinclude tests/gw2/presenter_layer_set_test.mm src/dxmt/dxmt_presenter.cpp src/dxmt/dxmt_gw2_present.cpp src/dxmt/dxmt_gw2_mtl4_queue.cpp src/dxmt/dxmt_gw2_mtl4_encoding.cpp src/dxmt/dxmt_gw2_lifetime.cpp src/dxmt/dxmt_gw2_switches.cpp $T/thunks_$arch.o $T/u_*_$arch.o $T/airconv_absent_$arch.o -framework Metal -framework MetalFX -framework QuartzCore -framework Foundation -framework CoreGraphics -framework ColorSync -framework Cocoa -lsqlite3 -o ${OUT}_check_$arch
 // gw2-build: done
 // gw2-run: for arch in x86_64 arm64; do ${OUT}_$arch; MTL_DEBUG_LAYER=1 ${OUT}_$arch; MTL_SHADER_VALIDATION=1 ${OUT}_$arch; done
 // gw2-run: for arch in x86_64 arm64; do for free in 0 1; do DXMT_LIFETIME_CHECK=1 DXMT_PRESENTER_FREE=$free ${OUT}_check_$arch; done; done
+// gw2-run: for arch in x86_64 arm64; do DXMT_MTL4_LAYER_SET=queue ${OUT}_$arch; DXMT_MTL4_LAYER_SET=queue MTL_DEBUG_LAYER=1 ${OUT}_$arch; DXMT_MTL4_LAYER_SET=queue MTL_SHADER_VALIDATION=1 ${OUT}_$arch; done
+// gw2-run: for arch in x86_64 arm64; do for free in 0 1; do DXMT_LIFETIME_CHECK=1 DXMT_PRESENTER_FREE=$free DXMT_MTL4_LAYER_SET=queue ${OUT}_check_$arch; done; done
 //
 // gw2 (#184): a Metal 4 queue takes at most 32 residency sets. The presenter used to add its layer's
 // set to the device's queue at its first present, to leave it in ~Presenter. But an Rc doesn't delete
@@ -71,8 +73,23 @@
 // Whether this check catches a missing `shown` wait (delete the encodeWaitForEvent in
 // Mtl4Encoding::commitMetal3Present in a scratch copy) is for the Mac run to show.
 //
-// What the test provides in place of DXMT: the statistics hooks (off) and clock, DXMT_PRESENT_QUEUE
-// (default), the lifetime check
+// gw2 (#226): DXMT_MTL4_LAYER_SET=queue puts each presenter's layer set on the queue, as before #184,
+// for at most 16 presenters of the process. Both builds read the switch from the environment, and
+// the run lines run them again with it. With it, the test counts the sets on the queue
+// (Presenter::layerSetsOnQueue()): never more than 16; 16 once 40 swap chains presented the Metal 4
+// way; with DXMT_PRESENTER_FREE=1, and through the Metal 3 present (which names no layer set), what it
+// was before each phase. Without it the queue holds no layer's set. The phases' presents then also
+// pass with the layer's set on the queue, through the fallback after 16.
+//
+// gw2 (#224): with DXMT_STATS on for its part, after the colour check, three more swap chains present 8
+// times each, tracked as the context and the finish thread track them (presentTrack, the present
+// pass's GPU span from the record the chunk notes, the frame's last GPU end): on Metal 4, on Metal 4
+// with DXMT_MTL4_PRESENT=mtl3 (the pass's span is the Metal 3 buffer's), and through a plain Metal 3
+// queue. The test prints the PRESENT line of each. The layers have no window, so whether Core
+// Animation reports them presented here is open; without a record the test says so.
+//
+// What the test provides in place of DXMT: the statistics hooks (off but for #224's part) and clock,
+// the lifetime check
 // (off) and DXMT_PRESENTER_FREE (set per phase) outside the lifetime-check build, the device set's
 // commit hook (its set here is fixed), Forget_sRGB for the formats used here, and the internal
 // command library, compiled at run time from src/dxmt/dxmt_command.metal (the build makes a metallib
@@ -83,11 +100,13 @@
 #import <Metal/Metal.h>
 #import <QuartzCore/QuartzCore.h>
 #include "dxmt_presenter.hpp"
+#include "dxmt_gw2_layer_set.hpp"
 #include "dxmt_gw2_lifetime.hpp"
 #include "dxmt_gw2_mtl4_encoding.hpp"
 #include "dxmt_gw2_mtl4_queue.hpp"
 #include "dxmt_gw2_present.hpp"
 #include "dxmt_gw2_stats.hpp"
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -111,14 +130,18 @@ static int failures = 0;
 // --- what the rest of DXMT provides
 namespace dxmt::gw2 {
 static SectionFn g_lifecheck = nullptr; // the lifetime check's LIFECHECK section
+static SectionFn g_present = nullptr;   // gw2 (#224): the PRESENT section
+static bool g_stats = false;            // DXMT_STATS, on for #224's part only
 void
 registerSection(const char *name, SectionFn fn) {
   if (std::string(name) == "LIFECHECK")
     g_lifecheck = fn;
+  if (std::string(name) == "PRESENT")
+    g_present = fn;
 }
 bool
 statsEnabled() {
-  return false;
+  return g_stats;
 }
 // gw2 (#156): the presenter's layer poll
 int64_t
@@ -132,11 +155,6 @@ residencyBeforeCommit() {}
 bool
 mtl4DeviceResidencyRequested() {
   return false;
-}
-// gw2 (#157): DXMT_PRESENT_QUEUE unset (the default path: the layer keeps its drawable count)
-PresentQueue
-presentQueue() {
-  return PresentQueue::Default;
 }
 #ifndef DXMT_GW2_LIFETIME_CHECK
 namespace lifetime {
@@ -222,6 +240,7 @@ struct Fixture {
   uint32_t lt_queue = 0;              // the lifetime check's id of the queue (its build only)
   uint64_t seq = 0;
   uint32_t presents = 0;
+  uint32_t most_queue_sets = 0; // gw2 (#226): the most layer sets on the queue after a present
 };
 
 static SwapChain
@@ -270,11 +289,14 @@ checkMetal3(Fixture &fx, uint64_t seq, size_t expected, const char *what, uint32
 }
 
 // one chunk with a present, as ArgumentEncodingContext encodes it on Metal 4 (the present split
-// commits nothing here: the chunk has no other work), then waited for and retired
+// commits nothing here: the chunk has no other work), then waited for and retired. gw2 (#224): with
+// `track_frame`, tracked as frame `track_frame` the way the context and the finish thread do with
+// DXMT_STATS
 static void
-present(Fixture &fx, SwapChain &sc, const char *what, uint32_t index) {
+present(Fixture &fx, SwapChain &sc, const char *what, uint32_t index, uint64_t track_frame = 0) {
   uint64_t seq = ++fx.seq; // from 1, as the lifetime check's stamps count
   Rc<Presenter> held; // the retirement ledger's hold (CommandQueue::Hold), until the chunk retires
+  uint32_t pass_commit = 0; // gw2 (#224): the Metal 4 present pass's commit ordinal
   {
     // the present's command (the swap chain's lambda) holds it until CommandChunk::reset()
     auto state = sc.presenter->synchronizeLayerProperties();
@@ -294,6 +316,8 @@ present(Fixture &fx, SwapChain &sc, const char *what, uint32_t index) {
             cmdbuf, WMT::Texture{H(sc.backbuffer)}, state.metadata, [](WMT::RenderCommandEncoder) {},
             [](WMT::RenderCommandEncoder) {}
         );
+        if (track_frame)
+          dxmt::gw2::presentTrack(drawable.handle, track_frame);
         cmdbuf.presentDrawable(drawable);
         encoding.commitMetal3Present(cmdbuf, value);
       } else {
@@ -301,6 +325,10 @@ present(Fixture &fx, SwapChain &sc, const char *what, uint32_t index) {
             encoding, WMT::Texture{H(sc.backbuffer)}, state.metadata, [](WMT::MTL4RenderCommandEncoder) {},
             [](WMT::MTL4RenderCommandEncoder) {}
         );
+        if (track_frame) {
+          dxmt::gw2::presentTrack(drawable.handle, track_frame);
+          pass_commit = uint32_t(encoding.segments().size() - 1);
+        }
         encoding.signalDrawable(drawable); // commits the present pass first
         drawable.present();
       }
@@ -308,14 +336,99 @@ present(Fixture &fx, SwapChain &sc, const char *what, uint32_t index) {
       held = sc.presenter;
       fx.presents++;
     }
-    for (auto *commit : fx.queue->wait(seq))
+    auto &commits = fx.queue->wait(seq);
+    for (auto *commit : commits)
       CHECK(!commit->feedback.error, "%s %u: the present's command buffer reported an error", what, index);
     checkMetal3(fx, seq, fx.mtl3_present ? 1 : 0, what, index);
+    if (track_frame) { // ReportCompletedChunk: the present pass's record, then the chunk's last one
+      auto &presents = fx.queue->metal3Presents(seq);
+      if (!presents.empty()) { // mtl3: the Metal 3 buffer's record is the chunk's last
+        WMT::CommandBuffer pass = presents.back().cmdbuf;
+        dxmt::gw2::presentPassGpu(track_frame, pass.gpuStartTime(), pass.gpuEndTime());
+        dxmt::gw2::presentGpuEnd(track_frame, pass.gpuEndTime());
+      } else if (!commits.empty()) {
+        CHECK(pass_commit < commits.size(), "%s %u: the present pass's commit %u of %zu", what, index, pass_commit,
+              commits.size());
+        if (pass_commit < commits.size())
+          dxmt::gw2::presentPassGpu(track_frame, commits[pass_commit]->gpuStartNs(),
+                                    commits[pass_commit]->gpuEndNs());
+        dxmt::gw2::presentGpuEnd(track_frame, commits.back()->gpuEndNs());
+      }
+    }
     dxmt::gw2::lifetime::completed(fx.lt_queue, seq); // RetireChunk: first, before reset()
   }
   held = nullptr; // RetireChunk: after reset(), the ledger's holds
   fx.queue->retire(seq);
   fx.arenas.clear();
+  fx.most_queue_sets = std::max(fx.most_queue_sets, Presenter::layerSetsOnQueue());
+}
+
+// gw2 (#224): a present through a plain Metal 3 command buffer, as the context's Metal 3 branch makes
+// it (one buffer for the pass, presentDrawable, commit), tracked as frame `frame`; the finish thread's
+// part once it completed
+static void
+presentMetal3(SwapChain &sc, WMT::CommandQueue queue, uint64_t frame) {
+  auto state = sc.presenter->synchronizeLayerProperties();
+  WMT::CommandBuffer cmdbuf = queue.commandBuffer();
+  auto drawable = sc.presenter->encodeCommands(
+      cmdbuf, WMT::Texture{H(sc.backbuffer)}, state.metadata, [](WMT::RenderCommandEncoder) {},
+      [](WMT::RenderCommandEncoder) {}
+  );
+  dxmt::gw2::presentTrack(drawable.handle, frame);
+  cmdbuf.presentDrawable(drawable);
+  cmdbuf.commit();
+  cmdbuf.waitUntilCompleted();
+  CHECK(cmdbuf.status() != WMTCommandBufferStatusError, "Metal 3 present %llu: the command buffer failed",
+        (unsigned long long)frame);
+  dxmt::gw2::presentPassGpu(frame, cmdbuf.gpuStartTime(), cmdbuf.gpuEndTime());
+  dxmt::gw2::presentGpuEnd(frame, cmdbuf.gpuEndTime());
+}
+
+// gw2 (#224): the PRESENT line after `what`'s presents, once the presented handlers had time to run.
+// The frame after the last one gets a GPU end, so the last is final, as a later chunk makes it.
+static void
+printPresent(const char *what, uint64_t next_frame) {
+  dxmt::gw2::presentGpuEnd(next_frame, 1);
+  for (int i = 0; i < 50; i++) { // 0.5 s: the encode thread drains the records at each present
+    dxmt::gw2::presentTrack(0, 0);
+    [NSThread sleepForTimeInterval:0.01];
+  }
+  std::string line = dxmt::gw2::g_present ? dxmt::gw2::g_present(2000, 0) : std::string();
+  if (line.empty()) {
+    std::printf("PRESENT (%s): no line (no presented record came back)\n", what);
+    return;
+  }
+  std::printf("PRESENT (%s): %s\n", what, line.c_str());
+  for (const char *field : {" drawwait=", " early=", " inuse="})
+    CHECK(line.find(field) != std::string::npos, "%s: PRESENT has no%s", what, field);
+}
+
+// gw2 (#224): DXMT_STATS on, one swap chain per present path, 8 tracked presents each; frame numbers
+// apart, so the section doesn't pair frames across paths
+static void
+presentFields(Fixture &fx) {
+  dxmt::gw2::g_stats = true;
+  for (bool mtl3 : {false, true}) {
+    @autoreleasepool {
+      fx.mtl3_present = mtl3;
+      uint64_t first = mtl3 ? 101 : 1;
+      SwapChain sc = makeSwapChain(fx);
+      for (uint32_t i = 0; i < 8; i++)
+        present(fx, sc, "tracked present", i, first + i);
+      printPresent(mtl3 ? "Metal 4, DXMT_MTL4_PRESENT=mtl3" : "Metal 4", first + 8);
+      releaseSwapChain(fx, sc);
+    }
+  }
+  fx.mtl3_present = false;
+  @autoreleasepool {
+    auto queue = fx.wmt_device.newCommandQueue(16);
+    SwapChain sc = makeSwapChain(fx);
+    for (uint32_t i = 0; i < 8; i++)
+      presentMetal3(sc, queue, 1001 + i);
+    printPresent("Metal 3", 1009);
+    releaseSwapChain(fx, sc);
+  }
+  dxmt::gw2::g_stats = false;
 }
 
 // the replaced and the alive-at-once phases, with DXMT_PRESENTER_FREE as `free`
@@ -326,6 +439,20 @@ phases(Fixture &fx, bool free) {
 #endif
   const char *mode = free ? "DXMT_PRESENTER_FREE=1" : "DXMT_PRESENTER_FREE=0";
   uint32_t before = Presenter::alive();
+  // gw2 (#226): the layer sets on the queue after a phase. buffer: none. queue: kept presenters keep
+  // theirs, so 40 swap chains fill the 16 places; deleted ones give them back; the Metal 3 present
+  // (DXMT_MTL4_PRESENT=mtl3) takes none
+  bool queue = dxmt::gw2::mtl4LayerSet() == dxmt::gw2::LayerSet::Queue;
+  bool takes = queue && !fx.mtl3_present;
+  auto expectSets = [&](const char *when, uint32_t before_sets) {
+    uint32_t sets = Presenter::layerSetsOnQueue();
+    uint32_t want = !queue ? 0 : (free || !takes) ? before_sets : dxmt::gw2::kLayerSetQueuePlaces;
+    std::printf("%s: %s, %u layer sets on the queue (most so far %u)\n", mode, when, sets, fx.most_queue_sets);
+    CHECK(sets == want, "%s: %s: %u layer sets on the queue, want %u", mode, when, sets, want);
+    CHECK(fx.most_queue_sets <= dxmt::gw2::kLayerSetQueuePlaces, "%s: %u layer sets on the queue at once", mode,
+          fx.most_queue_sets);
+  };
+  uint32_t sets_before = Presenter::layerSetsOnQueue();
 
   // a program that replaces its swap chain: each made, presented with, released
   for (uint32_t i = 0; i < kSwapChains; i++) {
@@ -340,9 +467,11 @@ phases(Fixture &fx, bool free) {
   std::printf("%s: replaced %u swap chains one after another, %u presenters left alive\n", mode, kSwapChains,
               left);
   CHECK(left == (free ? 0 : kSwapChains), "%s: %u presenters left alive", mode, left);
+  expectSets("replaced swap chains", sets_before);
 
   // a program with many windows: all alive at once
   before = Presenter::alive();
+  sets_before = Presenter::layerSetsOnQueue();
   std::vector<SwapChain> alive;
   for (uint32_t i = 0; i < kSwapChains; i++) {
     @autoreleasepool {
@@ -357,6 +486,9 @@ phases(Fixture &fx, bool free) {
   }
   CHECK(Presenter::alive() - before == kSwapChains, "%s: %u presenters alive with %u swap chains", mode,
         Presenter::alive() - before, kSwapChains);
+  if (takes) // 40 alive: every place is taken, the rest went through the fallback
+    CHECK(Presenter::layerSetsOnQueue() == dxmt::gw2::kLayerSetQueuePlaces,
+          "%s: %u layer sets on the queue with %u swap chains alive", mode, Presenter::layerSetsOnQueue(), kSwapChains);
   for (auto &sc : alive)
     releaseSwapChain(fx, sc);
   alive.clear();
@@ -364,6 +496,7 @@ phases(Fixture &fx, bool free) {
   std::printf("%s: %u swap chains alive at once, %u presenters left alive once released\n", mode, kSwapChains,
               left);
   CHECK(left == (free ? 0 : kSwapChains), "%s: %u presenters left alive", mode, left);
+  expectSets("swap chains alive at once, released", sets_before);
 }
 
 // gw2 (#227): frame i's back buffer colour, BGRA8Unorm. Red cycles through three values 100 apart, so
@@ -558,6 +691,8 @@ main() {
     CHECK(queue.enableMetal3Present(), "the Metal 3 present's events");
     fx.mtl3 = [fx.device newCommandQueue];
     [fx.mtl3 addResidencySet:fx.device_set];
+    std::printf("DXMT_MTL4_LAYER_SET=%s\n",
+                dxmt::gw2::mtl4LayerSet() == dxmt::gw2::LayerSet::Queue ? "queue" : "buffer");
 
 #ifdef DXMT_GW2_LIFETIME_CHECK
     CHECK(dxmt::gw2::lifetime::check(), "DXMT_LIFETIME_CHECK=1 in the lifetime-check build");
@@ -579,6 +714,7 @@ main() {
     // gw2 (#227): the colour check, with the frame's commit before the present and without
     colours(fx, true);
     colours(fx, false);
+    presentFields(fx); // gw2 (#224)
     queue.waitIdle();
 #ifdef DXMT_GW2_LIFETIME_CHECK
     if (dxmt::gw2::g_lifecheck) {

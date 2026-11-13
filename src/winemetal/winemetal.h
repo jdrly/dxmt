@@ -1674,11 +1674,16 @@ WINEMETAL_API void
 MTLCommandBuffer_presentDrawableWithDeadline(obj_handle_t cmdbuf, obj_handle_t drawable, double interval);
 
 /* gw2 (#7): one drawable's presentation, for the PRESENT statistics section. Times are ns on
-   CACurrentMediaTime's clock (the one GPUStartTime/GPUEndTime use); presented_ns 0 = dropped. */
+   CACurrentMediaTime's clock (the one GPUStartTime/GPUEndTime use); presented_ns 0 = dropped.
+   gw2 (#224): surface is the drawable texture's IOSurfaceGetID (0: no surface), in_use whether
+   IOSurfaceIsInUse said yes when the present was tracked (after nextDrawable and the present pass's
+   encoding, before its commit). */
 struct WMTPresentedRecord {
   uint64_t frame;
   uint64_t encode_ns;
   uint64_t presented_ns;
+  uint64_t surface;
+  uint64_t in_use;
 };
 #define WMT_PRESENTED_BATCH 8
 

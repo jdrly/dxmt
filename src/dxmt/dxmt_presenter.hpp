@@ -43,6 +43,9 @@ public:
 
   // gw2 (#185): presenters made and not deleted in this process
   static uint32_t alive();
+  // gw2 (#226): presenters whose layer's set is on their queue (DXMT_MTL4_LAYER_SET=queue), at most
+  // gw2::kLayerSetQueuePlaces
+  static uint32_t layerSetsOnQueue();
 
   bool changeLayerProperties(
       WMTPixelFormat format, WMTColorSpace colorspace, double width, double height, uint8_t sample_count
@@ -99,7 +102,8 @@ public:
   // gw2 (#32): the present pass on Metal 4. nextDrawable, then the queue waits for the drawable (the
   // command buffers committed after it), then the pass into a command buffer of the encoding. The
   // drawable's texture stays out of the chunk's residency set: the layer's own set covers it, used by
-  // the present pass's command buffer (#184). The caller commits, signals the drawable and presents it.
+  // the present pass's command buffer (#184), or the queue with DXMT_MTL4_LAYER_SET=queue (#226). The
+  // caller commits, signals the drawable and presents it.
   WMT::MetalDrawable encodeCommandsMetal4(
       gw2::Mtl4Encoding &encoding, WMT::Texture backbuffer, DXMTPresentMetadata metadata,
       std::function<void(WMT::MTL4RenderCommandEncoder)> &&wait_fences,
@@ -113,6 +117,10 @@ private:
   // none). Not retained: the layer owns it, and the swap chain keeps the layer until the GPU is idle
   WMT::Object mtl4_layer_set_;
   bool mtl4_layer_set_known_ = false;
+  // gw2 (#226): with DXMT_MTL4_LAYER_SET=queue and a place taken, the queue that holds the layer's set,
+  // and the set, retained until ~Presenter takes it off (null otherwise)
+  WMT::Reference<WMT::MTL4CommandQueue> mtl4_set_queue_;
+  WMT::Reference<WMT::Object> mtl4_queue_set_;
 
   std::chrono::high_resolution_clock::duration last_next_drawable_{};
   WMT::Device device_;
