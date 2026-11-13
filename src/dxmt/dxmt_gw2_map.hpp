@@ -78,14 +78,17 @@ struct MapCounters {
 };
 
 // gw2 (#251): the allocations queued for reuse in every live dynamic buffer and dynamic linear
-// texture, read once per window by the MAP section. With DXMT_STATS=0 no resource is listed.
+// texture. With DXMT_STATS=0 no resource is listed.
 struct RenameQueues {
   uint64_t pages = 0;
   uint64_t bytes = 0;
   uint64_t oldest = UINT64_MAX; // the lowest will_free_at (sequence id) of any queued allocation
+  uint64_t age = 0;             // mapSeqId() after the walk minus oldest; 0 when nothing is queued
 };
-// Defined in dxmt_dynamic.cpp, which keeps the list: locks each listed resource's mutex in turn.
+// The last walk's (dxmt_dynamic.cpp: a thread walks the list every 2 s); empty before the first.
 RenameQueues renameQueues();
+// The immediate context's current sequence id at its last chunk (MapCounters::publish).
+uint64_t mapSeqId();
 
 // One Map or Unmap: counts it in the bucket set last, timing it as the header says. Destroyed before
 // its ApiScope, under the device lock.

@@ -88,13 +88,9 @@ mapSection(double, uint32_t frames) {
       "fast={} calls={:.1f} ms={:.2f} renames={:.1f} created={:.1f} grown={} dropped={}", int(mapFast()),
       total_calls / f, total_ns / 1e6 / f, take(g_renames) / f, take(g_created) / f, take(g_grown), take(g_dropped)
   );
-  // gw2 (#251): what the rename queues hold at the end of the window, and how old their oldest page is
+  // gw2 (#251): what the rename queues held at the last walk, and how old their oldest page was
   RenameQueues queued = renameQueues();
-  uint64_t seq = g_seq.load(std::memory_order_relaxed);
-  out += std::format(
-      " queued={} queued.mb={:.1f} queued.age={}", queued.pages, queued.bytes / 1e6,
-      queued.pages && seq > queued.oldest ? seq - queued.oldest : 0
-  );
+  out += std::format(" queued={} queued.mb={:.1f} queued.age={}", queued.pages, queued.bytes / 1e6, queued.age);
   // per frame: calls/ms of every bucket that had a call, in kind then op order
   for (unsigned k = 0; k < kMapKindCount; k++) {
     for (unsigned o = 0; o < kMapOpCount; o++) {
@@ -111,6 +107,11 @@ mapSection(double, uint32_t frames) {
 SectionRegistrar s_map("MAP", &mapSection);
 
 } // namespace
+
+uint64_t
+mapSeqId() {
+  return g_seq.load(std::memory_order_relaxed);
+}
 
 void
 MapCounters::publish(uint64_t current_seq_id) {

@@ -75,6 +75,7 @@ public:
 
   // gw2 (#251): adds this buffer's queued allocations to MAP's queued (gw2::renameQueues)
   void gw2AddQueued(gw2::RenameQueues &queues);
+  size_t gw2_list_index_ = 0; // gw2 (#251): its slot in the stats list (dxmt_dynamic.cpp)
 
   /**
    * readonly
@@ -126,6 +127,7 @@ public:
 
   // gw2 (#251): adds this texture's queued allocations to MAP's queued (gw2::renameQueues)
   void gw2AddQueued(gw2::RenameQueues &queues);
+  size_t gw2_list_index_ = 0; // gw2 (#251): its slot in the stats list (dxmt_dynamic.cpp)
   /**
    * readonly
    */
