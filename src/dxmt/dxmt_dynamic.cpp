@@ -173,12 +173,11 @@ DynamicLinearTexture::~DynamicLinearTexture() {
 void
 DynamicLinearTexture::gw2AddQueued(gw2::RenameQueues &queues) {
   std::lock_guard<dxmt::mutex> lock(mutex_);
-  if (fifo.empty())
-    return;
-  // every allocation of a linear texture is one image; the queue is in will_free_at order
-  queues.pages += fifo.size();
-  queues.bytes += fifo.size() * gw2_image_bytes_;
-  queues.oldest = std::min(queues.oldest, fifo.front().will_free_at);
+  for (auto &entry : fifo) { // every allocation of a linear texture is one image
+    queues.pages++;
+    queues.bytes += gw2_image_bytes_;
+    queues.oldest = std::min(queues.oldest, entry.will_free_at);
+  }
 }
 
 void
@@ -205,7 +204,7 @@ DynamicLinearTexture::allocate(uint64_t coherent_seq_id) {
       break;
     }
     ret = std::move(entry.allocation);
-    fifo.pop();
+    fifo.pop_front();
     break;
   }
   if (!ret.ptr())
@@ -217,7 +216,7 @@ void
 DynamicLinearTexture::updateImmediateName(uint64_t current_seq_id, Rc<TextureAllocation> &&allocation, bool owned_by_command_list) {
   std::lock_guard<dxmt::mutex> lock(mutex_);
   if (!owned_by_command_list_)
-    fifo.push(QueueEntry{.allocation = std::move(name_), .will_free_at = current_seq_id});
+    fifo.push_back(QueueEntry{.allocation = std::move(name_), .will_free_at = current_seq_id});
   name_ = std::move(allocation);
   owned_by_command_list_ = owned_by_command_list;
 }
@@ -232,7 +231,7 @@ DynamicLinearTexture::recycle(uint64_t current_seq_id, Rc<TextureAllocation> &&a
       return;
     }
   }
-  fifo.push(QueueEntry{.allocation = std::move(allocation), .will_free_at = current_seq_id});
+  fifo.push_back(QueueEntry{.allocation = std::move(allocation), .will_free_at = current_seq_id});
 }
 
 } // namespace dxmt

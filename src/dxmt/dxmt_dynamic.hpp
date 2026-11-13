@@ -2,7 +2,6 @@
 #include "dxmt_buffer.hpp"
 #include "dxmt_texture.hpp"
 #include <deque>
-#include <queue>
 
 namespace dxmt {
 namespace gw2 {
@@ -135,7 +134,7 @@ public:
 private:
   Flags<TextureAllocationFlag> flags_;
   std::atomic<uint32_t> refcount_ = {0u};
-  std::queue<QueueEntry> fifo;
+  std::deque<QueueEntry> fifo; // gw2 (#251): a deque, so gw2AddQueued can walk it
   dxmt::mutex mutex_;
   Rc<TextureAllocation> name_;
   bool owned_by_command_list_ = false;
