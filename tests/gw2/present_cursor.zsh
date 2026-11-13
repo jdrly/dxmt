@@ -20,7 +20,10 @@
 # and the longest (refreshes 1=… 2=… 3=… 4+=… max=…, from the intervals line; refreshes=none from a
 # binary without it), shown p50 and p95, the window server's frame-info thread (quiet: 2 or 3 in 600;
 # busy: 11 or more), the interval and missed refreshes, the layer's path, the display, the test's start
-# line (every variant in effect), the rest of the summary, the exit code. Exit: the test's.
+# line (every variant in effect), the rest of the summary, the exit code, then (#245) inuse n/m, after the
+# fields from before so a reader of the old lines finds them where they were (inuse=none from a binary
+# without it), and the test's result: line when it has one (a variant that presented nothing, exit 3).
+# Exit: the test's.
 
 emulate -L zsh
 setopt pipefail
@@ -35,7 +38,7 @@ while (( $# )); do
     --bundle) bundle=1 ;;
     --no-sample) sample=0 ;;
     --dir) dir=$2; shift ;;
-    -h|--help) sed -n '2,23p' "${0:A}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,26p' "${0:A}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) args+=("$1") ;;
   esac
   shift
@@ -93,9 +96,11 @@ r+=("$(sysctl -n hw.model 2>/dev/null) macOS $(sw_vers -productVersion 2>/dev/nu
 r+=("${${proc#process: }:-$arch}")
 (( bundle )) && r[-1]+=" from the bundle"
 r[-1]+=" MTL_HUD_ENABLED=${MTL_HUD_ENABLED:-unset} MTL_DEBUG_LAYER=${MTL_DEBUG_LAYER:-unset}"
+inuse=inuse=none
 if [[ $summary =~ 'passwait p50=([^ ]+) max=([^ ]+) early=([^ ]+)' ]]; then
   r+=("passwait p50=$match[1] max=$match[2] early=$match[3]")
   rest=${summary/$MATCH/}
+  [[ $rest =~ ' inuse=[^ ]+' ]] && { inuse=${MATCH# }; rest=${rest/$MATCH/} }
 else
   r+=("no summary: $(grep -v '^ *$' "$out" | tail -n 1)")
   rest=
@@ -123,7 +128,9 @@ fi
 [[ $display =~ 'mode ([0-9]+x[0-9]+) pixels at ([0-9.]+) Hz' ]] && r+=("display $match[1]@$match[2]")
 r+=("${start#present_cursor_test: }")
 [[ -n $rest ]] && r+=("${(j: :)${=${rest#summary }}}")
-r+=("exit $rc")
+r+=("exit $rc" "$inuse")
+result=$(line 'result: ')
+[[ -n $result ]] && r+=("$result")
 print -r -- "${(j: | :)r}"
 (( sample )) && print "files: $out $ws"
 exit $rc
