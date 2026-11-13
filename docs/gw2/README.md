@@ -1448,6 +1448,13 @@ destroy (dropped); the arm64 binary runs under AddressSanitizer. Before the port
 `0cd8b76e9a`, the joins hung. The last three need a Metal device: without one it runs the first two and
 exits 77, skipped, not passed (#131); a third run with `LISTENER_TEST_NO_DEVICE=1` checks that path.
 
+`com_assign_test.cpp` (#247) assigns a `Com` its own raw pointer while it holds the only reference,
+for the public and the private flavour, and checks that the object stays alive with one reference
+(`SwapDeviceContextState` does this with `state_object_`). Its objects count their references and
+mark themselves dead at zero without freeing, so the order before the port of athei/dxmt `dd7c5aa`
+(release, then reference) shows as a reference taken on a dead object. `tests/gw2/shim/unknwn.h`
+stands in for the names `com_pointer.hpp` takes from `<unknwn.h>`.
+
 `clock_bench.cpp` (#28) is not a native test: it is a Windows .exe that measures the clocks PE code
 can read (ns per call, step size, backward steps), and `tests/gw2/clock_bench.zsh <engine> <scratch dir>`
 runs it headless under an APFS clone of the engine in a throwaway prefix (winemac disabled). It chose
