@@ -9,8 +9,8 @@ windres = 'arm64ec-w64-mingw32-windres'
 needs_exe_wrapper = true
 
 [built-in options]
-c_args = ['-marm64x']
-cpp_args = ['-marm64x']
+c_args = ['-marm64x', '-march=armv8.4-a']
+cpp_args = ['-marm64x', '-march=armv8.4-a']
 c_link_args = ['-marm64x']
 cpp_link_args = ['-marm64x']
 
