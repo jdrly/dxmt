@@ -12,6 +12,10 @@
 // gw2-run:   for v in "--present mtl3" "--present mtl4" "--present mtl4 --layer-set queue" "--present mtl4 --empty-commit off" "--present mtl4 --present-thread queue" "--present mtl3-on-mtl4" "--present mtl4 --present-at done" "--present mtl3 --encode-thread wine" "--present mtl4 --encode-thread wine" "--present mtl3 --layer wine" "--present mtl4 --layer wine"; do
 // gw2-run:     MTL_DEBUG_LAYER=1 $R --arch $arch ${=v}
 // gw2-run:   done
+// gw2-run:   for v in "--framebuffer-only on" "--colorspace none" "--transaction on" "--drawable link"; do
+// gw2-run:     for p in mtl3 mtl4; do MTL_DEBUG_LAYER=1 $R --arch $arch --present $p ${=v}; done
+// gw2-run:   done
+// gw2-run:   for v in "--framebuffer-only on" "--colorspace none"; do MTL_DEBUG_LAYER=1 $R --arch $arch --present mtl3-on-mtl4 ${=v}; done
 // gw2-run:   for p in mtl3 mtl4; do MTL_HUD_ENABLED=1 MTL_DEBUG_LAYER=1 $R --arch $arch --present $p --hud-lines on; done
 // gw2-run:   $R --arch $arch --present mtl4 --wait-for-drawable off
 // gw2-run:   MTL_DEBUG_LAYER=1 $R --arch $arch --present mtl4 --wait-for-drawable off || true # the layer may stop it
@@ -40,7 +44,8 @@
 //
 // What it sets up, from my fork (src/dxmt/dxmt_presenter.cpp's constructor, src/winemetal/unix/
 // winemetal_unix.c's _MetalLayer_setProps and _MetalLayer_setColorSpace): BGRA8Unorm, framebufferOnly
-// off, display sync on, opaque, colorspace sRGB without EDR, maximumDrawableCount left at its 3. The
+// off, display sync on, opaque, colorspace sRGB without EDR, maximumDrawableCount left at its 3 (the
+// defaults; --framebuffer-only, --colorspace and --transaction change one each, below). The
 // layer is the window's content view's own layer at the screen's backing size, and the frame view's
 // background colour is cleared, as in athei's probe (athei/mtld3d #1123), which went direct on an
 // M1 Max and an M5 Max. The window floats above the menu bar, with the Dock and menu bar hidden.
@@ -118,6 +123,45 @@
 //                                nearest magnification filter, black background, redraw policy never, the
 //                                Metal view as the lowest subview of a layer-backed content view whose own
 //                                layer holds an image (black, the window's size)
+//    How the drawable is handed back (#245, for #223). A Metal 3 present's surface is in use by the window
+//    server when its drawable comes back (inuse on every frame), a Metal 4 present's never is (inuse 0). Each
+//    of these could change that; none has evidence behind it. Each takes mtl3 and mtl4 and combines with the
+//    others; mtl3-on-mtl4 takes the first two. The start line names each one that is on:
+//      --framebuffer-only on     the layer's framebufferOnly on (my presenter turns it off). The present pass
+//                                only renders into the drawable, so nothing else changes
+//      --colorspace none         the layer's colorspace left nil, and wantsExtendedDynamicRangeContent not set
+//      --transaction on          the layer's presentsWithTransaction on, and the present as Apple's rule for it
+//                                says: mtl3 commits the buffer, waits until it is scheduled, then calls the
+//                                drawable's present; mtl4 commits the pass and calls signalDrawable, then the
+//                                present. Both from the encoding thread, inside an explicit CATransaction (that
+//                                thread has no run loop to commit an implicit one), with no time. So not with
+//                                --present-at done or --present-thread queue
+//      --drawable link           the drawable from a CAMetalDisplayLink on the layer, not from nextDrawable.
+//                                The link runs on the encoding thread's run loop at the display's refresh rate,
+//                                with --link-latency 1|2|3 (default 2) as its preferredFrameLatency. Each
+//                                callback encodes one frame: it waits for frame k - 3 as the loop does, then the
+//                                frame pass, the present pass into the update's drawable, and the present at the
+//                                update's targetPresentationTimestamp (the plain one with --transaction on). The
+//                                callback that encodes the last frame invalidates the link and stops the run
+//                                loop, and the thread is joined before the summary. So the frame starts when the
+//                                layer hands the drawable out, the reverse of DXMT's order (the frame first, then
+//                                nextDrawable). nextdrawable prints n/a, shown counts from the callback's start,
+//                                and the surface's use is read there
+//    What a result means. Read each variant against the baseline of the same present way, still and waving,
+//    each with a window server sample: refreshes 1= 2=, passwait, early, inuse, and the frame-info thread's
+//    frame_info_callback and swap_wait counts.
+//      with the variant, --present mtl4 waving           meaning
+//      flat where the baseline saws, inuse every frame   the variant moves a Metal 4 present onto the use-count
+//                                                        hand-back: a property my presenter can set, and an
+//                                                        issue of its own for the game
+//      flat, inuse still 0                               it changes the frame's path another way; read the
+//                                                        sample for the copy (copy_surface) or the compositor
+//                                                        before calling it a fix
+//      saws as the baseline                              that property is out
+//      flat with every variant and with none             the test doesn't reproduce #223 on this machine, and
+//                                                        nothing here says anything
+//    For --drawable link also read shown against the baseline's: a link that is flat at one more refresh of
+//    latency is a trade, not a fix.
 //    Game Mode: `run.zsh display` also puts the arm64 binary into ${OUT}.app with LSSupportsGameMode,
 //    GCSupportsGameMode and a games category (tests/gw2/fixtures/present_cursor_test.plist), as the game's
 //    process runs from a bundle with those keys. Started from the bundle, the start line says bundle=<id>
@@ -130,17 +174,21 @@
 //
 // Output. At start: the start line with every variant in effect, the process's architecture (Rosetta
 // or not), the device, the display (size, refresh rate, built-in or external, vendor and model), the
-// layer, the calibrated cost, and a line for each of --hud-lines, --encode-thread wine and --layer wine
-// when on. Then one line a second, for the frames whose GPU work and presented handler have come back:
+// layer, the calibrated cost, and a line for each of --hud-lines, --encode-thread wine, --layer wine,
+// --transaction on and --drawable link when on. Then one line a second, for the frames whose GPU work
+// and presented handler have come back:
 //   frames, dropped    frames taken; dropped: not presented (presentedTime 0, or no drawable)
 //   interval p50/p95   presentedTime minus the last presented frame's, ms. 16.7 is flat at 60 Hz
 //   missed             refreshes skipped between presented frames (an interval of two refreshes is 1)
-//   shown p50/p95      presentedTime minus the time nextDrawable returned, ms
-//   nextdrawable       how long nextDrawable blocked, ms
+//   shown p50/p95      presentedTime minus the time nextDrawable returned (the callback's start with
+//                      --drawable link), ms
+//   nextdrawable       how long nextDrawable blocked, ms; n/a with --drawable link
 //   passwait           the present pass's GPU start minus its commit, ms: how long Metal held the pass
 //   early n/m          of the m frames whose drawable's surface had been on screen before, n started
 //                      their present pass before the frame after that surface's last one was presented,
 //                      so while that surface may still have been on screen (by the layer's own clock)
+//   inuse n/m          (#245) of the m drawables taken (with a surface), n whose surface IOSurfaceIsInUse
+//                      reported in use right after the take, before anything was encoded into it
 //   gpu p50            the frame pass's GPU time, ms
 //   moves              pointer moves in that second
 //   path               the layer's private displayCompositingInternalStatus, read on the main thread if
@@ -155,8 +203,9 @@
 // sample shows cursor_callback and set_cursor_surface), and a flip from a copy on the direct path (the
 // status is 0 for both, by athei's reading; the window server's sample shows copy_surface).
 //
-// Exit: 0 when every frame was encoded and no command buffer reported an error; 1 on a Metal error or
-// if no frame was presented; 2 on a bad argument; 77 (skipped) without a GUI session, without a
+// Exit: 0 when every frame was encoded and no command buffer reported an error; 1 on a Metal error, if no
+// frame was presented, or if the display link stopped before the last frame; 2 on a bad argument or a
+// flag the present way doesn't take; 77 (skipped) without a GUI session, without a
 // display, without a Metal device, without Metal 4 for either Metal 4 way, without the permission for
 // --move event, or when the layer gives no drawable three times in a row (the window isn't on a
 // display); 130 after Ctrl-C.
@@ -209,9 +258,11 @@ typedef struct {
 static struct {
   bool mtl4, mtl3_present, set_on_queue, empty_commit, present_on_queue, wave, move_event;
   bool present_at_done, wait_for_drawable, hud_lines, encode_wine, layer_wine; // #230
+  bool framebuffer_only, colorspace_none, transaction, link;                   // #245
+  int link_latency;
   long frames;
   double gpu_ms;
-} opt = {.mtl4 = true, .empty_commit = true, .wait_for_drawable = true, .frames = 600, .gpu_ms = 13};
+} opt = {.mtl4 = true, .empty_commit = true, .wait_for_drawable = true, .link_latency = 2, .frames = 600, .gpu_ms = 13};
 
 // --- what the threads share
 
@@ -219,6 +270,7 @@ typedef struct {
   uint64_t frame;
   double take, next_wait, pass_commit, pass_start, gpu_cost, presented;
   uint32_t surface;
+  bool inuse; // IOSurfaceIsInUse of the drawable's surface when taken
   bool gpu_done, shown_done, no_drawable;
 } Frame;
 
@@ -250,6 +302,10 @@ static bool g_war_updated;
 static id<MTLResidencySet> g_layer_set;
 static id<MTLSharedEvent> g_frame_event, g_shown_event; // --present mtl3-on-mtl4
 static dispatch_queue_t g_present_queue;
+// --drawable link: the update the callback is encoding, on the link's thread
+static id<CAMetalDrawable> g_link_drawable;
+static double g_link_time, g_link_target; // the callback's start, the update's targetPresentationTimestamp
+static bool g_link_inuse;
 
 static Frame *
 frame_at(uint64_t k) {
@@ -434,12 +490,16 @@ wine_thread_policies(void) {
 
 // --- the frame
 
-// nextDrawable, timed; the presented handler goes on before any present
+// nextDrawable, timed, or with --drawable link the update's drawable, taken at the callback's start; the
+// surface's use is read here, before anything is encoded into the drawable; the presented handler goes on
+// before any present
 static id<CAMetalDrawable>
 take(uint64_t k) {
-  double t0 = CACurrentMediaTime();
-  id<CAMetalDrawable> d = [g_layer nextDrawable];
-  double t1 = CACurrentMediaTime();
+  double t0 = opt.link ? g_link_time : CACurrentMediaTime();
+  id<CAMetalDrawable> d = opt.link ? g_link_drawable : [g_layer nextDrawable];
+  double t1 = opt.link ? g_link_time : CACurrentMediaTime();
+  IOSurfaceRef surface = d ? d.texture.iosurface : NULL;
+  bool inuse = opt.link ? g_link_inuse : (surface && IOSurfaceIsInUse(surface));
   os_unfair_lock_lock(&g_lock);
   frame_at(k)->take = t1;
   frame_at(k)->next_wait = t1 - t0;
@@ -447,8 +507,8 @@ take(uint64_t k) {
     frame_at(k)->no_drawable = true;
     frame_at(k)->shown_done = true;
   } else {
-    IOSurfaceRef surface = d.texture.iosurface;
     frame_at(k)->surface = surface ? IOSurfaceGetID(surface) : 0;
+    frame_at(k)->inuse = inuse;
   }
   os_unfair_lock_unlock(&g_lock);
   if (d)
@@ -464,8 +524,24 @@ take(uint64_t k) {
   return d;
 }
 
+// when a timed present targets: one refresh ahead, or with --drawable link the update's target
+static double
+present_target(void) {
+  return opt.link ? g_link_target : CACurrentMediaTime() + g_period;
+}
+
+// --transaction on: the drawable's plain present inside an explicit transaction, on the encoding thread,
+// which has no run loop to commit an implicit one
+static void
+present_in_transaction(id<CAMetalDrawable> d) {
+  [CATransaction begin];
+  [d present];
+  [CATransaction commit];
+}
+
 // the present pass into a Metal 3 command buffer, and the command buffer's present
-// (dxmt_presenter.cpp's encodeCommands, dxmt_context.cpp's Metal 3 branch)
+// (dxmt_presenter.cpp's encodeCommands, dxmt_context.cpp's Metal 3 branch); with --transaction on the
+// caller presents after the commit
 static void
 encode_present3(id<MTLCommandBuffer> pcb, id<CAMetalDrawable> d) {
   MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -477,7 +553,8 @@ encode_present3(id<MTLCommandBuffer> pcb, id<CAMetalDrawable> d) {
   [e setFragmentTexture:g_offscreen atIndex:0];
   [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
   [e endEncoding];
-  [pcb presentDrawable:d atTime:CACurrentMediaTime() + g_period];
+  if (!opt.transaction)
+    [pcb presentDrawable:d atTime:present_target()];
 }
 
 static void
@@ -520,6 +597,10 @@ frame3(uint64_t k, unsigned s) {
   id<MTLCommandBuffer> pcb = [g_q3 commandBuffer];
   encode_present3(pcb, d);
   commit_present3(k, pcb);
+  if (opt.transaction) { // Apple's order for presentsWithTransaction
+    [pcb waitUntilScheduled];
+    present_in_transaction(d);
+  }
   if (opt.hud_lines)
     hud_frame(k);
 }
@@ -606,18 +687,22 @@ present_mtl4(uint64_t k, unsigned s) {
       gate_arrive(k, d, g);
     });
     [g_q4 signalDrawable:d];
-    g->at = CACurrentMediaTime() + g_period;
+    g->at = present_target();
     gate_arrive(k, d, g);
     return;
   }
   commit4(k, pcb, kPresentPass, nil);
   [g_q4 signalDrawable:d];
-  if (opt.present_on_queue)
+  if (opt.transaction) {
+    present_in_transaction(d);
+  } else if (opt.present_on_queue) {
+    double target = g_link_target; // this frame's with --drawable link; without it the queue takes the time
     dispatch_async(g_present_queue, ^{
-      [d presentAtTime:CACurrentMediaTime() + g_period];
+      [d presentAtTime:opt.link ? target : CACurrentMediaTime() + g_period];
     });
-  else
-    [d presentAtTime:CACurrentMediaTime() + g_period];
+  } else {
+    [d presentAtTime:present_target()];
+  }
 }
 
 // --present mtl3-on-mtl4, #227's DXMT_MTL4_PRESENT=mtl3 (Mtl4Encoding::beginMetal3Present and
@@ -678,51 +763,115 @@ frame4(uint64_t k, unsigned s) {
 
 static void finish(int code);
 
+// frame k, once frame k - 3 is done on the GPU; false when the run stops (no drawable three times in a row)
+static bool
+encode_frame(uint64_t k) {
+  static int no_drawable_run;
+  unsigned s = k % kInFlight;
+  dispatch_semaphore_wait(g_slot[s], DISPATCH_TIME_FOREVER); // frame k - 3 is done on the GPU
+  if (opt.mtl4)
+    [g_alloc[s] reset];
+  os_unfair_lock_lock(&g_lock);
+  memset(frame_at(k), 0, sizeof(Frame));
+  frame_at(k)->frame = k;
+  os_unfair_lock_unlock(&g_lock);
+  atomic_store(&g_pending[k % kRing], 1);
+  Cost *cost = (Cost *)((char *)g_costbuf.contents + s * kCostStride);
+  cost->iterations = g_iterations;
+  cost->phase = (float)(k % 600) / 600.0f;
+  if (opt.mtl4)
+    frame4(k, s);
+  else
+    frame3(k, s);
+  os_unfair_lock_lock(&g_lock);
+  bool none = frame_at(k)->no_drawable;
+  os_unfair_lock_unlock(&g_lock);
+  frame_unref(k);
+  atomic_store(&g_taken, k + 1);
+  no_drawable_run = none ? no_drawable_run + 1 : 0;
+  if (no_drawable_run == 3) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+      printf("skip: the layer gave no drawable three times in a row: the window isn't on a display\n");
+      pointer_stop();
+      exit(77);
+    });
+    return false;
+  }
+  return true;
+}
+
+// --drawable link (#245): each callback encodes one frame into the update's drawable, on the encoding
+// thread's run loop; the one that encodes the last frame invalidates the link and stops the run loop
+@interface PCLinkDelegate : NSObject <CAMetalDisplayLinkDelegate>
+@end
+@implementation PCLinkDelegate {
+  uint64_t _next;
+}
+- (void)metalDisplayLink:(CAMetalDisplayLink *)displayLink needsUpdate:(CAMetalDisplayLinkUpdate *)update {
+  if (_next >= (uint64_t)opt.frames)
+    return;
+  @autoreleasepool {
+    g_link_time = CACurrentMediaTime();
+    g_link_drawable = update.drawable;
+    IOSurfaceRef surface = g_link_drawable.texture.iosurface;
+    g_link_inuse = surface && IOSurfaceIsInUse(surface);
+    g_link_target = update.targetPresentationTimestamp;
+    encode_frame(_next++);
+    g_link_drawable = nil;
+  }
+  if (_next == (uint64_t)opt.frames) {
+    [displayLink invalidate];
+    CFRunLoopStop(CFRunLoopGetCurrent());
+  }
+}
+@end
+
+static CAMetalDisplayLink *g_link;
+static PCLinkDelegate *g_link_delegate; // the link holds it weakly
+
+static void
+link_run(void) {
+  @autoreleasepool {
+    g_link_delegate = [PCLinkDelegate new];
+    g_link = [[CAMetalDisplayLink alloc] initWithMetalLayer:g_layer];
+    g_link.delegate = g_link_delegate;
+    g_link.preferredFrameLatency = (float)opt.link_latency;
+    float hz = (float)(1.0 / g_period);
+    g_link.preferredFrameRateRange = CAFrameRateRangeMake(hz, hz, hz);
+    [g_link addToRunLoop:NSRunLoop.currentRunLoop forMode:NSDefaultRunLoopMode];
+  }
+  CFRunLoopRun(); // until the last frame's callback stops it
+}
+
+static pthread_t g_render; // the encoding thread, joined before the report
+
 static void *
 render_main(void *arg) {
   (void)arg;
   if (opt.encode_wine)
     wine_thread_policies();
-  int no_drawable_run = 0;
-  for (uint64_t k = 0; k < (uint64_t)opt.frames; k++) {
-    @autoreleasepool {
-      unsigned s = k % kInFlight;
-      dispatch_semaphore_wait(g_slot[s], DISPATCH_TIME_FOREVER); // frame k - 3 is done on the GPU
-      if (opt.mtl4)
-        [g_alloc[s] reset];
-      os_unfair_lock_lock(&g_lock);
-      memset(frame_at(k), 0, sizeof(Frame));
-      frame_at(k)->frame = k;
-      os_unfair_lock_unlock(&g_lock);
-      atomic_store(&g_pending[k % kRing], 1);
-      Cost *cost = (Cost *)((char *)g_costbuf.contents + s * kCostStride);
-      cost->iterations = g_iterations;
-      cost->phase = (float)(k % 600) / 600.0f;
-      if (opt.mtl4)
-        frame4(k, s);
-      else
-        frame3(k, s);
-      os_unfair_lock_lock(&g_lock);
-      bool none = frame_at(k)->no_drawable;
-      os_unfair_lock_unlock(&g_lock);
-      frame_unref(k);
-      atomic_store(&g_taken, k + 1);
-      no_drawable_run = none ? no_drawable_run + 1 : 0;
-      if (no_drawable_run == 3) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-          printf("skip: the layer gave no drawable three times in a row: the window isn't on a display\n");
-          pointer_stop();
-          exit(77);
-        });
-        return NULL;
+  if (opt.link) {
+    link_run();
+  } else {
+    for (uint64_t k = 0; k < (uint64_t)opt.frames; k++) {
+      @autoreleasepool {
+        if (!encode_frame(k))
+          return NULL;
       }
     }
   }
   for (unsigned s = 0; s < kInFlight; s++)
     dispatch_semaphore_wait(g_slot[s], DISPATCH_TIME_FOREVER); // everything done on the GPU
   usleep(300000); // the last frames' presented handlers
+  int code = 0;
+  if (atomic_load(&g_taken) < (uint64_t)opt.frames) {
+    printf("FAIL: the display link's run loop ended after %llu of %ld frames\n",
+           (unsigned long long)atomic_load(&g_taken), opt.frames);
+    code = 1;
+  }
   dispatch_async(dispatch_get_main_queue(), ^{
-    finish(0);
+    pthread_join(g_render, NULL);
+    finish(code);
   });
   return NULL;
 }
@@ -737,6 +886,7 @@ typedef struct {
 typedef struct {
   Series interval, shown, next_wait, pass_wait, gpu;
   long frames, dropped, missed, early, early_known;
+  long inuse, inuse_known; // drawables whose surface was in use when taken, of those with a surface
 } Window;
 
 static Window g_win, g_sum;
@@ -780,7 +930,7 @@ pct(Series *s, double p) {
 static void
 window_reset(Window *w) {
   w->interval.n = w->shown.n = w->next_wait.n = w->pass_wait.n = w->gpu.n = 0;
-  w->frames = w->dropped = w->missed = w->early = w->early_known = 0;
+  w->frames = w->dropped = w->missed = w->early = w->early_known = w->inuse = w->inuse_known = 0;
 }
 
 static int
@@ -812,6 +962,10 @@ account(Window *w, const Frame *f, bool early_known, bool early, double interval
   if (early_known) {
     w->early_known++;
     w->early += early;
+  }
+  if (f->surface && !f->no_drawable) {
+    w->inuse_known++;
+    w->inuse += f->inuse;
   }
   if (f->presented > 0) {
     push(&w->shown, f->presented - f->take);
@@ -899,14 +1053,15 @@ present_name(void) {
 
 static void
 print_window(const char *label, Window *w, const char *path) {
-  printf(
-      "%s %s %s frames=%ld dropped=%ld interval p50=%.1f p95=%.1f missed=%ld shown p50=%.1f p95=%.1f "
-      "nextdrawable p50=%.1f max=%.1f passwait p50=%.2f max=%.2f early=%ld/%ld gpu p50=%.1f",
-      label, present_name(), opt.wave ? "wave" : "still", w->frames, w->dropped, pct(&w->interval, 0.5),
-      pct(&w->interval, 0.95), w->missed, pct(&w->shown, 0.5), pct(&w->shown, 0.95), pct(&w->next_wait, 0.5),
-      pct(&w->next_wait, 1), pct(&w->pass_wait, 0.5), pct(&w->pass_wait, 1), w->early, w->early_known,
-      pct(&w->gpu, 0.5)
-  );
+  printf("%s %s %s frames=%ld dropped=%ld interval p50=%.1f p95=%.1f missed=%ld shown p50=%.1f p95=%.1f ", label,
+         present_name(), opt.wave ? "wave" : "still", w->frames, w->dropped, pct(&w->interval, 0.5),
+         pct(&w->interval, 0.95), w->missed, pct(&w->shown, 0.5), pct(&w->shown, 0.95));
+  if (opt.link) // the link hands the drawable out; nothing waits for it
+    printf("nextdrawable n/a");
+  else
+    printf("nextdrawable p50=%.1f max=%.1f", pct(&w->next_wait, 0.5), pct(&w->next_wait, 1));
+  printf(" passwait p50=%.2f max=%.2f early=%ld/%ld inuse=%ld/%ld gpu p50=%.1f", pct(&w->pass_wait, 0.5),
+         pct(&w->pass_wait, 1), w->early, w->early_known, w->inuse, w->inuse_known, pct(&w->gpu, 0.5));
   if (path)
     printf(" %s", path);
   printf("\n");
@@ -926,6 +1081,19 @@ static void
 tick(void) {
   collect(false);
   print_second();
+  if (opt.link) { // a link that stops calling back would leave the run waiting for ever
+    static uint64_t last;
+    static int quiet;
+    uint64_t taken = atomic_load(&g_taken);
+    quiet = taken == last ? quiet + 1 : 0;
+    last = taken;
+    if (quiet == 3 && taken < (uint64_t)opt.frames) {
+      printf("FAIL: the display link encoded no frame in three seconds, after %llu of %ld\n",
+             (unsigned long long)taken, opt.frames);
+      pointer_stop();
+      exit(1);
+    }
+  }
 }
 
 static void
@@ -1021,15 +1189,18 @@ usage(void) {
       "usage: present_cursor_test [--present mtl3|mtl4|mtl3-on-mtl4] [--layer-set buffer|queue] [--empty-commit on|off]\n"
       "                           [--present-thread encode|queue] [--present-at signal|done]\n"
       "                           [--wait-for-drawable on|off] [--hud-lines off|on] [--encode-thread interactive|wine]\n"
-      "                           [--layer plain|wine] [--pointer still|wave] [--move warp|event] [--frames N] [--gpu-ms MS]\n"
+      "                           [--layer plain|wine] [--framebuffer-only off|on] [--colorspace srgb|none]\n"
+      "                           [--transaction off|on] [--drawable next|link] [--link-latency 1|2|3]\n"
+      "                           [--pointer still|wave] [--move warp|event] [--frames N] [--gpu-ms MS]\n"
       "--layer-set, --present-thread, --present-at and --wait-for-drawable take --present mtl4 (the default),\n"
-      "--empty-commit either Metal 4 way. See the source's header.\n"
+      "--empty-commit either Metal 4 way, --transaction and --drawable mtl3 and mtl4, --link-latency\n"
+      "--drawable link. See the source's header.\n"
   );
 }
 
 static bool
 parse(int argc, const char **argv) {
-  bool mtl4_only = false, drawable4_only = false, signal4_only = false;
+  bool mtl4_only = false, drawable4_only = false, signal4_only = false, latency = false;
   for (int i = 1; i < argc; i++) {
     const char *a = argv[i], *v = i + 1 < argc ? argv[i + 1] : NULL;
 #define IS(name) (!strcmp(a, name) && v && ++i)
@@ -1051,6 +1222,16 @@ parse(int argc, const char **argv) {
       opt.encode_wine = !strcmp(v, "wine");
     else if (IS("--layer") && (!strcmp(v, "plain") || !strcmp(v, "wine")))
       opt.layer_wine = !strcmp(v, "wine");
+    else if (IS("--framebuffer-only") && (!strcmp(v, "off") || !strcmp(v, "on")))
+      opt.framebuffer_only = !strcmp(v, "on");
+    else if (IS("--colorspace") && (!strcmp(v, "srgb") || !strcmp(v, "none")))
+      opt.colorspace_none = !strcmp(v, "none");
+    else if (IS("--transaction") && (!strcmp(v, "off") || !strcmp(v, "on")))
+      opt.transaction = !strcmp(v, "on");
+    else if (IS("--drawable") && (!strcmp(v, "next") || !strcmp(v, "link")))
+      opt.link = !strcmp(v, "link");
+    else if (IS("--link-latency") && (!strcmp(v, "1") || !strcmp(v, "2") || !strcmp(v, "3")))
+      opt.link_latency = atoi(v), latency = true;
     else if (IS("--pointer") && (!strcmp(v, "still") || !strcmp(v, "wave")))
       opt.wave = !strcmp(v, "wave");
     else if (IS("--move") && (!strcmp(v, "warp") || !strcmp(v, "event")))
@@ -1075,6 +1256,20 @@ parse(int argc, const char **argv) {
   }
   if (drawable4_only && opt.mtl3_present) {
     printf("present_cursor_test: --layer-set and --present-thread are --present mtl4's; mtl3-on-mtl4 has neither\n");
+    return false;
+  }
+  if ((opt.transaction || opt.link) && opt.mtl3_present) {
+    printf("present_cursor_test: --transaction and --drawable are --present mtl3's and mtl4's; mtl3-on-mtl4 has "
+           "neither\n");
+    return false;
+  }
+  if (opt.transaction && (opt.present_at_done || opt.present_on_queue)) {
+    printf("present_cursor_test: --transaction on presents without a time from the encoding thread; "
+           "--present-at done and --present-thread queue are --present mtl4's timed present\n");
+    return false;
+  }
+  if (latency && !opt.link) {
+    printf("present_cursor_test: --link-latency is --drawable link's\n");
     return false;
   }
   return true;
@@ -1318,6 +1513,15 @@ main(int argc, const char **argv) {
              opt.wait_for_drawable ? "on" : "off");
     printf(" hud-lines=%s encode-thread=%s layer=%s", opt.hud_lines ? "on" : "off",
            opt.encode_wine ? "wine" : "interactive", opt.layer_wine ? "wine" : "plain");
+    // #245's, when on, so a run without them prints the line it printed before
+    if (opt.framebuffer_only)
+      printf(" framebuffer-only=on");
+    if (opt.colorspace_none)
+      printf(" colorspace=none");
+    if (opt.transaction)
+      printf(" transaction=on (plain present, no time)");
+    if (opt.link)
+      printf(" drawable=link link-latency=%d", opt.link_latency);
     NSString *bundle = NSBundle.mainBundle.bundleIdentifier;
     if (bundle)
       printf(" bundle=%s", bundle.UTF8String);
@@ -1362,20 +1566,34 @@ main(int argc, const char **argv) {
     g_layer = (CAMetalLayer *)view.layer;
     g_layer.device = g_device;
     g_layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
-    g_layer.framebufferOnly = NO;
+    g_layer.framebufferOnly = opt.framebuffer_only;
     g_layer.displaySyncEnabled = YES;
     g_layer.opaque = YES;
-    CGColorSpaceRef srgb = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
-    g_layer.colorspace = srgb;
-    CGColorSpaceRelease(srgb);
-    g_layer.wantsExtendedDynamicRangeContent = NO;
+    if (!opt.colorspace_none) {
+      CGColorSpaceRef srgb = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+      g_layer.colorspace = srgb;
+      CGColorSpaceRelease(srgb);
+      g_layer.wantsExtendedDynamicRangeContent = NO;
+    }
+    if (opt.transaction)
+      g_layer.presentsWithTransaction = YES;
     g_layer.contentsScale = window.backingScaleFactor;
     g_layer.drawableSize = [view convertSizeToBacking:bounds.size];
     CGSize size = g_layer.drawableSize;
     printf("layer: %.0fx%.0f BGRA8Unorm, framebufferOnly %d, displaySyncEnabled %d, maximumDrawableCount %lu, "
-           "opaque %d, sRGB, contentsScale %.1f\n",
+           "opaque %d, %s, contentsScale %.1f\n",
            size.width, size.height, g_layer.framebufferOnly, g_layer.displaySyncEnabled,
-           (unsigned long)g_layer.maximumDrawableCount, g_layer.opaque, g_layer.contentsScale);
+           (unsigned long)g_layer.maximumDrawableCount, g_layer.opaque,
+           g_layer.colorspace ? "sRGB" : "no colorspace", g_layer.contentsScale);
+    if (opt.transaction)
+      printf("layer: presentsWithTransaction %d; each present is the drawable's plain present in a "
+             "CATransaction on the encoding thread, after %s\n",
+             g_layer.presentsWithTransaction, opt.mtl4 ? "signalDrawable" : "waitUntilScheduled");
+    if (opt.link)
+      printf("drawable: from a CAMetalDisplayLink on the encoding thread's run loop, preferredFrameLatency %d, at "
+             "%.2f Hz; a frame starts when the link hands its drawable out (DXMT takes the drawable after the "
+             "frame); a timed present targets the update's targetPresentationTimestamp\n",
+             opt.link_latency, 1.0 / g_period);
     if (opt.layer_wine)
       printf("layer: wine: magnificationFilter %s, background black, under a content view with a %zux%zu image%s\n",
              g_layer.magnificationFilter.UTF8String, g_window_image ? CGImageGetWidth(g_window_image) : 0,
@@ -1428,8 +1646,7 @@ main(int argc, const char **argv) {
       pthread_attr_init(&attr);
       if (!opt.encode_wine) // a Wine thread has no QoS class
         pthread_attr_set_qos_class_np(&attr, QOS_CLASS_USER_INTERACTIVE, 0);
-      pthread_t render;
-      pthread_create(&render, &attr, render_main, NULL);
+      pthread_create(&g_render, &attr, render_main, NULL);
       pthread_attr_destroy(&attr);
       [NSTimer scheduledTimerWithTimeInterval:1.0
                                       repeats:YES
