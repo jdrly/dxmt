@@ -17,6 +17,9 @@ std::atomic<uint64_t> g_commits{0}, g_max_buffers{0}, g_max_alloc_bytes{0}, g_sl
 std::atomic<uint64_t> g_res_adds{0}, g_missed{0}, g_unsupported{0}, g_bytes_overflow{0}, g_blit_barriers{0};
 std::atomic<bool> g_any{false};
 std::atomic<bool> g_present_mtl3{false}; // gw2 (#227): DXMT_MTL4_PRESENT=mtl3 in use
+// gw2 (#204): every queue's command allocators alive now, and their sizes at their last reset (not
+// reset with the window)
+std::atomic<uint64_t> g_allocators{0}, g_alloc_held_bytes{0};
 
 void
 atomicMax(std::atomic<uint64_t> &target, uint64_t value) {
@@ -30,10 +33,11 @@ metal4Section(double, uint32_t) {
   if (!g_any.load(std::memory_order_relaxed))
     return {};
   return std::format(
-      "commits={} buffers={} allocmb={:.2f} slow={} errors={} resadds={} missed={} unsupported={} bytesover={} "
-      "blitbar={} present={}",
+      "commits={} buffers={} allocmb={:.2f} allocators={} allocheld={:.2f} slow={} errors={} resadds={} missed={} "
+      "unsupported={} bytesover={} blitbar={} present={}",
       g_commits.exchange(0, std::memory_order_relaxed), g_max_buffers.exchange(0, std::memory_order_relaxed),
-      g_max_alloc_bytes.exchange(0, std::memory_order_relaxed) / 1e6, g_slow.exchange(0, std::memory_order_relaxed),
+      g_max_alloc_bytes.exchange(0, std::memory_order_relaxed) / 1e6, g_allocators.load(std::memory_order_relaxed),
+      g_alloc_held_bytes.load(std::memory_order_relaxed) / 1e6, g_slow.exchange(0, std::memory_order_relaxed),
       g_errors.exchange(0, std::memory_order_relaxed), g_res_adds.exchange(0, std::memory_order_relaxed),
       g_missed.exchange(0, std::memory_order_relaxed), g_unsupported.exchange(0, std::memory_order_relaxed),
       g_bytes_overflow.exchange(0, std::memory_order_relaxed), g_blit_barriers.exchange(0, std::memory_order_relaxed),
@@ -73,18 +77,29 @@ metal4EncodeCounters(const WMTMtl4BindingState &state) {
   g_blit_barriers.fetch_add(state.blit_barriers, std::memory_order_relaxed);
 }
 
-Mtl4Queue::Mtl4Queue(WMT::Device device, uint32_t slots) : device_(device) {
+Mtl4Queue::Mtl4Queue(WMT::Device device, uint32_t slots, bool allocator_pool) :
+    device_(device),
+    allocator_pool_(allocator_pool) {
   queue_ = device.newMTL4CommandQueue();
   event_ = device.newSharedEvent();
   if (!queue_ || !event_)
     return;
   slots_.resize(slots);
   for (auto &slot : slots_) {
-    slot.allocator = device.newCommandAllocator();
+    if (!allocator_pool_ && !newAllocator(slot.allocator))
+      return; // valid() is false
     WMT::Error err;
     slot.residency = device.newResidencySet(256, err);
-    if (!slot.allocator || !slot.residency)
+    if (!slot.residency)
       return; // valid() is false
+  }
+  // gw2 (#204): the pool's first allocator, so a device that makes none fails here, while the
+  // device can still stay on Metal 3
+  if (allocator_pool_) {
+    Allocator first;
+    if (!newAllocator(first))
+      return; // valid() is false
+    idle_allocators_.push_back(std::move(first));
   }
   tables_.vertex = newTable(device);
   tables_.fragment = newTable(device);
@@ -115,7 +130,70 @@ Mtl4Queue::~Mtl4Queue() {
         WMT::Object{commit->feedback.error}.release();
     slot.commits.clear();
     slot.open = nullptr; // begun, never committed: nothing of it runs
+    if (slot.allocator.ref)
+      releaseAllocator(slot.allocator); // nothing runs any more (waitIdle)
   }
+  for (auto &allocator : idle_allocators_)
+    releaseAllocator(allocator);
+}
+
+// gw2 (#204): the allocator counts follow every allocator made and released, with or without the pool
+bool
+Mtl4Queue::newAllocator(Allocator &allocator) {
+  allocator.ref = device_.newCommandAllocator();
+  allocator.bytes = 0;
+  if (!allocator.ref)
+    return false;
+  allocators_.fetch_add(1, std::memory_order_relaxed);
+  g_allocators.fetch_add(1, std::memory_order_relaxed);
+  return true;
+}
+
+void
+Mtl4Queue::releaseAllocator(Allocator &allocator) {
+  allocators_.fetch_sub(1, std::memory_order_relaxed);
+  g_allocators.fetch_sub(1, std::memory_order_relaxed);
+  allocator_bytes_.fetch_sub(allocator.bytes, std::memory_order_relaxed);
+  g_alloc_held_bytes.fetch_sub(allocator.bytes, std::memory_order_relaxed);
+  allocator = {};
+}
+
+// gw2 (#204), encode thread, a chunk's first begin(): an idle allocator of the pool, or a new one
+Mtl4Queue::Allocator
+Mtl4Queue::takeAllocator() {
+  {
+    std::lock_guard lock(pool_mutex_);
+    if (!idle_allocators_.empty()) {
+      Allocator allocator = std::move(idle_allocators_.back());
+      idle_allocators_.pop_back();
+      return allocator;
+    }
+  }
+  Allocator allocator;
+  if (!newAllocator(allocator)) {
+    // as acquire(): earlier chunks may still be on the GPU and this one can't be encoded
+    Logger::err(std::format(
+        "Metal 4: newCommandAllocator failed with {} allocators alive (DXMT_MTL4_ALLOCATOR_POOL=1); DXMT can't "
+        "continue on Metal 4, aborting",
+        allocators()
+    ));
+    std::abort();
+  }
+  return allocator;
+}
+
+// gw2 (#204), finish thread, retire(): `allocator` was reset after its chunk completed
+void
+Mtl4Queue::giveBackAllocator(Allocator &allocator) {
+  {
+    std::lock_guard lock(pool_mutex_);
+    if (idle_allocators_.size() < kIdleAllocators) {
+      idle_allocators_.push_back(std::move(allocator));
+      allocator = {};
+      return;
+    }
+  }
+  releaseAllocator(allocator);
 }
 
 Mtl4Commit *
@@ -159,7 +237,9 @@ Mtl4Queue::begin(uint64_t seq) {
   auto &s = slot(seq);
   assert(!s.open && "Metal 4: a command buffer of this chunk is still open");
   auto *commit = acquire();
-  commit->cmdbuf.begin(s.allocator);
+  if (!s.allocator.ref)
+    s.allocator = takeAllocator(); // gw2 (#204): with the pool, the chunk's first command buffer
+  commit->cmdbuf.begin(s.allocator.ref);
   s.open = commit;
   return *commit;
 }
@@ -289,10 +369,20 @@ Mtl4Queue::retire(uint64_t seq) {
     s.residency.removeAllAllocations();
     s.residency.commit();
   }
+  // gw2 (#204): with the pool, a chunk that began no command buffer has no allocator
+  if (!s.allocator.ref)
+    return;
   // every command buffer that took memory from it has completed (wait), so it may be reset
-  uint64_t bytes = s.allocator.reset();
+  uint64_t bytes = s.allocator.ref.reset();
   if (statsEnabled())
     atomicMax(g_max_alloc_bytes, bytes);
+  // its size at this reset replaces its last one in the sums (unsigned wrap-around gives the difference)
+  allocator_bytes_.fetch_add(bytes - s.allocator.bytes, std::memory_order_relaxed);
+  g_alloc_held_bytes.fetch_add(bytes - s.allocator.bytes, std::memory_order_relaxed);
+  s.allocator.bytes = bytes;
+  // gw2 (#204): reset, so no command buffer uses it any more: back to the pool
+  if (allocator_pool_)
+    giveBackAllocator(s.allocator);
 }
 
 void
