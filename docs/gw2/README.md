@@ -1477,7 +1477,9 @@ stands in for the names `com_pointer.hpp` takes from `<unknwn.h>`.
 without an autorelease pool, as GW2's render thread is. It links the real bridge like
 `paired_replay_test` and makes each call through its thunk on a plain pthread, with
 `OBJC_DEBUG_MISSING_POOLS=YES`: the runtime then writes a `MISSING POOLS` line for each object
-autoreleased with no pool, and the test counts that thread's lines around each call. The calls are
+autoreleased with no pool, and the test counts that thread's lines around each call. On arm64 the
+runtime parks an autoreleased object in a thread-local slot until the thread's next autorelease, so
+each window ends with a sentinel's autorelease that pushes it out. The calls are
 those the front end makes when the game creates a resource or a state object: `newBuffer` (shared,
 private, CPU-placed), `newTexture`, `MTLBuffer newTexture`, `newTextureView`, `newSharedTexture`,
 `newSamplerState`, `newDepthStencilState`, and the residency set's `addAllocations` that follows a

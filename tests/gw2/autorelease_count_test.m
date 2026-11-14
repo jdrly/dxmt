@@ -5,7 +5,7 @@
 // gw2-build:   for f in $U; do clang -c -x objective-c -std=gnu17 -fblocks -fno-objc-arc -O2 -arch $arch -mmacosx-version-min=26.0 -DDXMT_NATIVE=1 -Wno-unused-function -Isrc/airconv -Isrc/nativemetal -Isrc/winemetal src/winemetal/unix/$f -o $T/arc_u_${f:r}_$arch.o; done
 // gw2-build:   clang -c -std=gnu17 -O2 -arch $arch -mmacosx-version-min=26.0 -DDXMT_NATIVE=1 -Isrc/nativemetal -Isrc/winemetal src/winemetal/winemetal_thunks.c -o $T/arc_thunks_$arch.o
 // gw2-build:   clang -c -std=gnu17 -arch $arch -mmacosx-version-min=26.0 -Wno-ignored-attributes -Isrc/airconv tests/gw2/shim/airconv_absent.c -o $T/arc_airconv_absent_$arch.o
-// gw2-build:   clang -x objective-c -std=gnu17 -fno-objc-arc -O1 -Wall -arch $arch -mmacosx-version-min=26.0 -Isrc/nativemetal -Isrc/winemetal tests/gw2/autorelease_count_test.m $T/arc_*_$arch.o -framework Metal -framework MetalFX -framework QuartzCore -framework Foundation -framework CoreGraphics -framework ColorSync -framework Cocoa -lsqlite3 -o ${OUT}_$arch
+// gw2-build:   clang -std=gnu17 -fno-objc-arc -O1 -Wall -arch $arch -mmacosx-version-min=26.0 -Isrc/nativemetal -Isrc/winemetal tests/gw2/autorelease_count_test.m $T/arc_*_$arch.o -framework Metal -framework MetalFX -framework QuartzCore -framework Foundation -framework CoreGraphics -framework ColorSync -framework Cocoa -lsqlite3 -o ${OUT}_$arch
 // gw2-build: done
 // gw2-run: for arch in x86_64 arm64; do OBJC_DEBUG_MISSING_POOLS=YES ${OUT}_$arch; done
 //
@@ -19,10 +19,19 @@
 // The runtime does the counting: with OBJC_DEBUG_MISSING_POOLS=YES it writes one "MISSING POOLS" line
 // to stderr for each object autoreleased with no pool in place, naming the thread and the class. The
 // test points stderr at a file and counts the lines of its worker thread (a plain pthread, never given
-// a pool) around each call. Two controls come first and must each count exactly one: an object
-// autoreleased on the fresh thread, and one autoreleased after a pool was pushed and popped there
-// (Metal may push and pop pools of its own inside a call, and an object autoreleased after that must
-// still be seen). Either control failing fails the test: the counts below would mean nothing.
+// a pool) around each call.
+//
+// On arm64 the runtime doesn't autorelease at once: -autorelease parks the object in a thread-local
+// slot (objc4's ReturnAutoreleaseInfo), and it reaches the pool, or the MISSING POOLS line, only at the
+// thread's next autorelease or pool push. So each counted window ends with an autorelease of a
+// sentinel object, which pushes out whatever the call left parked; the sentinel's own line comes in a
+// later window and isn't counted. x86_64 doesn't park, and there the sentinel's line comes at once.
+//
+// Two controls come first and must each count exactly one: an object autoreleased on the fresh
+// thread (on arm64 a parked one, so it checks the sentinel too), and one autoreleased after a pool
+// was pushed and popped there (Metal may push and pop pools of its own inside a call, and an object
+// autoreleased after that must still be seen). Either control failing fails the test: the counts
+// below would mean nothing.
 //
 // Each call runs once cold, then 100 times; each object is released (and its cleanup done) outside
 // the counted window, and that release is counted on its own. One RESULT line per call and arch:
@@ -33,10 +42,11 @@
 // game creates a resource or state object (dxmt_buffer.cpp, dxmt_texture.cpp, dxmt_sampler.cpp,
 // d3d11_state_object.cpp), plus the residency set add that follows a buffer or texture creation
 // (dxmt_gw2_residency.cpp), skipped where the device gives no residency set. Pipelines and libraries
-// are created on DXMT's own threads, which drain a pool per task, so they aren't here; neither are the
-// heap calls (no heap is created on GW2's path) nor queues, events and fences (created once, at
-// device creation). The test only reports: a nonzero count doesn't fail it. Without a Metal device it
-// exits 77.
+// are created on DXMT's own threads, which drain a pool per task, so they aren't here. Neither are the
+// heap calls (no heap is created on GW2's path), nor queues, shared events, events, fences and
+// upscalers: they come with queues, contexts, upscalers, keyed-mutex textures and ID3D11Fence objects,
+// not with each buffer, texture or view. The test only reports: a nonzero count doesn't fail it.
+// Without a Metal device it exits 77.
 
 #import <Foundation/Foundation.h>
 #include <errno.h>
@@ -63,15 +73,23 @@ static int capture_fd = -1;    // the file stderr points at
 static char thread_tag[32];    // "(0x...)": how the runtime names the worker thread
 static int failures = 0;
 
+// autoreleased at the end of each counted window; its lines aren't counted
+@interface AutoreleaseCountSentinel : NSObject
+@end
+@implementation AutoreleaseCountSentinel
+@end
+
 static off_t
 captured(void) {
   struct stat st;
   return fstat(capture_fd, &st) == 0 ? st.st_size : 0;
 }
 
-// The worker's MISSING POOLS lines written since `from`; their class names are appended to `classes`
+// The worker's MISSING POOLS lines written since `from`, after pushing out what's parked (see above);
+// their class names are appended to `classes`
 static int
 count_since(off_t from, char *classes, size_t classes_size) {
+  [[[AutoreleaseCountSentinel alloc] init] autorelease];
   off_t to = captured();
   if (to <= from)
     return 0;
@@ -84,9 +102,8 @@ count_since(off_t from, char *classes, size_t classes_size) {
     char *end = strchr(line, '\n');
     if (end)
       *end = 0;
-    // a line names its thread as "MISSING POOLS: (0x...)"; one without a thread is counted too
-    char *mp = strstr(line, "MISSING POOLS");
-    if (mp && (strstr(line, thread_tag) || strncmp(mp, "MISSING POOLS: (", 16))) {
+    if (strstr(line, "MISSING POOLS: ") && strstr(line, thread_tag) &&
+        !strstr(line, "of class AutoreleaseCountSentinel ")) {
       count++;
       char *cls = strstr(line, "of class ");
       char *cls_end = cls ? strstr(cls, " autoreleased") : NULL;
