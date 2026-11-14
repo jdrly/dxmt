@@ -9,6 +9,8 @@ DEFINE_COM_INTERFACE("acdf3ef1-b33a-4cb6-97bd-1c1974827e6d", IMTLDXGIAdapter)
     : public IDXGIAdapter4 {
   virtual WMT::Device STDMETHODCALLTYPE GetMTLDevice() = 0;
   virtual D3DKMT_HANDLE STDMETHODCALLTYPE GetLocalD3DKMT() = 0;
+  // gw2 (#250): dxgi.dll's count of WaitForVBlank calls (gw2::vblankCalls), for STATS in d3d11.dll
+  virtual uint64_t STDMETHODCALLTYPE GetVBlankCalls() = 0;
 };
 
 DEFINE_COM_INTERFACE("6bfa1657-9cb1-471a-a4fb-7cacf8a81207", IMTLDXGIDevice)
