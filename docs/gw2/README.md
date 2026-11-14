@@ -15,7 +15,7 @@ because Wine raises `0x80000005` (`STATUS_BUFFER_OVERFLOW`) for a line over its 
 
 | Variable | Default | What it does | Off restores |
 |---|---|---|---|
-| `DXMT_STATS` | on | The 2 s statistics lines (`STATS`, `STATS2`, `PACE`, `GPU`, the sections), `HITCH` lines, the startup line, and all their measuring (the fork's timers, the `nextDrawable` timer, the present-branch counts, the split-off command buffers' GPU timestamps) | none of it, and no measuring beyond upstream's frame statistics |
+| `DXMT_STATS` | on | The 2 s statistics lines (`STATS`, `STATS2`, `PACE`, `GPU`, the sections), `HITCH` lines, the startup line, and all their measuring (the fork's timers, the `nextDrawable` timer, the present-branch counts, the split-off command buffers' GPU timestamps, the `WaitForVBlank` count) | none of it, and no measuring beyond upstream's frame statistics |
 | `DXMT_HITCH_MS` | 50 | A `HITCH` line for a Present-to-Present interval (game's render thread) at least this long; `0` turns them off | — |
 | `DXMT_PRESENT_SPLIT` | on | Commit the frame's command buffer before `nextDrawable` and present from a new one | the present in the frame's last buffer |
 | `DXMT_DISPLAY_SYNC` | on | A present with a sync interval uses `CAMetalLayer`'s vsync (`displaySyncEnabled`); a minimum duration only for intervals over one refresh, half a refresh short | DXMT's own pacing (minimum duration of exactly one refresh, display sync off) |
@@ -85,9 +85,9 @@ Not switchable: `SetMaximumFrameLatency(0)` means the default, 3 (DXGI's definit
 ## The STATS line
 
 `STATS fps= ms=avg/max cb= rp=(+ merged) clear= split= drawable=avg/max commit=avg/max
-sync=Nx avg/max stall= encode=prepare+flush/max latency=avg/max maxlatency= interval= deadline=`
+sync=Nx avg/max stall= encode=prepare+flush/max latency=avg/max maxlatency= interval= deadline= vblank=`
 
-Averages are per frame over the 2 s window; times are ms.
+Averages are per frame over the 2 s window, except `vblank`; times are ms.
 
 | Field | Meaning |
 |---|---|
@@ -105,6 +105,7 @@ Averages are per frame over the 2 s window; times are ms.
 | `maxlatency` | The frame latency in effect |
 | `interval` | The sync interval of the last Present |
 | `deadline` | The deadline requested (ms); a present that takes the minimum-duration branch ignores it |
+| `vblank` | `IDXGIOutput::WaitForVBlank` calls a second over the window, from every thread and output in the process (#250). The call returns at once, without waiting for a refresh |
 
 ## The other 2 s lines
 
@@ -1525,6 +1526,12 @@ chains, BC blocks, 3D, layers, and the depth formats' bytes on the Metal formats
 presenting thread's interval and in the other threads' pool; a nested `Create*` counts once, under the
 outer call's kind and description, and a `Create*` inside another entry point counts in neither. It
 runs a second time with `DXMT_STATS=0`, where a create must read no clock and leave every counter at 0.
+
+`vblank_count_test.cpp` (pure, #250) checks the count behind `STATS`' `vblank`: `gw2::vblankCall()`,
+which is all `WaitForVBlank` does besides returning `S_OK`, made once, 1,000 times, then 100,000 times
+on each of 4 threads at once, and `gw2::vblankCalls()` must read back exactly the calls made. With
+`DXMT_STATS=0` the same calls leave it at 0. `dxgi.h` isn't built natively, so the test doesn't reach
+`WaitForVBlank` itself or the `IMTLDXGIAdapter` call STATS reads the count through.
 
 `getdata_flush_test.cpp` (pure, #158) checks `gw2::getDataSkipsFlush`, the rule of
 `DXMT_GETDATA_SKIP_FLUSH`: a poll of a query whose chunk is still being recorded flushes, a committed
