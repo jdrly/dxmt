@@ -1320,7 +1320,7 @@ so only the first run after a version change builds LLVM (about 25 minutes per a
 - **Native tests**: `zsh -n` on the zsh scripts and a self-check of `.github/gw2/warnings.zsh`, then
   `tests/gw2/run.zsh pure` and `metal`. The zsh checks run here because macOS has zsh, so they install
   nothing (#174). The runner's GPU is an Apple Paravirtual device
-  with Metal 3 and no Metal 4. There, `commit_record_metal_test`, `pso_archive_test` and
+  with Metal 3 and no Metal 4. There, `autorelease_count_test`, `commit_record_metal_test`, `pso_archive_test` and
   `shared_event_listener_test` pass. `chunk_submission_test` and `mtl4fx_test` run their Metal 3 half and
   skip, while `mtl4_bridge_test`, `mtl4_queue_test`, `mtl4_specialize_test` and `paired_replay_test` skip
   outright (no Metal 4).
@@ -1473,6 +1473,22 @@ for the public and the private flavour, and checks that the object stays alive w
 mark themselves dead at zero without freeing, so the order before the port of athei/dxmt `dd7c5aa`
 (release, then reference) shows as a reference taken on a dead object. `tests/gw2/shim/unknwn.h`
 stands in for the names `com_pointer.hpp` takes from `<unknwn.h>`.
+
+`autorelease_count_test.m` (#252) counts what the bridge's creation calls autorelease on a thread
+without an autorelease pool, as GW2's render thread is. It links the real bridge like
+`paired_replay_test` and makes each call through its thunk on a plain pthread, with
+`OBJC_DEBUG_MISSING_POOLS=YES`: the runtime then writes a `MISSING POOLS` line for each object
+autoreleased with no pool, and the test counts that thread's lines around each call. On arm64 the
+runtime parks an autoreleased object in a thread-local slot until the thread's next autorelease, so
+each window ends with a sentinel's autorelease that pushes it out. The calls are
+those the front end makes when the game creates a resource or a state object: `newBuffer` (shared,
+private, CPU-placed), `newTexture`, `MTLBuffer newTexture`, `newTextureView`, `newSharedTexture`,
+`newSamplerState`, `newDepthStencilState`, and the residency set's `addAllocations` that follows a
+creation. Each runs once cold and then 100 times, and its release is counted apart. It prints a
+`RESULT <arch> <call>: first n, then n in 100; release n in 101` line per call, with the classes the
+runtime named, for x86_64 and arm64. A nonzero count doesn't fail it. Two controls must each count one
+(an object autoreleased on the fresh thread, and one after a pool was pushed and popped there), or the
+test fails.
 
 `clock_bench.cpp` (#28) is not a native test: it is a Windows .exe that measures the clocks PE code
 can read (ns per call, step size, backward steps), and `tests/gw2/clock_bench.zsh <engine> <scratch dir>`
