@@ -89,7 +89,7 @@ gw2Walk(std::vector<T *> &list, gw2::RenameQueues &queues, uint64_t trim_age) {
       for (size_t j = i; j < std::min(list.size(), i + kBatch); j++)
         list[j]->gw2Walk(queues, trim_age, swept);
     }
-    swept.clear(); // gw2 (#265): the swept allocations go here, with no lock held
+    swept.clear(); // gw2 (#265): the swept allocations go here, without the list's or a resource's lock
   }
 }
 

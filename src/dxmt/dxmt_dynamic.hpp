@@ -78,7 +78,7 @@ public:
 
   // gw2 (#251): adds this buffer's queued allocations to MAP's queued (gw2::renameQueues). gw2 (#265):
   // first, with trim_age (DXMT_RENAME_TRIM) nonzero, moves the ones its clock has passed by more than
-  // trim_age from the queue's front to `swept`, for the caller to release with no lock held.
+  // trim_age from the queue's front to `swept`, for the caller to release without the list's lock or mutex_.
   void gw2Walk(gw2::RenameQueues &queues, uint64_t trim_age, std::vector<Rc<BufferAllocation>> &swept);
   size_t gw2_list_index_ = 0; // gw2 (#251): its slot in the list (dxmt_dynamic.cpp)
 
