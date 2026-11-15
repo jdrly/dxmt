@@ -180,7 +180,9 @@ public:
       });
     } else {
       uint32_t gw2_result = 0; // gw2 (#25)
-      dynamic->updateImmediateName(current_seq_id, dynamic->allocate(coherent_seq_id, &gw2_result), 0, false);
+      dynamic->updateImmediateName(
+          current_seq_id, dynamic->allocate(coherent_seq_id, cmd_queue.gw2_rename_clock, &gw2_result), 0, false
+      );
       CountRename(gw2_result);
       EmitST([allocation = dynamic->immediateName(),
               buffer = Rc(dynamic->buffer)](ArgumentEncodingContext &enc) mutable {
@@ -201,7 +203,7 @@ public:
         allocation->useSuballocation(next_sub);
       });
     } else {
-      CountRename(dynamic.renameImmediate(cmd_queue.CurrentSeqId(), cmd_queue.CoherentSeqId()));
+      CountRename(dynamic.renameImmediate(cmd_queue.CurrentSeqId(), cmd_queue.CoherentSeqId(), cmd_queue.gw2_rename_clock));
       EmitST([allocation = dynamic.immediateName(),
               buffer = Rc(dynamic.buffer)](ArgumentEncodingContext &enc) mutable {
         allocation->useSuballocation(0);
@@ -410,7 +412,7 @@ public:
           stage.SRVs.set_dirty();
         }
 
-        dynamic->updateImmediateName(current_seq_id, dynamic->allocate(coherent_seq_id), false);
+        dynamic->updateImmediateName(current_seq_id, dynamic->allocate(coherent_seq_id, cmd_queue.gw2_rename_clock), false);
         EmitST([allocation = dynamic->immediateName(),
               texture = Rc(dynamic->texture)](ArgumentEncodingContext &enc) mutable {
           auto _ = texture->rename(forward_rc(allocation));

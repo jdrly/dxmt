@@ -2,10 +2,12 @@
 #include "dxmt_buffer.hpp"
 #include "dxmt_texture.hpp"
 #include <deque>
+#include <vector>
 
 namespace dxmt {
 namespace gw2 {
 struct RenameQueues;
+struct RenameClock;
 }
 
 class DynamicBuffer {
@@ -14,7 +16,8 @@ public:
   void decRef();
 
   // gw2 (#25): gw2_result, if given, gets RenameResult bits (RenameCreated, RenameDropped)
-  Rc<BufferAllocation> allocate(uint64_t coherent_seq_id, uint32_t *gw2_result = nullptr);
+  // gw2 (#265): clock, the mapping queue's (CommandQueue::gw2_rename_clock), whose ids the queue holds
+  Rc<BufferAllocation> allocate(uint64_t coherent_seq_id, gw2::RenameClock *clock, uint32_t *gw2_result = nullptr);
   void updateImmediateName(uint64_t current_seq_id, Rc<BufferAllocation> &&allocation, uint32_t suballocation, bool owned_by_command_list);
   void recycle(uint64_t current_seq_id, Rc<BufferAllocation> &&allocation);
 
@@ -37,7 +40,7 @@ public:
   // updateImmediateName() under one lock. With growth on, a name that is used up within the chunk
   // (seq id) it was taken in doubles the page for the next ones, up to kMaxGrowPage; allocate() then
   // drops free allocations of a smaller page. Returns RenameResult bits.
-  uint32_t renameImmediate(uint64_t current_seq_id, uint64_t coherent_seq_id);
+  uint32_t renameImmediate(uint64_t current_seq_id, uint64_t coherent_seq_id, gw2::RenameClock *clock);
   // gw2 (#25): turns page growth on (before the buffer is used)
   void
   enableGrowth(uint32_t length) {
@@ -73,9 +76,11 @@ public:
     uint64_t will_free_at;
   };
 
-  // gw2 (#251): adds this buffer's queued allocations to MAP's queued (gw2::renameQueues)
-  void gw2AddQueued(gw2::RenameQueues &queues);
-  size_t gw2_list_index_ = 0; // gw2 (#251): its slot in the stats list (dxmt_dynamic.cpp)
+  // gw2 (#251): adds this buffer's queued allocations to MAP's queued (gw2::renameQueues). gw2 (#265):
+  // first, with trim_age (DXMT_RENAME_TRIM) nonzero, moves the ones its clock has passed by more than
+  // trim_age from the queue's front to `swept`, for the caller to release with no lock held.
+  void gw2Walk(gw2::RenameQueues &queues, uint64_t trim_age, std::vector<Rc<BufferAllocation>> &swept);
+  size_t gw2_list_index_ = 0; // gw2 (#251): its slot in the list (dxmt_dynamic.cpp)
 
   /**
    * readonly
@@ -96,6 +101,7 @@ private:
   uint32_t grow_length_ = 0;            // the buffer's length; 0: growth off
   uint32_t page_ = DXMT_PAGE_SIZE;      // the page new allocations get
   uint64_t name_seq_id_ = ~0ull;        // the chunk renameImmediate took the name in
+  gw2::RenameClock *gw2_clock_ = nullptr; // gw2 (#265): the last mapping queue's (allocate, renameImmediate)
 };
 
 class DynamicLinearTexture {
@@ -103,7 +109,8 @@ public:
   void incRef();
   void decRef();
 
-  Rc<TextureAllocation> allocate(uint64_t coherent_seq_id);
+  // gw2 (#265): clock as DynamicBuffer::allocate's
+  Rc<TextureAllocation> allocate(uint64_t coherent_seq_id, gw2::RenameClock *clock);
   void updateImmediateName(uint64_t current_seq_id, Rc<TextureAllocation> &&allocation, bool owned_by_command_list);
   void recycle(uint64_t current_seq_id, Rc<TextureAllocation> &&allocation);
 
@@ -125,9 +132,9 @@ public:
     uint64_t will_free_at;
   };
 
-  // gw2 (#251): adds this texture's queued allocations to MAP's queued (gw2::renameQueues)
-  void gw2AddQueued(gw2::RenameQueues &queues);
-  size_t gw2_list_index_ = 0; // gw2 (#251): its slot in the stats list (dxmt_dynamic.cpp)
+  // gw2 (#251, #265): as DynamicBuffer::gw2Walk
+  void gw2Walk(gw2::RenameQueues &queues, uint64_t trim_age, std::vector<Rc<TextureAllocation>> &swept);
+  size_t gw2_list_index_ = 0; // gw2 (#251): its slot in the list (dxmt_dynamic.cpp)
   /**
    * readonly
    */
@@ -140,7 +147,8 @@ private:
   dxmt::mutex mutex_;
   Rc<TextureAllocation> name_;
   bool owned_by_command_list_ = false;
-  uint64_t gw2_image_bytes_ = 0; // gw2 (#251): an allocation's bytes, read at creation with DXMT_STATS on
+  uint64_t gw2_image_bytes_ = 0; // gw2 (#251): an allocation's bytes, read at creation when listed
+  gw2::RenameClock *gw2_clock_ = nullptr; // gw2 (#265): the last mapping queue's (allocate)
 };
 
 } // namespace dxmt

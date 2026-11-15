@@ -29,6 +29,7 @@
 #include "dxmt_gw2_commit_record.hpp"
 #include "dxmt_gw2_emit_window.hpp"
 #include "dxmt_gw2_lifetime.hpp"
+#include "dxmt_gw2_map.hpp"
 #include "dxmt_gw2_mtl4_queue.hpp"
 #include "dxmt_gw2_retirement.hpp"
 #include "dxmt_gw2_submission.hpp"
@@ -370,6 +371,9 @@ public:
   // gw2::CommitWhyScope by the commit's caller (the immediate context, the swapchain); same thread
   // rules as CommitCurrentChunk.
   gw2::CommitWhy gw2_commit_why = gw2::CommitWhy::None;
+  // gw2 (#265): this queue's coherent id for DXMT_RENAME_TRIM's sweep (the finish thread stores it);
+  // never freed, see gw2::RenameClock
+  gw2::RenameClock *const gw2_rename_clock = new gw2::RenameClock();
   ResourceInitializer initializer;
   CounterPool counter_pool;
 

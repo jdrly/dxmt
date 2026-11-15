@@ -13,4 +13,7 @@ getEnvVar([[maybe_unused]] const char *name) {
   return "";
 #endif
 }
+// gw2 (#265): the rename queues' thread names itself; here, nothing
+inline void
+setThreadName(const std::string &) {}
 } // namespace dxmt::env

@@ -1,31 +1,47 @@
 #include "dxmt_dynamic.hpp"
 #include "dxmt_gw2_map.hpp"
 #include "dxmt_gw2_stats.hpp"
+#include "dxmt_gw2_switches.hpp"
 #include "dxmt_texture.hpp"
+#include "log/log.hpp"
 #include "thread.hpp"
 #include "util_env.hpp"
 #include <algorithm>
 #include <mutex>
 #include <vector>
+#include <windows.h>
 
 namespace dxmt {
 
 namespace {
-// gw2 (#251): every live dynamic buffer and dynamic linear texture, for MAP's queued. Listed at
-// creation and unlisted at destruction (swapped with the last one), only with DXMT_STATS on; nothing
-// on the Map path touches it. The first listing starts a thread that walks the lists with 2 s between
-// walks, off the presenting thread, kBatch resources per hold of the mutex (what a create or destroy
-// can wait for). Lock order: this mutex, then a resource's mutex_. A destructor takes it without its
-// own mutex_, so a resource the walk reaches isn't destroyed under it. A resource that dies between
-// batches can move one not yet walked to a walked slot: that walk misses it. Never destroyed
-// (resources can die while static objects are destroyed at exit).
+// gw2 (#265): DXMT_RENAME_TRIM=<age>, in sequence ids (0 or unset: off)
+sw::Switch<uint32_t> kRenameTrim{"DXMT_RENAME_TRIM", 0, sw::legacy::strtoul32};
+
+using gw2::renameTrimAge;
+
+// gw2 (#251, #265): whether resources are listed (DXMT_STATS for MAP's queued, DXMT_RENAME_TRIM for the sweep)
+bool
+gw2Listing() {
+  static const bool on = gw2::statsEnabled() || renameTrimAge();
+  return on;
+}
+
+// gw2 (#251): every live dynamic buffer and dynamic linear texture, for MAP's queued and (#265) the
+// sweep. Listed at creation and unlisted at destruction (swapped with the last one), only when
+// gw2Listing(); nothing on the Map path touches it. The first listing starts a thread that walks the
+// lists with 2 s between walks, off the game's threads, kBatch resources per hold of the mutex (what
+// a create or destroy can wait for). Lock order: this mutex, then a resource's mutex_. A destructor
+// takes it without its own mutex_, so a resource the walk reaches isn't destroyed under it. A
+// resource that dies between batches can move one not yet walked to a walked slot: that walk misses
+// it. Never destroyed (resources can die while static objects are destroyed at exit).
 struct Gw2Listed {
   std::mutex mutex;
   std::vector<DynamicBuffer *> buffers;
   std::vector<DynamicLinearTexture *> textures;
   bool started = false;
+  std::mutex walk_mutex; // gw2 (#265): one walk and its publishing at a time
   std::mutex result_mutex;
-  gw2::RenameQueues result; // the last walk's
+  gw2::RenameQueues result; // the last walk's, with the sweeps' totals since renameQueues() took them
 };
 constexpr size_t kBatch = 256;
 
@@ -35,32 +51,54 @@ gw2Listed() {
   return *listed;
 }
 
+// gw2 (#265): the sweep of one queue, then the count of what stays. From the front, every allocation
+// whose will_free_at is at most the clock's coherent id and more than trim_age ids behind it goes to
+// `swept`; the first one that isn't stops it. The caller holds the resource's mutex_.
+template <typename Fifo, typename Allocation, typename Bytes>
+void
+gw2SweepAndCount(
+    Fifo &fifo, gw2::RenameClock *clock, uint64_t trim_age, std::vector<Allocation> &swept,
+    gw2::RenameQueues &queues, Bytes bytes
+) {
+  if (trim_age && clock) {
+    uint64_t coherent = clock->coherent.load(std::memory_order_acquire);
+    while (!fifo.empty() && fifo.front().will_free_at <= coherent &&
+           coherent - fifo.front().will_free_at > trim_age) {
+      queues.swept++;
+      queues.swept_bytes += bytes(fifo.front());
+      swept.push_back(std::move(fifo.front().allocation));
+      fifo.pop_front();
+    }
+  }
+  for (auto &entry : fifo) {
+    queues.pages++;
+    queues.bytes += bytes(entry);
+    queues.oldest = std::min(queues.oldest, entry.will_free_at);
+  }
+}
+
 template <typename T>
 void
-gw2Walk(std::vector<T *> &list, gw2::RenameQueues &queues) {
+gw2Walk(std::vector<T *> &list, gw2::RenameQueues &queues, uint64_t trim_age) {
+  std::vector<decltype(T::QueueEntry::allocation)> swept;
   for (size_t i = 0;; i += kBatch) {
-    std::lock_guard lock(gw2Listed().mutex);
-    if (i >= list.size())
-      return;
-    for (size_t j = i; j < std::min(list.size(), i + kBatch); j++)
-      list[j]->gw2AddQueued(queues);
+    {
+      std::lock_guard lock(gw2Listed().mutex);
+      if (i >= list.size())
+        return;
+      for (size_t j = i; j < std::min(list.size(), i + kBatch); j++)
+        list[j]->gw2Walk(queues, trim_age, swept);
+    }
+    swept.clear(); // gw2 (#265): the swept allocations go here, with no lock held
   }
 }
 
 void
 gw2WalkThread() {
   env::setThreadName("dxmt-rename-queues");
-  auto &listed = gw2Listed();
   for (;;) {
     Sleep(2000);
-    gw2::RenameQueues queues;
-    gw2Walk(listed.buffers, queues);
-    gw2Walk(listed.textures, queues);
-    // read after the walk: every queued will_free_at is at most this id
-    uint64_t seq = gw2::mapSeqId();
-    queues.age = queues.pages && seq > queues.oldest ? seq - queues.oldest : 0;
-    std::lock_guard lock(listed.result_mutex);
-    listed.result = queues;
+    gw2::walkRenameQueues();
   }
 }
 
@@ -73,6 +111,12 @@ gw2List(std::vector<T *> &list, T *resource) {
   list.push_back(resource);
   if (!listed.started) {
     listed.started = true;
+    if (renameTrimAge())
+      Logger::info(str::format(
+          "Rename trim: on (DXMT_RENAME_TRIM=", renameTrimAge(),
+          "): every 2 s, dxmt-rename-queues gives back the queued rename allocations their queue's GPU "
+          "completion passed more than ", renameTrimAge(), " sequence ids ago"
+      ));
     dxmt::thread([] { gw2WalkThread(); }).detach();
   }
 }
@@ -88,34 +132,57 @@ gw2Unlist(std::vector<T *> &list, T *resource) {
 }
 } // namespace
 
+uint32_t
+gw2::renameTrimAge() {
+  static const uint32_t age = kRenameTrim();
+  return age;
+}
+
+void
+gw2::walkRenameQueues() {
+  auto &listed = gw2Listed();
+  std::lock_guard walk(listed.walk_mutex);
+  gw2::RenameQueues queues;
+  gw2Walk(listed.buffers, queues, renameTrimAge());
+  gw2Walk(listed.textures, queues, renameTrimAge());
+  // read after the walk: every queued will_free_at is at most this id
+  uint64_t seq = gw2::mapSeqId();
+  queues.age = queues.pages && seq > queues.oldest ? seq - queues.oldest : 0;
+  std::lock_guard lock(listed.result_mutex);
+  queues.swept += listed.result.swept;
+  queues.swept_bytes += listed.result.swept_bytes;
+  listed.result = queues;
+}
+
 gw2::RenameQueues
 gw2::renameQueues() {
   auto &listed = gw2Listed();
   std::lock_guard lock(listed.result_mutex);
-  return listed.result;
+  gw2::RenameQueues ret = listed.result;
+  listed.result.swept = 0;
+  listed.result.swept_bytes = 0;
+  return ret;
 }
 
 DynamicBuffer::DynamicBuffer(Buffer *buffer, Flags<BufferAllocationFlag> flags) :
     buffer(buffer),
     flags_(flags),
     name_(buffer->current()) {
-  if (gw2::statsEnabled())
+  if (gw2Listing())
     gw2List(gw2Listed().buffers, this);
 }
 
 DynamicBuffer::~DynamicBuffer() {
-  if (gw2::statsEnabled())
+  if (gw2Listing())
     gw2Unlist(gw2Listed().buffers, this);
 }
 
 void
-DynamicBuffer::gw2AddQueued(gw2::RenameQueues &queues) {
+DynamicBuffer::gw2Walk(gw2::RenameQueues &queues, uint64_t trim_age, std::vector<Rc<BufferAllocation>> &swept) {
   std::lock_guard<dxmt::mutex> lock(mutex_);
-  for (auto &entry : fifo) {
-    queues.pages++;
-    queues.bytes += entry.allocation->pageLength();
-    queues.oldest = std::min(queues.oldest, entry.will_free_at);
-  }
+  gw2SweepAndCount(fifo, gw2_clock_, trim_age, swept, queues, [](QueueEntry &entry) {
+    return entry.allocation->pageLength();
+  });
 }
 
 void
@@ -130,8 +197,9 @@ DynamicBuffer::decRef() {
 };
 
 Rc<BufferAllocation>
-DynamicBuffer::allocate(uint64_t coherent_seq_id, uint32_t *gw2_result) {
+DynamicBuffer::allocate(uint64_t coherent_seq_id, gw2::RenameClock *clock, uint32_t *gw2_result) {
   std::lock_guard<dxmt::mutex> lock(mutex_);
+  gw2_clock_ = clock;
   uint32_t result = 0;
   auto ret = takeFree(coherent_seq_id, result);
   if (gw2_result)
@@ -157,8 +225,9 @@ DynamicBuffer::takeFree(uint64_t coherent_seq_id, uint32_t &result) {
 }
 
 uint32_t
-DynamicBuffer::renameImmediate(uint64_t current_seq_id, uint64_t coherent_seq_id) {
+DynamicBuffer::renameImmediate(uint64_t current_seq_id, uint64_t coherent_seq_id, gw2::RenameClock *clock) {
   std::lock_guard<dxmt::mutex> lock(mutex_);
+  gw2_clock_ = clock;
   uint32_t result = 0;
   if (grow_length_ && name_seq_id_ == current_seq_id) {
     // the next page holds at least two (16-aligned, at least 256-byte) suballocations
@@ -208,25 +277,24 @@ DynamicLinearTexture::DynamicLinearTexture(Texture *texture, Flags<TextureAlloca
     texture(texture),
     flags_(flags),
     name_(texture->current()) {
-  if (gw2::statsEnabled()) {
+  if (gw2Listing()) {
     gw2_image_bytes_ = texture->gw2BytesPerImage();
     gw2List(gw2Listed().textures, this);
   }
 }
 
 DynamicLinearTexture::~DynamicLinearTexture() {
-  if (gw2::statsEnabled())
+  if (gw2Listing())
     gw2Unlist(gw2Listed().textures, this);
 }
 
 void
-DynamicLinearTexture::gw2AddQueued(gw2::RenameQueues &queues) {
+DynamicLinearTexture::gw2Walk(
+    gw2::RenameQueues &queues, uint64_t trim_age, std::vector<Rc<TextureAllocation>> &swept
+) {
   std::lock_guard<dxmt::mutex> lock(mutex_);
-  for (auto &entry : fifo) { // every allocation of a linear texture is one image
-    queues.pages++;
-    queues.bytes += gw2_image_bytes_;
-    queues.oldest = std::min(queues.oldest, entry.will_free_at);
-  }
+  // every allocation of a linear texture is one image
+  gw2SweepAndCount(fifo, gw2_clock_, trim_age, swept, queues, [this](QueueEntry &) { return gw2_image_bytes_; });
 }
 
 void
@@ -241,8 +309,9 @@ DynamicLinearTexture::decRef() {
 };
 
 Rc<TextureAllocation>
-DynamicLinearTexture::allocate(uint64_t coherent_seq_id) {
+DynamicLinearTexture::allocate(uint64_t coherent_seq_id, gw2::RenameClock *clock) {
   std::lock_guard<dxmt::mutex> lock(mutex_);
+  gw2_clock_ = clock;
   Rc<TextureAllocation> ret;
   for (;;) {
     if (fifo.empty()) {
