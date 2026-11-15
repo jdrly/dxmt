@@ -91,6 +91,9 @@ mapSection(double, uint32_t frames) {
   // gw2 (#251): what the rename queues held at the last walk, and how old their oldest page was
   RenameQueues queued = renameQueues();
   out += std::format(" queued={} queued.mb={:.1f} queued.age={}", queued.pages, queued.bytes / 1e6, queued.age);
+  // gw2 (#265): what DXMT_RENAME_TRIM's sweeps released in the window; switched off, the line is as before
+  if (renameTrimAge())
+    out += std::format(" swept={} swept.mb={:.1f}", queued.swept, queued.swept_bytes / 1e6);
   // per frame: calls/ms of every bucket that had a call, in kind then op order
   for (unsigned k = 0; k < kMapKindCount; k++) {
     for (unsigned o = 0; o < kMapOpCount; o++) {

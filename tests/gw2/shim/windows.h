@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <thread>
 
 typedef unsigned long DWORD;
 typedef void *PVOID;
@@ -97,6 +98,11 @@ QueryPerformanceCounter(LARGE_INTEGER *c) {
                     .count() /
                 100;
   return 1;
+}
+// gw2 (#265): the rename queues' thread sleeps between walks
+inline void
+Sleep(DWORD ms) {
+  std::this_thread::sleep_for(std::chrono::milliseconds(ms));
 }
 inline char *
 GetEnvironmentStringsA() {
