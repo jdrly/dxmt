@@ -42,6 +42,7 @@ counter g_enc[kEncCount];
 counter g_refuse[kRefuseCount];
 counter g_load[kAspectCount], g_store[kAspectCount];
 counter g_chunks, g_chunk_encoders;
+counter g_d24_bias, g_d24_slope; // gw2 (#266): from the immediate context (FrontCounters)
 std::atomic<uint32_t> g_chunk_encoders_max{0};
 
 inline void
@@ -134,6 +135,7 @@ encodeSection(double, uint32_t frames) {
   out += " refuse=";
   for (unsigned i = (unsigned)Refuse::Target; i < kRefuseCount; i++)
     out += std::format("{}{}:{:.1f}", i == (unsigned)Refuse::Target ? "" : ",", kRefuseNames[i], take(g_refuse[i]) / f);
+  out += std::format(" d24bias={:.1f} d24slope={:.1f}", take(g_d24_bias) / f, take(g_d24_slope) / f);
   return out;
 }
 
@@ -158,6 +160,18 @@ promoteFlushMs() {
   return g_promote_ms.load(std::memory_order_relaxed);
 }
 
+std::string
+rasterLine(int32_t depth_bias, float slope_scaled_depth_bias, float depth_bias_clamp, uint32_t fill, uint32_t cull) {
+  if (depthBiasOf(depth_bias, slope_scaled_depth_bias) == DepthBias::None)
+    return {};
+  const char *fill_name = fill == 2 ? "wireframe" : fill == 3 ? "solid" : "invalid";
+  const char *cull_name = cull == 1 ? "none" : cull == 2 ? "front" : cull == 3 ? "back" : "invalid";
+  return std::format(
+      "RASTER bias={} slope={} clamp={} fill={} cull={}", depth_bias, slope_scaled_depth_bias, depth_bias_clamp,
+      fill_name, cull_name
+  );
+}
+
 void
 getDataPoll(GetDataKind kind, bool flushed) {
   (flushed ? g_getflush : g_getskip)[(unsigned)kind].fetch_add(1, std::memory_order_relaxed);
@@ -173,6 +187,8 @@ FrontCounters::publish() {
     add(g_pass_close[i], pass_close[i]);
   for (unsigned i = 0; i < kPromoteCount; i++)
     add(g_promote[i], promote[i]);
+  add(g_d24_bias, d24_bias);
+  add(g_d24_slope, d24_slope);
   *this = {};
 }
 

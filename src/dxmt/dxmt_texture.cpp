@@ -45,7 +45,8 @@ sw::Switch<bool> kViewKeyArrayBit{"DXMT_VIEW_KEY_ARRAY_BIT", true, sw::legacy::n
 
 // gw2 (#2): a DEPTHVIEW line once per distinct view of a depth/stencil texture (and for any view that
 // came back nil), so the log shows which views GW2's depth buffer gets and whether the texture has
-// PixelFormatView. At most kDepthViewTuples tuples are kept, then one line says the rest are suppressed.
+// PixelFormatView, and since #266 whether it is an emulated D24 texture. At most kDepthViewTuples tuples
+// are kept, then one line says the rest are suppressed.
 constexpr size_t kDepthViewTuples = 64;
 
 const char *
@@ -71,11 +72,12 @@ logDepthView(const Texture *base, const TextureViewDescriptor &descriptor, bool 
   if (!nil && !aspect && !DepthStencilPlanarFlags(base_format))
     return;
 
-  using Tuple = std::tuple<uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, bool>;
+  using Tuple = std::tuple<uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, bool, bool>;
   static std::mutex mutex;
   static std::set<Tuple> seen;
   static bool suppressed = false;
-  Tuple tuple{base_format, view_format, (uint32_t)descriptor.type, base->width(), base->height(), base->usage(), nil};
+  Tuple tuple{base_format, view_format, (uint32_t)descriptor.type, base->width(), base->height(), base->usage(),
+              nil, base->gw2EmulatedD24};
   {
     std::lock_guard lock(mutex);
     if (seen.count(tuple))
@@ -98,7 +100,7 @@ logDepthView(const Texture *base, const TextureViewDescriptor &descriptor, bool 
       "DEPTHVIEW base=", base_format, " view=", (WMTPixelFormat)ORIGINAL_FORMAT(view_format), " swizzle=", swizzle,
       " type=", (uint32_t)descriptor.type, " size=", base->width(), "x", base->height(), " usage=", (uint32_t)usage,
       " pfv=", (usage & WMTTextureUsagePixelFormatView) ? 1 : 0, " aspect=", depthViewAspect(aspect),
-      " nil=", nil ? 1 : 0
+      " nil=", nil ? 1 : 0, " d24=", base->gw2EmulatedD24 ? 1 : 0
   );
   if (nil)
     Logger::warn(line);
