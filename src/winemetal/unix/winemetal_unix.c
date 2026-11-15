@@ -44,9 +44,35 @@ _NSObject_retain(NSObject **obj) {
   return STATUS_SUCCESS;
 }
 
+/* gw2 (#269): DXMT_RELEASE_POOL, on unless exactly "0"; read once per process */
+static bool
+release_pool_enabled(void) {
+  static _Atomic int state; /* 0: not read yet, 1: on, 2: off */
+  int s = atomic_load_explicit(&state, memory_order_relaxed);
+  if (!s) {
+    const char *v = getenv("DXMT_RELEASE_POOL");
+    s = v && !strcmp(v, "0") ? 2 : 1;
+    atomic_store_explicit(&state, s, memory_order_relaxed);
+  }
+  return s == 1;
+}
+
+/* gw2 (#269): Apple's drivers autorelease their device when a buffer, texture or view is freed (the
+   M1's AGXG13GDevice, the runner's AppleParavirtDevice, every time). GW2's render thread, its other
+   threads and DXMT's finish and rename threads have no pool, so that would stay on the thread's pool
+   page until it exits. A release that frees its object (the last reference) drains a pool of its own;
+   one that only drops a reference (a draw's arguments buffer, an object still shared) pushes none.
+   Never around an NSAutoreleasePool: releasing one drains it, and the pools above it with it. */
 static NTSTATUS
 _NSObject_release(NSObject **obj) {
-  [*obj release];
+  NSObject *o = *obj;
+  if (release_pool_enabled() && ![o isKindOfClass:[NSAutoreleasePool class]] && [o retainCount] == 1) {
+    @autoreleasepool {
+      [o release];
+    }
+  } else {
+    [o release];
+  }
   return STATUS_SUCCESS;
 }
 

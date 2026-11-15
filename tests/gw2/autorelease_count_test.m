@@ -33,20 +33,29 @@
 // autoreleased after that must still be seen). Either control failing fails the test: the counts
 // below would mean nothing.
 //
+// gw2 (#269): then the release. A test object whose -dealloc autoreleases one object stands in for a
+// driver that autoreleases on release (the M1's AGXG13GDevice, the runner's AppleParavirtDevice):
+// released with a plain -release it must count one (a dealloc's autorelease is seen), released
+// through the bridge's NSObject_release it must count none. That second check doesn't depend on the
+// device or its class. Then a pool released through NSObject_release, as WMT::MakeAutoreleasePool's
+// Reference releases it, must drain its object and return: had the release pushed a pool of its own
+// around it, that pool's pop would come after the drain took it away, and the runtime aborts.
+//
 // Each call runs once cold, then 100 times; each object is released (and its cleanup done) outside
 // the counted window, and that release is counted on its own. One RESULT line per call and arch:
 //
 //   RESULT x86_64 newBuffer shared: first 0, then 0 in 100; release 0 in 101
 //
-// with the classes the runtime named, if any. The calls are those the D3D11 front end makes when the
+// with the classes the runtime named, if any. gw2 (#269): a release count other than 0 fails the
+// test (each release goes through the bridge's NSObject_release, which drains a pool of its own); the
+// creation counts only report. The calls are those the D3D11 front end makes when the
 // game creates a resource or state object (dxmt_buffer.cpp, dxmt_texture.cpp, dxmt_sampler.cpp,
 // d3d11_state_object.cpp), plus the residency set add that follows a buffer or texture creation
 // (dxmt_gw2_residency.cpp), skipped where the device gives no residency set. Pipelines and libraries
 // are created on DXMT's own threads, which drain a pool per task, so they aren't here. Neither are the
 // heap calls (no heap is created on GW2's path), nor queues, shared events, events, fences and
 // upscalers: they come with queues, contexts, upscalers, keyed-mutex textures and ID3D11Fence objects,
-// not with each buffer, texture or view. The test only reports: a nonzero count doesn't fail it.
-// Without a Metal device it exits 77.
+// not with each buffer, texture or view. Without a Metal device it exits 77.
 
 #import <Foundation/Foundation.h>
 #include <errno.h>
@@ -77,6 +86,16 @@ static int failures = 0;
 @interface AutoreleaseCountSentinel : NSObject
 @end
 @implementation AutoreleaseCountSentinel
+@end
+
+// gw2 (#269): autoreleases one object in its -dealloc, as the drivers above do on a resource's release
+@interface AutoreleaseOnDealloc : NSObject
+@end
+@implementation AutoreleaseOnDealloc
+- (void)dealloc {
+  [[[NSObject alloc] init] autorelease];
+  [super dealloc];
+}
 @end
 
 static off_t
@@ -301,6 +320,11 @@ measure(struct fixture *f, const char *name, create_fn fn) {
     printf("FAIL %s %s: %d of %d calls returned no object\n", kArch, name, null, kRepeat + 1);
     failures++;
   }
+  if (released) {
+    printf("FAIL %s %s: %d of %d releases left an object autoreleased with no pool\n", kArch, name, released,
+           kRepeat + 1);
+    failures++;
+  }
   printf("RESULT %s %s: first %d, then %d in %d; release %d in %d%s%s\n", kArch, name, first, then, kRepeat,
          released, kRepeat + 1, *classes ? "; classes: " : "", classes);
 }
@@ -326,6 +350,38 @@ worker(void *arg) {
     printf("FAIL %s: the runtime's MISSING POOLS lines don't count this thread's autoreleases\n", kArch);
     failures++;
     return NULL;
+  }
+
+  // gw2 (#269): a release whose dealloc autoreleases, plain and through the bridge
+  id obj = [[AutoreleaseOnDealloc alloc] init];
+  mark = captured();
+  [obj release];
+  int plain = count_since(mark, NULL, 0);
+  obj = [[AutoreleaseOnDealloc alloc] init];
+  mark = captured();
+  NSObject_release((obj_handle_t)obj);
+  int bridged = count_since(mark, NULL, 0);
+  printf("release %s: %d after a plain release (must be 1), %d after NSObject_release (must be 0)\n", kArch, plain,
+         bridged);
+  if (plain != 1) {
+    printf("FAIL %s: the runtime's MISSING POOLS lines don't count what a dealloc autoreleases\n", kArch);
+    failures++;
+    return NULL;
+  }
+  if (bridged) {
+    printf("FAIL %s: NSObject_release left what the dealloc autoreleased with no pool\n", kArch);
+    failures++;
+  }
+  // gw2 (#269): a pool from the bridge, released through it with an object in it
+  obj_handle_t outer = NSAutoreleasePool_alloc_init();
+  [[[NSObject alloc] init] autorelease];
+  mark = captured();
+  NSObject_release(outer);
+  int drained = count_since(mark, NULL, 0);
+  printf("release %s: %d after NSObject_release of a pool (must be 0)\n", kArch, drained);
+  if (drained) {
+    printf("FAIL %s: NSObject_release of a pool left its object with no pool\n", kArch);
+    failures++;
   }
 
   measure(f, "newBuffer shared", c_buffer_shared);

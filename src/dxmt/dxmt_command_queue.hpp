@@ -248,6 +248,7 @@ private:
   const bool unretained_;
   const uint32_t lifetime_id_;
   const bool retire_recovery_; // gw2 (#113): DXMT_RETIRE_RECOVERY
+  const bool release_pool_;    // gw2 (#269): DXMT_RELEASE_POOL
   const gw2::ThreadPriority thread_priority_; // gw2 (#151): DXMT_THREAD_PRIORITY (before the threads)
 
 public:
