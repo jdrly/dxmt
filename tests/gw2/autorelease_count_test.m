@@ -37,7 +37,9 @@
 // driver that autoreleases on release (the M1's AGXG13GDevice, the runner's AppleParavirtDevice):
 // released with a plain -release it must count one (a dealloc's autorelease is seen), released
 // through the bridge's NSObject_release it must count none. That second check doesn't depend on the
-// device or its class.
+// device or its class. Then a pool released through NSObject_release, as WMT::MakeAutoreleasePool's
+// Reference releases it, must drain its object and return: had the release pushed a pool of its own
+// around it, that pool's pop would come after the drain took it away, and the runtime aborts.
 //
 // Each call runs once cold, then 100 times; each object is released (and its cleanup done) outside
 // the counted window, and that release is counted on its own. One RESULT line per call and arch:
@@ -368,6 +370,17 @@ worker(void *arg) {
   }
   if (bridged) {
     printf("FAIL %s: NSObject_release left what the dealloc autoreleased with no pool\n", kArch);
+    failures++;
+  }
+  // gw2 (#269): a pool from the bridge, released through it with an object in it
+  obj_handle_t outer = NSAutoreleasePool_alloc_init();
+  [[[NSObject alloc] init] autorelease];
+  mark = captured();
+  NSObject_release(outer);
+  int drained = count_since(mark, NULL, 0);
+  printf("release %s: %d after NSObject_release of a pool (must be 0)\n", kArch, drained);
+  if (drained) {
+    printf("FAIL %s: NSObject_release of a pool left its object with no pool\n", kArch);
     failures++;
   }
 
