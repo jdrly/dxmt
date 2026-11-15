@@ -44,9 +44,15 @@ _NSObject_retain(NSObject **obj) {
   return STATUS_SUCCESS;
 }
 
+/* gw2 (#269): Apple's drivers autorelease their device when a buffer, texture or view is released
+   (the M1's AGXG13GDevice, the runner's AppleParavirtDevice, every time). GW2's render thread, its
+   other threads and DXMT's finish and rename threads have no pool, so that would stay on the thread's
+   pool page until it exits. Every release through the bridge drains its own. */
 static NTSTATUS
 _NSObject_release(NSObject **obj) {
-  [*obj release];
+  @autoreleasepool {
+    [*obj release];
+  }
   return STATUS_SUCCESS;
 }
 

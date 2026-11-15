@@ -1492,9 +1492,13 @@ private, CPU-placed), `newTexture`, `MTLBuffer newTexture`, `newTextureView`, `n
 `newSamplerState`, `newDepthStencilState`, and the residency set's `addAllocations` that follows a
 creation. Each runs once cold and then 100 times, and its release is counted apart. It prints a
 `RESULT <arch> <call>: first n, then n in 100; release n in 101` line per call, with the classes the
-runtime named, for x86_64 and arm64. A nonzero count doesn't fail it. Two controls must each count one
+runtime named, for x86_64 and arm64. A nonzero creation count doesn't fail it. Two controls must each count one
 (an object autoreleased on the fresh thread, and one after a pool was pushed and popped there), or the
-test fails.
+test fails. Since #269 a release count other than 0 fails it too: Apple's drivers autorelease their
+device on every release of a buffer, texture or view (the M1's `AGXG13GDevice`, the runner's
+`AppleParavirtDevice`), so the bridge's `NSObject_release` drains a pool of its own. A check that
+doesn't depend on the device comes first: an object whose `-dealloc` autoreleases one must count one
+after a plain `-release` and none after `NSObject_release`.
 
 `clock_bench.cpp` (#28) is not a native test: it is a Windows .exe that measures the clocks PE code
 can read (ns per call, step size, backward steps), and `tests/gw2/clock_bench.zsh <engine> <scratch dir>`
