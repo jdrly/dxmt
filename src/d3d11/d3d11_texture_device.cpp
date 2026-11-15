@@ -370,6 +370,7 @@ HRESULT CreateDeviceTextureInternal(MTLD3D11Device *pDevice,
 
   MTL_DXGI_FORMAT_DESC format_desc;
   MTLQueryDXGIFormat(pDevice->GetMTLDevice(), finalDesc.Format, format_desc);
+  texture->gw2EmulatedD24 = format_desc.Flag & MTL_DXGI_FORMAT_EMULATED_D24; // gw2 (#266)
 
   auto &initializer = pDevice->GetDXMTDevice().queue().initializer;
 

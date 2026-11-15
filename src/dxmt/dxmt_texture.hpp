@@ -254,6 +254,11 @@ public:
 
   Texture(unsigned bytes_per_image, unsigned bytes_per_row, const WMTTextureInfo &info, WMT::Device device);
 
+  // gw2 (#266): the D3D11 format carries MTL_DXGI_FORMAT_EMULATED_D24 (D24 depth stored as
+  // Depth32Float_Stencil8). Set once, right after the texture is made and before any view of it, for
+  // DEPTHVIEW's d24 and ENCODE's d24bias and d24slope; read without a lock.
+  bool gw2EmulatedD24 = false;
+
   // gw2 (#251): a linear texture's bytes per allocation (0 for a texture that isn't linear)
   unsigned
   gw2BytesPerImage() const {

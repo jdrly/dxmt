@@ -163,8 +163,9 @@ Sections: a feature registers a function with `gw2::SectionRegistrar` (`src/dxmt
 | `ThreadPriority: NAME utility, base priority OLD -> NEW (SetThreadPriority THREAD_PRIORITY_NORMAL: ok\|error E; thread_policy_set: ok\|error K)` | `DXMT_THREAD_PRIORITY=utility`, once per queue thread at its start, or `DXMT_COMPILE_PRIORITY=utility`, once per compile worker: the thread's Mach base priority after `THREAD_PRIORITY_NORMAL` and after the precedence call (`-1`: unreadable). `K` is the `kern_return_t`, or `-1` if the task's priority couldn't be read and nothing was set |
 | `DXMT_THREAD_PRIORITY=… is not critical, normal or utility; using critical` | Warning, once per queue, for any other value; `DXMT_COMPILE_PRIORITY=…` the same, once per device |
 | `DXMT_DEPTH_PFV=1: keeping PixelFormatView on typeless single-plane depth targets (first: format F bind B WxH)` | Once, the first time `DXMT_DEPTH_PFV` keeps the flag (the `PixelFormatView` line above then follows per format and bind flags) |
-| `DEPTHVIEW base=… view=… swizzle=… type=… size=… usage=… pfv=… aspect=… nil=…` | Once per distinct view of a depth/stencil texture, and for any view that came back nil (a warning then); at most 64, then `DEPTHVIEW: more than 64 distinct views, the rest are suppressed`. Replaces the old stencil-only `TextureView` warning. Fields below |
+| `DEPTHVIEW base=… view=… swizzle=… type=… size=… usage=… pfv=… aspect=… nil=… d24=…` | Once per distinct view of a depth/stencil texture, and for any view that came back nil (a warning then); at most 64, then `DEPTHVIEW: more than 64 distinct views, the rest are suppressed`. Replaces the old stencil-only `TextureView` warning. Fields below |
 | `DEPTHSRV format=… size=… pfv=… readonly=… stage=… slot=… view=… swizzled=… aspect=…` | Once per texture (with `DXMT_STATS` on) that is a render pass's depth-stencil attachment and is read by a shader of the same pass as a shader resource; at most 64, then `DEPTHSRV: more than 64 textures, the rest are suppressed`. Fields below |
+| `RASTER bias=… slope=… clamp=… fill=… cull=…` | (#266) Once per distinct rasterizer state created with a nonzero `DepthBias` or `SlopeScaledDepthBias`, with `DXMT_STATS` on: `DepthBias`, `SlopeScaledDepthBias`, `DepthBiasClamp`, the fill mode (`solid`, `wireframe`) and the cull mode (`none`, `front`, `back`). The device's state cache makes each distinct description once, so a state the game creates again isn't logged again; two states that differ only outside these five fields (scissor, winding, …) give two equal lines. Never for a state with both values 0 |
 | `PSO: blend hash on/off (DXMT_PSO_BLEND_HASH), MRU on, 4 entries/off (DXMT_PSO_MRU), topology keep on/off (DXMT_PSO_TOPOLOGY_KEEP), skip same state on/off (DXMT_SKIP_SAME_STATE), skip same srv on/off (DXMT_SKIP_SAME_SRV), skip empty slots on/off (DXMT_SKIP_EMPTY_SLOTS)` | Once per device: the effective pipeline lookup settings |
 | `Present pacing: mode=… rate=… refresh=… cap=… interval=… duration=… ms limiter=… ms deadline=…` | At the first Present and whenever one of its values changes. `mode`: `vsync` (display sync alone), `vsync+after` (display sync and a minimum duration of `duration`), `vsync+limiter` (display sync and the frame limiter at `limiter`, `DXMT_CAP_LIMITER`), `vsync (cap dropped)` (`DXMT_CAP_LIMITER=0` and a cap that isn't a whole number of refreshes), `after` and `plain` (display sync off: DXMT's own minimum duration, or none). `rate`: the frame rate the pacing aims for (`uncapped` without a limit). `refresh`: the display's rate, `(assumed)` when DXMT didn't get one and uses 60. `cap`: `d3d11.preferredMaxFrameRate` (0 = none). `interval`: the game's sync interval. `deadline`: what a present without a minimum duration asks `presentDrawable:atTime:` for (`DXMT_PRESENT_DEADLINE`: one refresh by default, `=8` → `8.0 ms`, `=12` → `12.0 ms`, `=0` → `off`); `- (minimum duration)` when the minimum-duration branch ignores it |
 | `Promote flush: a speculative commit (occlusion/timestamp query End) waits for N requests, at most M ms (a watchdog thread under the device lock, now always on) …` | Once per device, when `DXMT_PROMOTE_FLUSH_MIN` is on |
@@ -301,7 +302,7 @@ the depth buffer, which no longer has `PixelFormatView` (so Metal compresses it)
 
 `DEPTHVIEW` is written where DXMT makes a Metal texture view (`TextureView`, `src/dxmt/dxmt_texture.cpp`),
 which happens once per view and allocation, never per draw. A tuple is (base format, view format,
-texture type, size, usage, nil).
+texture type, size, usage, nil, d24).
 
 | Field | Meaning |
 |---|---|
@@ -313,6 +314,7 @@ texture type, size, usage, nil).
 | `usage`, `pfv` | The texture's `MTLTextureUsage` bits (1 read, 2 write, 4 render target, 16 pixel format view, 32 atomic), and whether `PixelFormatView` is among them (0: Metal may compress it losslessly) |
 | `aspect` | The planes the view covers: `depth`, `stencil`, `depth+stencil`, `none` (not a depth/stencil view) |
 | `nil` | 1 if `newTextureView` returned nil: the shader then reads nothing from that view |
+| `d24` | (#266) 1 if the texture was created with an emulated D24 format (`R24G8_TYPELESS` or `D24_UNORM_S8_UINT`, whose `MTL_DXGI_FORMAT_EMULATED_D24` flag the views' formats share), which DXMT stores as `Depth32Float_Stencil8` like a D32S8 one. Set when the texture is created (with `DXMT_STATS` on or off, as the line is); a shared texture imported from another process shows 0 |
 
 `DEPTHSRV` is checked where DXMT encodes a shader's resources into the argument buffer
 (`encodeShaderResources`, `src/dxmt/dxmt_context.cpp`): each new render pass marks every SRV dirty,
@@ -699,7 +701,7 @@ held commit is committed at the latest:
 ### ENCODE
 
 `ENCODE draws= dispatches= tile= pso= useres= blitcmds= enc=k:v,… perchunk=avg/max loadMB=… storeMB=…
-refuse=k:v,…` (jdrly/dxmt #4). What the encode thread encodes, per frame. The command counts are
+refuse=k:v,… d24bias= d24slope=` (jdrly/dxmt #4, #266). What the encode thread encodes, per frame. The command counts are
 plain increments decided at compile time; the encode thread hands its totals over once per chunk.
 With `DXMT_STATS=0` nothing is counted.
 
@@ -714,6 +716,7 @@ With `DXMT_STATS=0` nothing is counted.
 | `perchunk` | Encoders per chunk: average, and the most in one chunk |
 | `loadMB`, `storeMB` | Attachment bytes per frame (MB = 10⁶) loaded (`Load` action) and stored (`Store`, plus resolved targets), by aspect `color`/`depth`/`stencil`: render area × layers × texel size × samples. Uncompressed, an upper bound (lossless compression moves less); clear and resolve passes included, the present pass not |
 | `refuse` | Why the encoder optimizer (`checkEncoderRelation`) didn't merge, per frame. Per render → render pair it tried: `target` (different targets, planes, read-only flags, array length: the usual case), `argbuf` (argument buffers in different blocks), `load` (the later pass clears or doesn't load), `store` (the earlier pass doesn't store), `vfence` (the later pass's vertex stage waits for the earlier one's fragments). For any pair: `dep` (a data dependency ends the search) and `sync` (an event or timestamp encoder ends it) |
+| `d24bias`, `d24slope` | (#266) Per frame, the game's triangle draws into an emulated D24 depth target (`DEPTHVIEW`'s `d24=1`) with a rasterizer state that has a nonzero `DepthBias` (`d24bias`, whatever its slope), or only a `SlopeScaledDepthBias` (`d24slope`). DXMT hands the bias to Metal unchanged, and Metal scales the constant bias of such a target, stored as `Depth32Float_Stencil8`, by the primitive's depth exponent instead of D3D's 1/(2²⁴−1): athei's `7429bb9` puts it at 0.25, 0.5 and 2 times D3D's at depths 0.125, 0.25 and 1.0. These two fields say whether GW2 reaches that case at all. Counted by the immediate context, not the encode thread: when it applies the rasterizer state (at each new render pass and each `RSSetState`) it notes whether the pass's draws get such a bias, and each draw then costs one branch on that note. Triangles are judged by the topology the game set (triangle lists and strips, with or without adjacency, and patch lists), not by a geometry or domain shader's output. Internal draws (clears, emulation) and deferred contexts' draws aren't counted |
 
 ### TIMESTAMP
 
