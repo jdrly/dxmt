@@ -18,20 +18,12 @@
 
 #include "dxmt_allocation.hpp"
 #include "dxmt_gw2_lifetime.hpp"
-#include "dxmt_gw2_switches.hpp"
 #include "util_likely.hpp"
 #include <cassert>
 #include <iterator>
 #include <new>
 
 namespace dxmt {
-
-namespace {
-// gw2 (#269): DXMT_RELEASE_POOL, read by the bridge's unix side (_NSObject_release) from the process
-// environment, as DXMT_CACHE_DIR is; declared here, where allocations are freed, so the startup line
-// shows it. Nothing on the PE side reads it.
-sw::Switch<bool> kReleasePool{"DXMT_RELEASE_POOL", true, sw::legacy::notZero};
-} // namespace
 
 void
 Allocation::incRef() {
