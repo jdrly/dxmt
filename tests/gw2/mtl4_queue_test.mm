@@ -32,8 +32,9 @@
 //   allocator before the slot is used again;
 // - a queue-level waitForEvent holds the next commit until the CPU signals the event;
 // - gw2 (#153): retire() leaves the slot's set empty; a chunk whose set stays empty (a command buffer
-//   that names nothing) completes without an error and leaves it empty, both on the default path
-//   (the set committed and used anyway) and with DXMT_MTL4_DEVICE_RESIDENCY=1 (committed without it);
+//   that names nothing) completes without an error and leaves it empty, both with
+//   DXMT_MTL4_DEVICE_RESIDENCY=0 (the set committed and used anyway) and with it on (committed without
+//   it);
 // - waitIdle() and the destructor with nothing pending;
 // - gw2 (#204): 100 chunks through a ring of 32 with at most 3 in flight (the finish thread retires a
 //   chunk only once the next two are committed, so 3 are in flight from chunk 3 on), with
@@ -82,7 +83,7 @@ statsEnabled() {
 // the device set (#29) isn't in this test: the queue's own per-slot sets are
 void
 residencyBeforeCommit() {}
-// gw2 (#153): DXMT_MTL4_DEVICE_RESIDENCY, unset (the default path) except where main sets it
+// gw2 (#153): DXMT_MTL4_DEVICE_RESIDENCY=0's path except where main sets it
 static bool g_device_residency = false;
 bool
 mtl4DeviceResidencyRequested() {
@@ -296,8 +297,8 @@ main() {
         committed.store(seq, std::memory_order_release);
       }
       finish.join();
-      // gw2 (#153): a chunk whose packets named nothing for its set, on the default path (the set
-      // committed and used anyway) and with DXMT_MTL4_DEVICE_RESIDENCY=1 (committed without it)
+      // gw2 (#153): a chunk whose packets named nothing for its set, with DXMT_MTL4_DEVICE_RESIDENCY=0
+      // (the set committed and used anyway) and with it on (committed without it)
       for (bool device_residency : {false, true}) {
         dxmt::gw2::g_device_residency = device_residency;
         uint64_t seq = kChunks + 1 + device_residency;

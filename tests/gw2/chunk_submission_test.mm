@@ -109,7 +109,7 @@ residencyBeforeCommit() {
       g_mtl4_hooked_before++;
   }
 }
-// gw2 (#153): DXMT_MTL4_DEVICE_RESIDENCY unset (the default path)
+// gw2 (#153): DXMT_MTL4_DEVICE_RESIDENCY=0's path
 bool
 mtl4DeviceResidencyRequested() {
   return false;
