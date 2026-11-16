@@ -45,8 +45,8 @@ sw::Switch<bool> kMetalfxSpatialSwapchain{
 sw::Switch<bool> kMtl4TimestampReuse{"DXMT_MTL4_TIMESTAMP_REUSE", true, sw::legacy::notZero};
 // gw2 (#227): `mtl4` (the default) or `mtl3`
 sw::Switch<std::string> kMtl4Present{"DXMT_MTL4_PRESENT", "mtl4", mtl4PresentGrammar};
-// gw2 (#204)
-sw::Switch<bool> kMtl4AllocatorPool{"DXMT_MTL4_ALLOCATOR_POOL", false, sw::legacy::exactlyOne};
+// gw2 (#204): on unless exactly "0" (the default since #301)
+sw::Switch<bool> kMtl4AllocatorPool{"DXMT_MTL4_ALLOCATOR_POOL", true, sw::legacy::notZero};
 // gw2 (#271): `next` (the default) or `write`. The startup line shows `unused` for `write` without
 // DXMT_MTL4_PRESENT=mtl3 on Metal 4
 sw::Switch<std::string> kMtl4ShownWait{"DXMT_MTL4_SHOWN_WAIT", "next", mtl4ShownWaitGrammar};

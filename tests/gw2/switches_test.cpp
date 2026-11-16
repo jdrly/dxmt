@@ -636,12 +636,12 @@ testMtl4Present() {
   CHECK_EQ(*now.registry.effective("DXMT_MTL4_PRESENT"), std::string("mtl4"), "line value, unset");
 }
 
-// gw2 (#301): DXMT_MTL4_DEVICE_RESIDENCY and DXMT_MTL4_TIMESTAMP_REUSE, declared as dxmt_gw2_residency.cpp
-// and dxmt_gw2_metal4.cpp declare them since they became the default: on unless exactly "0", and on the
-// startup line by name
+// gw2 (#301): DXMT_MTL4_ALLOCATOR_POOL, DXMT_MTL4_DEVICE_RESIDENCY and DXMT_MTL4_TIMESTAMP_REUSE, declared as
+// dxmt_gw2_metal4.cpp and dxmt_gw2_residency.cpp declare them since they became the default: on unless
+// exactly "0", and on the startup line by name
 static void
 testMtl4DefaultsOn() {
-  for (const char *name : {"DXMT_MTL4_DEVICE_RESIDENCY", "DXMT_MTL4_TIMESTAMP_REUSE"}) {
+  for (const char *name : {"DXMT_MTL4_ALLOCATOR_POOL", "DXMT_MTL4_DEVICE_RESIDENCY", "DXMT_MTL4_TIMESTAMP_REUSE"}) {
     for (auto &input : kInputs) {
       Env env;
       if (input)

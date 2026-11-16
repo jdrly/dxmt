@@ -3,13 +3,13 @@
 // gw2 (#32): Metal 4 submission for a DXMT command queue (DXMT_METAL4=1, jdrly/dxmt #32 part 2).
 //
 // - One MTL4CommandQueue, with the device's residency set attached (Metal 4 has no useResource).
-// - One MTL4CommandAllocator per chunk slot (the ring's size, DXMT_CHUNKS): a chunk's command buffers
-//   take their memory from their slot's allocator, which the finish thread resets when it retires
-//   the chunk, after the GPU completed every buffer of it. gw2 (#204), with
-//   DXMT_MTL4_ALLOCATOR_POOL=1: a slot has no allocator of its own; the chunk takes one from the
-//   queue's pool at its first begin() and gives it back in retire(), after the reset. The pool makes
-//   an allocator only when it has none idle and keeps at most kIdleAllocators idle (one more is
-//   released).
+// - Command allocators from a pool (gw2 #204, the default): a chunk takes one from the queue's pool
+//   at its first begin(), its command buffers take their memory from it, and the finish thread resets
+//   it when it retires the chunk, after the GPU completed every buffer of it; retire() gives it back.
+//   The pool makes an allocator only when it has none idle and keeps at most kIdleAllocators idle
+//   (one more is released). With DXMT_MTL4_ALLOCATOR_POOL=0 (Mtl4Queue's allocator_pool false), one
+//   MTL4CommandAllocator per chunk slot (the ring's size, DXMT_CHUNKS), made with the queue and reset
+//   the same way.
 // - A chunk commits one command buffer, or several (the present split commits the frame before
 //   nextDrawable and the present pass gets its own, and queue-level events commit as well). Each commit carries its own
 //   MTL4CommitOptions feedback (GPU start and end, error), written into an Mtl4Commit record, and

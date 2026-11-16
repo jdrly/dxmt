@@ -42,9 +42,9 @@ mtl4ShownWaitGrammar(const std::string &raw, const std::string &fallback) {
   return raw == "write" ? raw : fallback;
 }
 
-// gw2 (#204): DXMT_MTL4_ALLOCATOR_POOL (off unless exactly "1"), read on each call: the command queue
-// reads it once, for its Metal 4 queue (gw2::Mtl4Queue's allocator_pool). On, the queue's command
-// allocators come from a pool instead of one per chunk slot.
+// gw2 (#204): DXMT_MTL4_ALLOCATOR_POOL (on unless exactly "0"), read on each call: the command queue
+// reads it once, for its Metal 4 queue (gw2::Mtl4Queue's allocator_pool).
+// On (the default), the queue's command allocators come from a pool; =0: one per chunk slot.
 bool mtl4AllocatorPool();
 
 // Whether this process's queues take the Metal 4 path (DXMT_METAL4 on, on a device that has it).
