@@ -11,7 +11,7 @@ public:
   // gw2 (#149): inline up to an uncontended acquire, the thread id read from the TEB; the spin on
   // a lock another thread holds is out of line
   void lock() {
-    if (!forced_ && !protected_) // gw2 (#4): forced_
+    if (!protected_)
       return;
     uint32_t tid = this_thread::get_id();
     uint32_t expected = 0;
@@ -20,7 +20,7 @@ public:
     counter_++;
   }
   void unlock() noexcept {
-    if (!forced_ && !protected_) // gw2 (#4): forced_
+    if (!protected_)
       return;
     counter_--;
     if (likely(counter_ == 0))
@@ -30,16 +30,10 @@ public:
   bool set_protected(bool Protected);
   bool get_protected();
 
-  // gw2 (#4): the lock excludes from now on whatever the game's multithread protection says, so
-  // another thread of DXMT (the DXMT_PROMOTE_FLUSH_MIN watchdog) can enter the immediate context.
-  // Call it before the device is visible to the game; it can't be undone.
-  void force_locking() { forced_ = true; }
-
 private:
   void lock_contended(uint32_t tid);
 
   bool protected_ = false;
-  bool forced_ = false; // gw2 (#4)
   std::atomic_uint32_t owner_ = 0;
   uint32_t counter_ = 0;
 };

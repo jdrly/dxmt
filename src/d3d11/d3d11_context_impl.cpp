@@ -4472,15 +4472,14 @@ public:
   // gw2 (#149): this context's share of the PSO section, published once a chunk
   gw2::PsoContextCounters gw2_pso_;
 
-  // gw2 (#4): the speculative commit's bookkeeping, for CMDS and DXMT_PROMOTE_FLUSH_MIN. The
+  // gw2 (#4): the speculative commit's bookkeeping, for CMDS. The
   // immediate context publishes gw2_front_ at each commit; a deferred context's never is.
   gw2::FrontCounters gw2_front_;
   // gw2 (#266): the bias the current render pass's draws get into an emulated D24 target, set in PreDraw
   // when the rasterizer state is applied; stays None with DXMT_STATS=0
   gw2::DepthBias gw2_d24_bias_ = gw2::DepthBias::None;
   gw2::CommitWhy promote_why_ = gw2::CommitWhy::Other; // the request behind promote_flush
-  uint32_t promote_requests_ = 0;                       // requests since the last commit
-  bool promote_nodefer_ = false;                        // one of them is never deferred
+  bool promote_named_ = false; // a request other than an occlusion or timestamp query named it
 
   // gw2 (#56): DXMT_SUBSAMPLE_METALFX (see dxmt_gw2_subsample.hpp). A Subsample pass found by
   // gw2SubsampleDraw reads a MetalFX upscale of its source: the encoder's binding of that pixel shader
@@ -4784,24 +4783,16 @@ public:
     gw2::subsampleUpscaled();
   }
 
-  // gw2 (#4): every site that sets promote_flush goes through here. Only occlusion and timestamp
-  // queries may be deferred (DXMT_PROMOTE_FLUSH_MIN); events, staging copies, readbacks and command
-  // lists never are, and the first of those names the commit.
+  // gw2 (#4): every site that sets promote_flush goes through here, with the reason CMDS shows for
+  // the commit (cbwhy): the first request's, unless a later one is an event, staging copy, readback
+  // or command list, which names the commit over an occlusion or timestamp query's
   void
   PromoteFlush(gw2::CommitWhy why) {
-    bool deferrable = why == gw2::CommitWhy::Occlusion || why == gw2::CommitWhy::Timestamp;
-    if (!promote_flush || (!deferrable && !promote_nodefer_))
+    bool query = why == gw2::CommitWhy::Occlusion || why == gw2::CommitWhy::Timestamp;
+    if (!promote_flush || (!query && !promote_named_))
       promote_why_ = why;
     promote_flush = true;
-    promote_requests_++;
-    promote_nodefer_ = promote_nodefer_ || !deferrable;
-  }
-
-  // gw2 (#4): DXMT_PROMOTE_FLUSH_MIN; true holds the speculative commit back. Only the immediate
-  // context overrides it.
-  virtual bool
-  DeferPromotedCommit() {
-    return false;
+    promote_named_ = promote_named_ || !query;
   }
 
   // gw2 (#24): DXMT_TIMESTAMP_MODE=estimate: a timestamp End since the last commit for which exact
@@ -4864,9 +4855,6 @@ public:
 
     cmdbuf_state = CommandBufferState::Idle;
     if (promote_flush && !defer_commit) {
-      // gw2 (#4): DXMT_PROMOTE_FLUSH_MIN may hold this speculative commit back
-      if (DeferPromotedCommit())
-        return false;
       Commit();
       return true;
     }

@@ -3,7 +3,7 @@
 // gw2 (#4): command-buffer counters, logged as the CMDS and ENCODE sections (see dxmt_gw2_stats.hpp).
 //
 // - CMDS (the game's render thread): why each chunk is committed (cbwhy), why encoder passes close
-//   (close), and what DXMT_PROMOTE_FLUSH_MIN did with speculative commits (promote).
+//   (close).
 // - ENCODE (the encode thread): draws, dispatches, pipeline binds, useResource commands, Metal
 //   encoders by type and per chunk, attachment load/store bytes by aspect, and why the encoder
 //   optimizer refused to merge two render passes. Its d24bias and d24slope (#266) are counted by the
@@ -37,9 +37,6 @@ enum class CommitWhy : uint8_t {
   Fence,      // ID3D11Fence Signal/Wait
   KeyedMutex, // AcquireSync/ReleaseSync
   Idle,       // WaitUntilGPUIdle (swapchain resize, fullscreen switch, ...)
-  Poll,       // DXMT_PROMOTE_FLUSH_MIN: a deferred commit, at a GetData/Map that found its data not ready
-  Timer,      // DXMT_PROMOTE_FLUSH_MIN: a deferred commit, at a pass change after DXMT_PROMOTE_FLUSH_MS
-  Watchdog,   // DXMT_PROMOTE_FLUSH_MIN: a deferred commit, from the watchdog thread
   Count
 };
 constexpr unsigned kCommitWhyCount = (unsigned)CommitWhy::Count;
@@ -75,7 +72,7 @@ enum class PassClose : uint8_t {
   Clear,   // ClearRenderTargetView/DepthStencilView/View/UnorderedAccessView
   Resolve, // ResolveSubresource
   Query,   // event/timestamp query End
-  Flush,   // Flush, fences, keyed mutex, WaitUntilGPUIdle, a deferred commit
+  Flush,   // Flush, fences, keyed mutex, WaitUntilGPUIdle
   Present,
   State,   // ExecuteCommandList, SwapDeviceContextState, FinishCommandList
   Upscale, // MetalFX through the context extension
@@ -84,22 +81,6 @@ enum class PassClose : uint8_t {
 };
 constexpr unsigned kPassCloseCount = (unsigned)PassClose::Count;
 extern const char *const kPassCloseNames[kPassCloseCount];
-
-// DXMT_PROMOTE_FLUSH_MIN: what happened at a speculative commit.
-enum class Promote : uint8_t {
-  Skip,     // a commit opportunity (pass change with promote_flush set) that was deferred
-  Reached,  // committed: DXMT_PROMOTE_FLUSH_MIN requests had accumulated
-  NoDefer,  // committed: a request that is never deferred (event, staging, readback, command list) joined
-  GpuIdle,  // committed: no earlier chunk was still on the GPU
-  Present,  // a deferral ended by Present's commit
-  Explicit, // a deferral ended by an explicit commit (Flush, Map/GetData wait, fence, keyed mutex, idle)
-  Poll,     // a deferral ended at a GetData/Map that found its data not ready
-  Timer,    // a deferral ended at a pass change after DXMT_PROMOTE_FLUSH_MS
-  Watchdog, // a deferral ended by the watchdog
-  Count
-};
-constexpr unsigned kPromoteCount = (unsigned)Promote::Count;
-extern const char *const kPromoteNames[kPromoteCount];
 
 // gw2 (#158): the query of a GetData that would flush (without DONOTFLUSH, or a stalled poll) and found
 // its data not ready. The names are the getflush= and getskip= keys (kGetDataNames).
@@ -144,7 +125,6 @@ struct FrontCounters {
   bool on = statsEnabled(); // DXMT_STATS, cached: off, nothing is counted
   uint32_t commit[kCommitWhyCount] = {};
   uint32_t pass_close[kPassCloseCount] = {};
-  uint32_t promote[kPromoteCount] = {};
   // gw2 (#266): ENCODE's d24bias and d24slope, the triangle draws into an emulated D24 target with a
   // constant bias, and with only a slope
   uint32_t d24_bias = 0, d24_slope = 0;
@@ -157,12 +137,6 @@ struct FrontCounters {
   // Adds the counters to the shared totals and clears them (once per chunk).
   void publish();
 };
-
-// The DXMT_PROMOTE_FLUSH_MIN (0: upstream) and DXMT_PROMOTE_FLUSH_MS in effect, set by the immediate
-// context, for the CMDS line and the startup line.
-void setPromoteFlush(uint32_t min, uint32_t ms);
-uint32_t promoteFlushMin();
-uint32_t promoteFlushMs();
 
 // Metal encoders by type, as flushCommands encodes them (after the optimizer's merges).
 enum class Enc : uint8_t { Render, Compute, Blit, Clear, Resolve, Present, Upscale, Event, Timestamp, Count };
