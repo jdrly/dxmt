@@ -16,7 +16,7 @@
 #   left in the ARM64X DLLs (#200) and checks that no x64 entry's ARM64EC code reaches another
 #   (#248). Artifact dxmt-arm64-<commit>:
 #   aarch64-windows, i386-windows, aarch64-unix, VERSION, kept 7 days.
-# tests: zsh -n for the zsh scripts and warnings.zsh's self-check, then tests/gw2/run.zsh pure,
+# tests: zsh -n for the zsh scripts, the self-checks of warnings.zsh and tools/gw2/upstream-bridge-calls.py, then tests/gw2/run.zsh pure,
 #   and metal on the runner's Metal device. The display tests only build here (#225). A push skips
 #   this job when a green pull request run tested the same tree (the tested job, #273).
 # lint: actionlint for the workflows.
@@ -437,6 +437,9 @@ jobs:
             "warning: unknown warning option '-Wfoo' [-Wunknown-warning-option]" >"$base"
           .github/gw2/warnings.zsh "$log" "$base"
           ! .github/gw2/warnings.zsh "$log" /dev/null
+      # the sync's helper (docs/agents/upstream-sync.md): its parsing and numbering, no git needed
+      - name: upstream-bridge-calls self-test
+        run: python3 -I tools/gw2/upstream-bridge-calls.py --self-test
       - name: Select Xcode
         run: sudo xcode-select -s "/Applications/Xcode_$XCODE_VERSION.app"
       - name: Pure tests
