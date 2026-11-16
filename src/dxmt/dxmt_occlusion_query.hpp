@@ -331,7 +331,7 @@ private:
 };
 
 /**
-gw2 (#24): DXMT_TIMESTAMP_MODE estimate and boundary. The queries were marked inside the chunk
+gw2 (#24): DXMT_TIMESTAMP_MODE estimate. The queries were marked inside the chunk
 without a pass split, each at its position: 2 x the encoders closed before it, + 1 if it fell inside an
 open one. A query reads its command buffer's GPU start + (end - start) x its share of the buffer's
 positions, as if every encoder took the same GPU time. The present split gives the chunk a second
@@ -480,7 +480,7 @@ public:
     return num_samples_ != 0 || !estimated_.empty();
   }
 
-  // gw2 (#24): a query marked without an encoder of its own (DXMT_TIMESTAMP_MODE estimate/boundary)
+  // gw2 (#24): a query marked without an encoder of its own (DXMT_TIMESTAMP_MODE estimate)
   void
   markQuery(TimestampQuery *query, uint64_t position) {
     estimated_.push_back({query, position});

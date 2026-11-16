@@ -6,7 +6,7 @@
 // sample counters only at stage boundaries, and DXMT samples none. In exact mode (upstream) a
 // timestamp End therefore closes the open encoder pass and commits a command buffer at the next pass
 // change, so that each query gets a buffer end of its own: in GW2, about 34 command buffers and 30
-// pass splits a frame. estimate and boundary leave the pass open: the encode thread marks the query
+// pass splits a frame. estimate leaves the pass open: the encode thread marks the query
 // at its position in the chunk's encoder list, and the finish thread interpolates its value between
 // the GPU start and end of the command buffer it landed in (TimestampEstimateReadback).
 
@@ -17,7 +17,6 @@ namespace dxmt::gw2 {
 enum class TimestampMode : uint8_t {
   Exact,    // upstream: a pass split and a commit per timestamp, the buffer's gpuEndTime
   Estimate, // no pass split, no commit; the value is interpolated in the chunk's command buffers
-  Boundary, // no pass split; the commit still happens at the next pass change (DXMT_PROMOTE_FLUSH_MIN applies)
 };
 
 // DXMT_TIMESTAMP_MODE, parsed and logged once per process (default estimate; an unknown value warns
@@ -26,7 +25,7 @@ TimestampMode timestampMode();
 const char *timestampModeName(TimestampMode mode);
 
 // gw2 (#158): DXMT_GETDATA_SKIP_FLUSH. A GetData without DONOTFLUSH that finds a timestamp or
-// timestamp-disjoint query unresolved skips its Flush in estimate and boundary once the chunk the query
+// timestamp-disjoint query unresolved skips its Flush in estimate once the chunk the query
 // ended in (`issued_chunk`, 0: unknown) is no longer the one being recorded (`current_chunk`): a
 // committed chunk resolves without help (the GPU, then the finish thread). A query still in the current
 // chunk flushes, which commits that chunk, so a poll loop always ends.
@@ -35,7 +34,7 @@ getDataSkipsFlush(bool on, TimestampMode mode, uint64_t issued_chunk, uint64_t c
   return on && mode != TimestampMode::Exact && issued_chunk && issued_chunk < current_chunk;
 }
 
-// Logs once per process, at the first query End that estimate or boundary handles.
+// Logs once per process, at the first query End that estimate handles.
 void timestampActed();
 
 // The render thread's counts (the immediate context), for the TIMESTAMP section. Only with DXMT_STATS.

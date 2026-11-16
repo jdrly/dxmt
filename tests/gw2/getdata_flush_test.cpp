@@ -27,7 +27,7 @@ static int failures = 0;
 
 int
 main() {
-  for (auto mode : {TimestampMode::Estimate, TimestampMode::Boundary}) {
+  for (auto mode : {TimestampMode::Estimate}) {
     // the query's chunk is still being recorded: flush
     CHECK(!getDataSkipsFlush(true, mode, 7, 7));
     // committed: skip
