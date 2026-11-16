@@ -122,12 +122,14 @@ public:
       SM50GetCompiledBitcode(compile_result, &bitcode);
       lib_data = WMT::MakeDispatchData(bitcode.Data, bitcode.Size);
       auto tl = gw2::compileClock(); // gw2 (W0)
+      err = nullptr; // gw2 (#295): the cached attempt's error; newLibrary overwrites the handle unreleased
       auto library = device_->GetMTLDevice().newLibrary(lib_data, err);
       gw2::compileVariantStage(gw2::VariantStage::Library, tl);
 
       if (err) {
         ERR("Failed to create MTLLibrary: ", err.description().getUTF8String());
         shader_->dump();
+        SM50DestroyBitcode(compile_result); // gw2 (#295): as the success path below does
         return this;
       }
 
