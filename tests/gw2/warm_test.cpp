@@ -652,6 +652,87 @@ warmReadCapped() {
               counted ? "ok  " : "FAIL", (unsigned long long)p.recipes, (unsigned long long)p.capped);
 }
 
+// gw2 (#297): a row whose lengths overrun what its batch used (or the buffer) is not handed on, and the
+// read ends with read_error. Each case is one batch with more = false, so a missing check can't loop.
+// The key overrun comes last: without the check it reads 2 GiB past the 1 MiB buffer (AddressSanitizer).
+static void
+warmReadRowBounds() {
+  auto put = [](uint8_t *at, uint32_t v) { std::memcpy(at, &v, 4); };
+  struct Result {
+    uint64_t rows;
+    uint32_t error;
+  };
+  auto read = [&](const std::function<void(uint8_t *, uint64_t, gw2::WarmBatch &)> &fill) {
+    std::atomic<bool> stop{false};
+    Result r{0, 0};
+    r.error = gw2::warmReadRows(
+        [&](uint64_t, uint8_t *buffer, uint64_t capacity) {
+          gw2::WarmBatch b;
+          fill(buffer, capacity, b);
+          return b;
+        },
+        stop, [&](const uint8_t *, uint32_t, const uint8_t *, uint32_t) { r.rows++; }
+    );
+    return r;
+  };
+  // a good row: key "abcd", value 6 bytes
+  auto good = [&](uint8_t *at) {
+    put(at, 4);
+    std::memcpy(at + 4, "abcd", 4);
+    put(at + 8, 6);
+    std::memset(at + 12, 'v', 6);
+    return uint64_t(18);
+  };
+  Result one = read([&](uint8_t *buffer, uint64_t, gw2::WarmBatch &b) {
+    b.used = good(buffer);
+    b.count = 1;
+  });
+  CHECK(one.rows == 1 && one.error == 0, "good row: %llu rows, error %u", (unsigned long long)one.rows, one.error);
+  // the value overruns: 4-byte key, value length 1000, 8 bytes of it in the batch
+  auto value_overrun = [&](uint8_t *at) {
+    put(at, 4);
+    std::memcpy(at + 4, "abcd", 4);
+    put(at + 8, 1000);
+    return uint64_t(20);
+  };
+  Result value = read([&](uint8_t *buffer, uint64_t, gw2::WarmBatch &b) {
+    b.used = value_overrun(buffer);
+    b.count = 1;
+  });
+  CHECK(value.rows == 0 && value.error != 0, "value overrun: %llu rows, error %u", (unsigned long long)value.rows,
+        value.error);
+  // a good row, then a bad one in the same batch: the good one is handed on, the read ends
+  Result after = read([&](uint8_t *buffer, uint64_t, gw2::WarmBatch &b) {
+    uint64_t p = good(buffer);
+    b.used = p + value_overrun(buffer + p);
+    b.count = 2;
+  });
+  CHECK(after.rows == 1 && after.error != 0, "good then truncated: %llu rows, error %u",
+        (unsigned long long)after.rows, after.error);
+  // the batch says it used 100 bytes more than the buffer has; its row's value would cross the end
+  Result past = read([&](uint8_t *buffer, uint64_t capacity, gw2::WarmBatch &b) {
+    uint32_t kl = uint32_t(capacity - 16);
+    put(buffer, kl);
+    put(buffer + 4 + kl, 50);
+    b.used = capacity + 100;
+    b.count = 1;
+  });
+  CHECK(past.rows == 0 && past.error != 0, "used past the buffer: %llu rows, error %u", (unsigned long long)past.rows,
+        past.error);
+  // the key overruns: key length 0x7fffffff in a 16-byte batch
+  Result key = read([&](uint8_t *buffer, uint64_t, gw2::WarmBatch &b) {
+    put(buffer, 0x7fffffff);
+    b.used = 16;
+    b.count = 1;
+  });
+  CHECK(key.rows == 0 && key.error != 0, "key overrun: %llu rows, error %u", (unsigned long long)key.rows, key.error);
+  bool ok = one.rows == 1 && !one.error && !value.rows && value.error && after.rows == 1 && after.error &&
+            !past.rows && past.error && !key.rows && key.error;
+  std::printf("%s warm read (#297): a row overrunning its batch (key, value, after a good row, past the buffer) "
+              "ends the read with an error, none of it handed on\n",
+              ok ? "ok  " : "FAIL");
+}
+
 int
 main() {
   for (int round = 0; round < 10; round++)
@@ -663,6 +744,7 @@ main() {
   plan();
   warmReadErrors();
   warmReadCapped();
+  warmReadRowBounds();
   teardown(compile::Policy::Declared);
   teardown(compile::Policy::Legacy);
   readyHitSaturated();

@@ -483,6 +483,43 @@ test_replay(struct mtl4 *m) {
     }
     [(id<MTL4ComputeCommandEncoder>)enc endEncoding];
   }
+  /* gw2 (#297): packets the replay must refuse, in a pass and binding state of their own: an indexed
+     draw whose offset is the index buffer's end, and a texture at the first index past the table's
+     slots. Each counts in unsupported; the commit completes */
+  struct WMTMtl4BindingState bounds_state;
+  memset(&bounds_state, 0, sizeof(bounds_state));
+  bounds_state.tables[WMTMtl4TableFragment] = new_table(m->device, 8, WMT_MTL4_MAX_TEXTURES);
+  bounds_state.residency_set = H(m->chunk);
+  {
+    id<MTLTexture> bounds_target = resident_texture(m, MTLTextureUsageRenderTarget);
+    struct WMTRenderPassInfo info;
+    memset(&info, 0, sizeof(info));
+    info.colors[0].texture = H(bounds_target);
+    info.colors[0].load_action = WMTLoadActionClear;
+    info.colors[0].store_action = WMTStoreActionStore;
+    info.default_raster_sample_count = 1;
+    info.render_target_width = 4;
+    info.render_target_height = 4;
+    obj_handle_t enc = render_encoder(m, &info, &bounds_state);
+    CHECK(enc, "bounds: render encoder");
+    struct chain c = {0};
+    struct wmtcmd_render_setpso *setpso = chain_add(&c, sizeof(*setpso), WMTRenderCommandSetPSO);
+    setpso->pso = H(pso);
+    struct wmtcmd_render_setviewport *vp = chain_add(&c, sizeof(*vp), WMTRenderCommandSetViewport);
+    vp->viewport = (struct WMTViewport){0, 0, 4, 4, 0, 1};
+    struct wmtcmd_render_draw_indexed *draw = chain_add(&c, sizeof(*draw), WMTRenderCommandDrawIndexed);
+    draw->primitive_type = WMTPrimitiveTypeTriangle;
+    draw->index_type = WMTIndexTypeUInt32;
+    draw->index_count = 3;
+    draw->index_buffer = H(indices);
+    draw->index_buffer_offset = indices.length;
+    draw->instance_count = 1;
+    struct wmtcmd_render_settexture *tex = chain_add(&c, sizeof(*tex), WMTRenderCommandSetFragmentTexture);
+    tex->texture = H(source);
+    tex->index = WMT_MTL4_MAX_TEXTURES;
+    replay(_MTL4RenderCommandEncoder_encodeCommands, enc, &bounds_state, &c);
+    [(id<MTL4RenderCommandEncoder>)enc endEncoding];
+  }
   struct WMTMtl4CommitFeedback fb;
   if (commit_and_wait(m, &fb, "replay")) {
     const uint8_t *px = readback.contents;
@@ -529,6 +566,8 @@ test_replay(struct mtl4 *m) {
   CHECK(!render_state.unsupported && !blit_state.unsupported && !compute_state.unsupported,
         "unsupported packets: render %u blit %u compute %u", render_state.unsupported, blit_state.unsupported,
         compute_state.unsupported);
+  CHECK(bounds_state.unsupported == 2, "bounds: unsupported=%u, want 2 (the draw, the texture)",
+        bounds_state.unsupported);
   CHECK(!render_state.bytes_overflow && !compute_state.bytes_overflow, "bytes overflow");
   CHECK(render_state.bytes_offset == 256 + 16, "render bytes_offset=%llu, want 272",
         (unsigned long long)render_state.bytes_offset);
@@ -543,6 +582,7 @@ test_replay(struct mtl4 *m) {
       [(id)render_state.tables[i] release];
   }
   [(id)compute_state.tables[0] release];
+  [(id)bounds_state.tables[WMTMtl4TableFragment] release];
   if (m->chunk) {
     [m->chunk removeAllAllocations];
     [m->chunk commit];

@@ -66,7 +66,7 @@ WMT::Reference<WMT::MTL4ArgumentTable>
 newTable(WMT::Device device) {
   WMTArgTableInfo info{};
   info.max_buffers = WMT_MTL4_MAX_BUFFERS;
-  info.max_textures = 32;
+  info.max_textures = WMT_MTL4_MAX_TEXTURES;
   info.max_samplers = 0;
   WMT::Error err;
   auto table = WMT::newArgumentTable(device, info, err);
