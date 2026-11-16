@@ -51,12 +51,6 @@ main(void) {
   CHECK(length == strlen(cache_path));
   printf("Metal shader cache: %s\n", length ? cache_path : "(none)");
 
-  // pso_archive.c: call number 151; no archive was opened, so nothing is loaded
-  struct WMTPSOArchiveStats stats;
-  memset(&stats, 0xff, sizeof(stats));
-  WMTPSOArchiveQuery(&stats);
-  CHECK(stats.loaded == 0);
-
   // mtl4.c: call number 155. The PE side's default is WMTMetal4NoOS; on macOS 26 and later (the
   // build's deployment target) the unix side answers Supported or NoFamily.
   enum WMTMetal4Support m4 = MTLDevice_metal4Support(device);

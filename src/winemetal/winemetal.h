@@ -2274,56 +2274,6 @@ WINEMETAL_API int WMTSetThreadQoSClassSelf(
    and after (-1 if unreadable). */
 WINEMETAL_API int WMTSetThreadBasePrioritySelf(int base_priority, int *old_base, int *new_base);
 
-/* gw2 (#5): persistent Metal binary archives for pipelines (DXMT_PSO_ARCHIVE=1). The unix side
-   owns the archives: it loads valid ones of earlier sessions for lookup, adds every render and
-   compute pipeline it builds to this session's archive (on a background queue), and serializes
-   that archive on WMTPSOArchiveFlush and at exit. Reports are UTF-8 lines separated by '\n'. */
-struct WMTPSOArchiveConfig {
-  struct WMTConstMemoryPointer exe_name; // UTF-8; the unix side sanitizes it
-  struct WMTConstMemoryPointer base_dir; // absolute unix directory, or null for the user cache dir
-  uint32_t keep_sessions;
-  uint32_t max_pipelines; // per session archive
-  // gw2 (#75): DXMT_PSO_GENERATIONS=1: the generation publisher (immutable shards, checksummed
-  // manifests, an atomically replaced index) and the exact-shape failure policy; 0: one file per
-  // session, as #52 left it
-  uint32_t generations;
-  uint32_t padding;
-};
-
-struct WMTPSOArchiveStats {
-  uint64_t loaded;        // archives of earlier sessions in use for lookup
-  uint64_t lookup_hits;   // pipelines found in those archives
-  uint64_t lookup_misses; // pipelines built without a hit
-  uint64_t added;         // pipelines added to this session's archive
-  uint64_t add_failed;
-  uint64_t capped;        // not added: max_pipelines reached
-  uint64_t queued;        // adds still waiting on the archive queue
-  uint64_t unflushed;     // added since the last serialization
-  uint64_t flushes;
-  uint64_t flushed_bytes; // size of the last serialized archive
-  // gw2 (#52), since start:
-  uint64_t miss_known;    // lookup misses whose key an earlier session's .keys holds
-  uint64_t miss_new;      // lookup misses never archived before
-  uint64_t skipped;       // pipelines left out after Metal's packer named them
-  uint64_t rebuilds;      // flushes that succeeded only after a rebuild
-  // gw2 (#75), with generations only (0 otherwise):
-  uint64_t mode;          // 0: session files (or off), 1: generations, 2: generations, lookup only
-  uint64_t miss_excluded; // lookup misses of a failing shape an earlier generation excluded
-  uint64_t excluded;      // adds refused as a failing shape (exact-shape policy)
-  uint64_t generation;    // the generation loaded, then the last one published
-  uint64_t published;     // pipelines in this session's shard of the last published generation
-};
-
-WINEMETAL_API bool WMTPSOArchiveInit(
-    obj_handle_t device, const struct WMTPSOArchiveConfig *config, char *report, uint32_t report_size
-);
-
-/* Serializes this session's archive if anything was added since the last time; blocks the caller
-   until earlier adds are done. Returns 1 when written, 0 when nothing was new, -1 on failure. */
-WINEMETAL_API int WMTPSOArchiveFlush(char *report, uint32_t report_size);
-
-WINEMETAL_API void WMTPSOArchiveQuery(struct WMTPSOArchiveStats *stats);
-
 /*
  * gw2 (#32): Metal 4 (DXMT_METAL4); its call numbers are in winemetal_calls.h. The unix side is
  * src/winemetal/unix/mtl4.c. DXMT's encoders keep building today's wmtcmd_* packets: the

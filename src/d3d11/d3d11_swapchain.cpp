@@ -1089,8 +1089,6 @@ public:
     auto &bg = bgConfig();
     auto &pso = gw2::psoSettings();
     auto &compile = gw2::compileSettings();
-    // gw2 (#5): 1 = on, failed = asked for but couldn't start (the "PSO archive: off:" line says why)
-    const char *archive = gw2::psoArchiveOn() ? "1" : compile.archive_requested ? "failed" : "0";
     double refresh = init_refresh_rate_ != DBL_MAX ? init_refresh_rate_ : 0.0;
     std::string deadline = present_deadline_ms_ < 0 ? std::string("refresh") : std::format("{}", present_deadline_ms_);
     std::string max_latency = queue.MaxLatencyOverride() ? std::to_string(queue.MaxLatencyOverride()) : "unset";
@@ -1115,9 +1113,6 @@ public:
             {"DXMT_CHUNKS", std::format("{}", queue.ChunkCount())}, // the ring in effect
             {"DXMT_MAX_FRAME_LATENCY", max_latency},
             {"DXMT_COMPILE_WAIT_MS", std::format("{}", compile.wait_ms)},
-            {"DXMT_PSO_ARCHIVE", archive},
-            {"DXMT_PSO_ARCHIVE_DIR", compile.archive_dir.empty() ? std::string("default") : compile.archive_dir},
-            {"DXMT_PSO_FLUSH_EVERY", std::format("{}", compile.flush_every)},
             // gw2 (#4): as the immediate context parsed them
             {"DXMT_PROMOTE_FLUSH_MIN", std::format("{}", gw2::promoteFlushMin())},
             {"DXMT_PROMOTE_FLUSH_MS", std::format("{}", gw2::promoteFlushMs())},

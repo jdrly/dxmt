@@ -72,7 +72,7 @@ main(void) {
   CHECK(WMTCall_MTLResidencySet_allocationCount == 201); // #153
   CHECK(WMTCall_MTL4CommandQueue_commitPresent == 202);  // #242
   CHECK(WMTCall_Count == 203);
-  CHECK(calls == 185 && reserved == 18 && wow64 == 9);
+  CHECK(calls == 182 && reserved == 21 && wow64 == 9);
 
 #ifdef DXMT_NATIVE
   // Through the real table: a handler at every call number, NULL at every reserved one
@@ -87,12 +87,7 @@ main(void) {
   CHECK(wmt_native_dispatch(WMTCall_NSAutoreleasePool_alloc_init, &pool) == 0 && pool.ret != 0);
   struct unixcall_get_os_version os = {0};
   CHECK(wmt_native_dispatch(WMTCall_WMTGetOSVersion, &os) == 0 && os.ret_major >= 26);
-  // ... the fork's (#5, #46)...
-  struct WMTPSOArchiveStats stats;
-  memset(&stats, 0xff, sizeof(stats));
-  struct unixcall_wmt_pso_archive_query query;
-  WMT_MEMPTR_SET(query.stats, &stats);
-  CHECK(wmt_native_dispatch(WMTCall_WMTPSOArchiveQuery, &query) == 0 && stats.loaded == 0);
+  // ... the fork's (#46)...
   char cache_path[4096];
   struct unixcall_getmetalcachepath path = {.size = sizeof(cache_path), .ret_length = ~0ull};
   WMT_MEMPTR_SET(path.buf, cache_path);
@@ -100,10 +95,11 @@ main(void) {
   CHECK(wmt_native_dispatch(WMTCall_NSObject_release, &pool.ret) == 0);
   // ... and holes: an error, where Wine's dispatcher would jump to NULL (each says so on stderr)
   CHECK(wmt_native_dispatch(WMTReserved_83, NULL) != 0);
+  CHECK(wmt_native_dispatch(WMTReserved_151, NULL) != 0); // a hole since #275
   CHECK(wmt_native_dispatch(WMTReserved_179, NULL) != 0);
   CHECK(wmt_native_dispatch(WMTReserved_194, NULL) != 0);
   CHECK(wmt_native_dispatch(WMTCall_Count, NULL) != 0);
-  printf("real table: dispatched 5 calls by name, 4 holes refused\n");
+  printf("real table: dispatched 4 calls by name, 5 holes refused\n");
 #endif
 
   if (failures) {

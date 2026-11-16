@@ -2,7 +2,7 @@
 
 // gw2 (#114): warmRead's batches from bridge call 193, CacheEnumerate. Apart from dxmt_gw2_warm.hpp so
 // the plan and its read stay testable without winemetal.h; used by the warm thread
-// (d3d11_pipeline_cache.cpp) and the PSO archive tool (tools/gw2/pso_archive_tool.cpp).
+// (d3d11_pipeline_cache.cpp).
 
 #include "dxmt_gw2_recipe.hpp"
 #include "dxmt_gw2_warm.hpp"
