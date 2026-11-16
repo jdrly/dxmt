@@ -1338,6 +1338,7 @@ so only the first run after a version change builds LLVM (about 25 minutes per a
   because the runner's jobs run clamped to the utility band (maximum priority 20). A skip shows as `skip`
   with the test's reason. It never counts as a pass. The Metal 4 paths are still tested only on my Mac.
   The display tests (`present_cursor_test`) only build here, with `tests/gw2/run.zsh display --build-only`.
+  A push skips this job when a green pull request run tested the same tree (the `tested` job, #273).
 - **Lint**: actionlint on the workflow (`.github/actionlint.yaml` names the `xcode-27` label it doesn't
   know yet).
 - **Artifact** `dxmt-<commit>`: the build as `build-dxmt.zsh` stages it (`x86_64-windows`,
@@ -1362,7 +1363,8 @@ so only the first run after a version change builds LLVM (about 25 minutes per a
   (`gh release view arm64-builds -R jdrly/dxmt --json assets`). One release, one asset per commit, the 30
   newest kept. An asset that's there already is never replaced. The release is never marked latest, and
   its tag is a lightweight one, which `git describe` and so `VERSION` skip. A run with a red job
-  publishes nothing. GW2 on Mac's dev build (jdrly/gw2-on-mac) takes its DXMT from this asset. Builds
+  publishes nothing. Native tests may be skipped on a push, and only when a
+  green pull request run tested the same tree. GW2 on Mac's dev build (jdrly/gw2-on-mac) takes its DXMT from this asset. Builds
   from before #215 stay in the pre-release `mach9-builds`, which this workflow no longer touches.
 
 ## Native tests
