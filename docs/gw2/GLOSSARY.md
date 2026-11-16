@@ -112,8 +112,9 @@ present split's buffers always. The ledger decides it, not the call site.
 ### Bridge
 
 **Bridge call**:
-One named PE→unix call through Wine's unix-call interface: a thunk in `winemetal_thunks.c` on the
-PE side, a handler in `src/winemetal/unix/` on the unix side.
+One named PE→unix call through Wine's unix-call interface: a thunk in `winemetal_thunks.c` (or
+`winemetal_gw2_thunks.c`, which it includes) on the PE side, a handler in `src/winemetal/unix/` on
+the unix side.
 _Avoid_: thunk (that is the PE half), syscall
 
 **Call number**:

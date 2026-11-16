@@ -15,6 +15,10 @@
  *   WMT_CALL. Never renumber a call; PE and unix ship together, so compaction is allowed but is a
  *   deliberate change of its own.
  * - A hole is WMT_RESERVED with the issue (or lane) that reserved it.
+ * - A fork call with no upstream call to sit next to is declared in winemetal_gw2.h, has its thunk in
+ *   winemetal_gw2_thunks.c and its handler in a file of its own under unix/ (winemetal_gw2.c, mtl4.c,
+ *   mtl4fx.c). Never at the end of winemetal.h, winemetal_thunks.c or winemetal_unix.c, where
+ *   upstream appends each new call.
  *
  * No include guard: an includer defines the three macros, includes this file, and gets them back
  * undefined.

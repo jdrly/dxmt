@@ -1,6 +1,6 @@
 /*
  * gw2 (#291): my fork's bridge declarations that have no upstream declaration to sit next to: thread
- * priority (#9, #151), the PSO archive (#5), Metal 4 (#32) and MetalFX for GW2's Subsample pass (#56).
+ * priority (#9, #151), Metal 4 (#32) and MetalFX for GW2's Subsample pass (#56).
  * winemetal.h includes this file in its middle. It isn't at winemetal.h's end because upstream
  * appends every new bridge call there. A new declaration of that kind goes here.
  */

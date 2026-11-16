@@ -1,10 +1,9 @@
 /*
- * gw2 (#291): my fork's PE thunks that have no upstream thunk to sit next to (thread priority, the PSO
- * archive, Metal 4, MetalFX for GW2's Subsample pass). Not a translation unit of its own:
- * winemetal_thunks.c includes this file after its macros, so every build recipe that compiles
- * winemetal_thunks.c gets these thunks too. It isn't at winemetal_thunks.c's end because upstream
- * appends every new thunk there. A new thunk of that kind goes here; don't add this file to a
- * source list.
+ * gw2 (#291): my fork's PE thunks that have no upstream thunk to sit next to (thread priority,
+ * Metal 4, MetalFX for GW2's Subsample pass). Not a translation unit of its own: winemetal_thunks.c
+ * includes this file after its macros, so every build recipe that compiles winemetal_thunks.c gets
+ * these thunks too. It isn't at winemetal_thunks.c's end because upstream appends every new thunk
+ * there. A new thunk of that kind goes here; don't add this file to a source list.
  */
 
 WINEMETAL_API int
