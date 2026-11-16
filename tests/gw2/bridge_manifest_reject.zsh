@@ -20,7 +20,7 @@ failures=0
 check() {
   local name=$1 expect=$2 script=$3 h=$dir/$1 got
   rm -rf $h && mkdir -p $h
-  cp src/winemetal/winemetal.h src/winemetal/winemetal_thunks.h src/winemetal/winemetal_call_numbers.h $h/
+  cp src/winemetal/winemetal.h src/winemetal/winemetal_gw2.h src/winemetal/winemetal_thunks.h src/winemetal/winemetal_call_numbers.h $h/
   sed -e "$script" $manifest >$h/winemetal_calls.h
   if [[ $expect == fail ]] && cmp -s $manifest $h/winemetal_calls.h; then
     print "FAIL $name: the mutation changed nothing"; (( ++failures )); return
