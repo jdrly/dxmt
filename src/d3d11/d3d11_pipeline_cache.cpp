@@ -889,9 +889,6 @@ public:
         gw2::skipSameState() ? "on" : "off", gw2::skipSameSrv() ? "on" : "off", gw2::skipEmptySlots() ? "on" : "off"
     ));
 
-    // gw2 (#5): DXMT_PSO_ARCHIVE=1 loads earlier sessions' pipeline archives (once per process)
-    gw2::psoArchiveInit(pDevice->GetMTLDevice().handle);
-
     // gw2 (W2/W3): DXMT_WARM: the shared results, and the warm thread that fills them
     if (gw2::warmMode() != gw2::WarmMode::Off) {
       shared_ = std::make_unique<SharedResults>();
@@ -907,7 +904,6 @@ public:
     // gw2 (#88): then the compile workers, before any job owner goes (the shader and pipeline maps are
     // destroyed before the service); jobs that never ran are settled, so no demand waits forever
     scheduler_.stop();
-    gw2::psoArchiveRequestFlush(); // gw2 (#5): non-blocking
   }
 };
 

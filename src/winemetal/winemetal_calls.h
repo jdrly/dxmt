@@ -182,11 +182,11 @@ WMT_CALL(146, MTLCommandBuffer_presentDrawableWithDeadline, _MTLCommandBuffer_pr
 WMT_CALL(147, MetalView_visibility, _MetalView_visibility)
 /* gw2 (#7) */
 WMT_CALL(148, MTLDrawable_trackPresented, _MTLDrawable_trackPresented)
-/* gw2 (#5): PSO archives, pso_archive.c */
-WMT_CALL(149, WMTPSOArchiveInit, _WMTPSOArchiveInit)
-WMT_CALL(150, WMTPSOArchiveFlush, _WMTPSOArchiveFlush)
-WMT_CALL(151, WMTPSOArchiveQuery, _WMTPSOArchiveQuery)
-/* gw2 (#46, under #5): cache.c */
+/* gw2 (#275): were the PSO archive's calls (#5), deleted */
+WMT_RESERVED(149, "#275: was WMTPSOArchiveInit (#5)")
+WMT_RESERVED(150, "#275: was WMTPSOArchiveFlush (#5)")
+WMT_RESERVED(151, "#275: was WMTPSOArchiveQuery (#5)")
+/* gw2 (#46): cache.c */
 WMT_CALL(152, WMTGetMetalShaderCachePath, _WMTGetMetalShaderCachePath)
 /* gw2 (#9) */
 WMT_CALL(153, WMTSetThreadQoSClassSelf, _WMTSetThreadQoSClassSelf)

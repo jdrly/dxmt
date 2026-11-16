@@ -462,9 +462,6 @@ struct LineValues {
   uint32_t ring = 32;
   std::string max_latency = "unset";
   double compile_wait_ms = 2;
-  const char *archive = "0";
-  std::string archive_dir = "default";
-  uint32_t flush_every = 64;
   uint32_t promote_min = 0, promote_ms = 4;
   const char *timestamp_mode = "estimate";
   int map_fast = 1, skip_rebind = 1;
@@ -478,6 +475,7 @@ struct LineValues {
 
 // pre-R1 LogStartup's format, verbatim (gw2-on-mac 0034ffa, d3d11_swapchain.cpp), reading `env` for
 // the switches it read itself
+// (less the three fields of a feature deleted in #275)
 static std::string
 legacyLine(const LineValues &x, Env &env) {
   return std::format(
@@ -485,15 +483,15 @@ legacyLine(const LineValues &x, Env &env) {
       "DXMT_CAP_LIMITER={} DXMT_STENCIL_PFV={} DXMT_DEPTH_PFV={} DXMT_BG_FPS={} DXMT_BG_FPS_MINIMIZED={} "
       "DXMT_BG_POLICY={} DXMT_RENDER_THREAD_PRIORITY={} DXMT_PSO_BLEND_HASH={} DXMT_PSO_MRU={} "
       "DXMT_PSO_TOPOLOGY_KEEP={} DXMT_CHUNKS={} DXMT_MAX_FRAME_LATENCY={} DXMT_COMPILE_WAIT_MS={} "
-      "DXMT_PSO_ARCHIVE={} DXMT_PSO_ARCHIVE_DIR={} DXMT_PSO_FLUSH_EVERY={} DXMT_PROMOTE_FLUSH_MIN={} "
+      "DXMT_PROMOTE_FLUSH_MIN={} "
       "DXMT_PROMOTE_FLUSH_MS={} DXMT_TIMESTAMP_MODE={} DXMT_MAP_FAST={} DXMT_SKIP_REBIND={} DXMT_CONTROL={} "
       "DXMT_RESIDENCY_SET={} DXMT_UNRETAINED={} DXMT_LIFETIME_CHECK={} DXMT_METAL4={} "
       "DXMT_SUBSAMPLE_METALFX={} DXMT_PSO_RECORD={} cpus={} refresh={}",
       x.hitch_ms, x.present_split, x.display_sync, x.deadline, x.cap_limiter,
       int(env.get("DXMT_STENCIL_PFV") == "1"), int(env.get("DXMT_DEPTH_PFV") == "1"), x.bg_fps,
       x.bg_fps_minimized, x.bg_policy, std::strtoul(env.get("DXMT_RENDER_THREAD_PRIORITY").c_str(), nullptr, 10),
-      x.blend_hash, x.mru, x.topology_keep, x.ring, x.max_latency, x.compile_wait_ms, x.archive, x.archive_dir,
-      x.flush_every, x.promote_min, x.promote_ms, x.timestamp_mode, x.map_fast, x.skip_rebind, x.control,
+      x.blend_hash, x.mru, x.topology_keep, x.ring, x.max_latency, x.compile_wait_ms, x.promote_min,
+      x.promote_ms, x.timestamp_mode, x.map_fast, x.skip_rebind, x.control,
       x.residency, x.unretained, x.lifetime_check, x.metal4, x.subsample, x.pso_record, x.cpus, x.refresh
   );
 }
@@ -520,9 +518,6 @@ generatedFields(const LineValues &x) {
       {"DXMT_CHUNKS", std::format("{}", x.ring)},
       {"DXMT_MAX_FRAME_LATENCY", x.max_latency},
       {"DXMT_COMPILE_WAIT_MS", std::format("{}", x.compile_wait_ms)},
-      {"DXMT_PSO_ARCHIVE", x.archive},
-      {"DXMT_PSO_ARCHIVE_DIR", x.archive_dir},
-      {"DXMT_PSO_FLUSH_EVERY", std::format("{}", x.flush_every)},
       {"DXMT_PROMOTE_FLUSH_MIN", std::format("{}", x.promote_min)},
       {"DXMT_PROMOTE_FLUSH_MS", std::format("{}", x.promote_ms)},
       {"DXMT_TIMESTAMP_MODE", x.timestamp_mode},
@@ -581,8 +576,6 @@ testStartupLine() {
   set.bg_policy = "occlusion";
   set.ring = 128;
   set.max_latency = "3";
-  set.archive = "failed";
-  set.archive_dir = "/Users/x/My Cache"; // a value with a space is written as it is
   set.control = "/tmp/dxmt control.txt";
   set.residency = "failed";
   set.lifetime_check = "unbuilt";

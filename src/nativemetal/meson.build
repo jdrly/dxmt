@@ -1,5 +1,5 @@
 # gw2 (B1, #61): the unix sources and their link arguments come from src/winemetal/unix/meson.build,
-# the list the Wine build uses (this list had lost pso_archive.c and mtl4.c)
+# the list the Wine build uses (this list had lost mtl4.c)
 winemetal_src = files('../winemetal/winemetal_thunks.c') + winemetal_unix_src
 winemetal_link_depends = []
 

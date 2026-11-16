@@ -43,9 +43,6 @@ because Wine raises `0x80000005` (`STATUS_BUFFER_OVERFLOW`) for a line over its 
 | `DXMT_WARM` | off | Shader warming W2/W3 (see [WARM](#warm)). `functions`: at device creation a lowest-priority thread reads the recipes #57 recorded (`recipes_1.db`, first-use order, bridge call 193) and queues a speculative job per recorded vertex and pixel variant that makes its MTLFunction from the AIR in the shader cache (never a translation). `all`: also a job per recipe that builds its pipeline from those functions through the pipeline builder (C3). Results go into shared tables keyed by stable key (C4) that the live variant and pipeline jobs consult when they are created (a done result completes them without a job) and when they run: each key is built once per process, whoever comes first; a live job that finds a warm job building its key waits for it (a demand promotes it). Speculative jobs run one at a time (more with `DXMT_WARM_JOBS`) and never while a demand waits. Turns on the declared compile policy (as `DXMT_COMPILE_DEMAND=1`). Pipelines are built with the device's `newRenderPipelineState` on both the Metal 3 and Metal 4 queue paths. Parsed once per process | unset, `off` or anything else: no thread, no tables, nothing read |
 | `DXMT_WARM_MAX` | 8192 | With `DXMT_WARM`: recipes planned at most (so at most this many pipelines and twice as many functions); the rest is counted as `capped`. #124 raised it from 2048: GW2 uses 2,700–4,800 pipelines a session, so 8192 is about two sessions (about 290 MB natively for today's 6,062 recipes) | — |
 | `DXMT_COMPILE_WAIT_MS` | 2 | A `COMPILE frame=…` line for a frame whose encode-thread pipeline waits add up to at least this many ms (at most 5 lines a second); `0` turns them off. Needs `DXMT_STATS` | — |
-| `DXMT_PSO_ARCHIVE` | off | `=1`: Metal binary archives for pipelines. Pipelines are looked up in the archives of the last 4 sessions, and every render and compute pipeline built is added to this session's archive (see [COMPILE](#compile)) | no archives: no lookup, no capture, no files |
-| `DXMT_PSO_ARCHIVE_DIR` | user cache dir | With `DXMT_PSO_ARCHIVE=1`: an absolute unix directory that replaces `$(getconf DARWIN_USER_CACHE_DIR)dxmt/pso` (or `<DXMT_CACHE_DIR>/dxmt/pso`, #134) | — |
-| `DXMT_PSO_FLUSH_EVERY` | 256 | With `DXMT_PSO_ARCHIVE=1`: serialize this session's archive every this many new pipelines (also every 30 s if any are new; never at exit) | — |
 | `DXMT_PROMOTE_FLUSH_MIN` | 0 | `=<n>`: a speculative commit of an occlusion or timestamp query `End` waits until `n` such requests have accumulated, with a progress guarantee (see [CMDS](#cmds)). `1` commits as upstream does | `=0`: upstream (commit at the next pass change) |
 | `DXMT_PROMOTE_FLUSH_MS` | 2 | With `DXMT_PROMOTE_FLUSH_MIN`: the longest a held commit waits (the timer at the next pass change, and the watchdog's period) | — |
 | `DXMT_TIMESTAMP_MODE` | `estimate` | How a timestamp query `End` (and a timestamp-disjoint one) is taken. `estimate`: the open pass stays open and nothing is committed; the value is interpolated between the GPU start and end of the command buffer the query lands in, by its position among the chunk's encoders. `boundary`: the pass stays open, but the commit still happens at the next pass change (as `exact`, so `DXMT_PROMOTE_FLUSH_MIN` applies); the value is interpolated the same way. Both keep the values monotonic and make a disjoint query ready only after its chunk's timestamps are resolved; see [TIMESTAMP](#timestamp) | `exact` (or `0`): upstream, a pass split and a commit per timestamp, the value the buffer's GPU end |
@@ -69,14 +66,13 @@ because Wine raises `0x80000005` (`STATUS_BUFFER_OVERFLOW`) for a line over its 
 | `DXMT_SUBSAMPLE_METALFX` | off | GW2's Render Sampling: Subsample pass with MetalFX (#56; see [SUBSAMPLE](#subsample)). `log`: capture only, every candidate draw's shape is logged once and nothing changes. `1`: an accepted pass (the full-screen draw that samples the low-resolution 3D scene into a target of the swapchain's size) samples a MetalFX spatial upscale of its source instead, on Metal 3 (`MTLFXSpatialScaler`) and Metal 4 (`MTL4FXSpatialScaler`, bridge calls 190–192); the game's pixel shader still runs, and the UI drawn after it is untouched. Anything that doesn't match runs unchanged | unset or `=0`: no detection, no counting, no bridge call |
 | `DXMT_SUBSAMPLE_METALFX_PS` | unset | With `DXMT_SUBSAMPLE_METALFX`: only a pass whose pixel shader's SHA-1 (as the candidate line prints it) starts with this hex prefix is accepted (`no(pin)` otherwise) | any pixel shader that passes the other checks |
 | `DXMT_PSO_RECORD` | on | Shader warming W1 (#57; see [RECORD](#record)): records, durably, what each pipeline was built from, so later stages (W2/W3) can prepare shaders and pipelines before GW2 asks for them. Into `$(getconf DARWIN_USER_CACHE_DIR)dxmt/<exe>/recipes_1.db` (its own sqlite file, through the bridge's cache writer): each shader's DXBC by its SHA-1, each variant's translation inputs (VS, PS, plain) by shader SHA-1, variant digest and Metal target, and each plain graphics pipeline's recipe by the SHA-1 of an explicit serialization of the target, the vertex/pixel identities and every field of the descriptor Metal gets. Once per key and process. The callers never wait on the recorder: a fixed lock-free table of key fingerprints (2 MB) and a bounded lock-free queue (16,384 records or 128 MB), then counted drops. One lowest-priority writer thread skips rows the file already has and stops at a 256 MB file, or after 8 failed writes in a row; it never calls the logger (Present logs its lines). Changes nothing that is built or drawn | `=0`: no recording, no thread, no database opened |
-| `DXMT_PSO_GENERATIONS` | off | `=1` (exactly), with `DXMT_PSO_ARCHIVE=1` (#75; see [COMPILE](#compile), *Generations*): the archives are published as generations in `…/os-<OS build>-<GPU>/gen1/` instead of one file per session: each flush writes the pipelines added since the last one into an immutable shard of their own (never re-serializing an archive, which Metal fails at), a checksummed manifest lists the shards and their keys, and one index file (`CURRENT`) is replaced atomically, so a kill or a failed write leaves the last good generation. A pipeline Metal's packer names is excluded by its key from capture, in this and later sessions. One process writes a store; another gets lookup only | the session files of #52, unchanged (they and a store sit side by side; neither reads the other) |
 | `DXMT_RETIRE_RECOVERY` | on | A refused retirement (#113; never expected, a bug) recovers instead of holding every later chunk until teardown. The retirement ledger then retires by sequence with the completion the refused token proves: the finish thread waits for every chunk in order, so a token of the queue's submission for chunk `S` means every chunk up to `S` completed, and their holds go in sequence order (the ring resumes at `S + 1`); an empty or another queue's token proves nothing, and the next chunk's token recovers. A refused hold goes once the last chunk that may use it completed (its own chunk while unretired; for a retired sequence, every chunk the ring may still have in flight), not at teardown. A refused submission retirement retires the chunk the submission last waited for. One error line per failure (see *Other log lines*); the normal path is unchanged | `0`: refused holds and retirements are kept until the queue goes, as before |
 | `DXMT_WARM_JOBS` | 1 | (#159) With `DXMT_WARM`: speculative jobs the compile service runs at once while the warm builds are slow, 1 to 8. Slow is how a cold Metal cache shows: the moving average (1/8) of the completed speculative runs' time is 1 ms or more (a warm cache builds a pipeline in 0.03–0.12 ms, a cold one in 6–17 ms). Below that, and before the first speculative job completes, one at a time; never while a demand waits; a demanded speculative job runs at once, as before. Above 1 the service starts this many workers plus one, so speculative jobs never hold every worker, and reads the clock around each speculative run. Whether more than one is worth having is the cold-cache benchmark's to decide (`tests/gw2/stagecache_bench.m`). Parsed once per process | `1`, unset or anything outside 1–8: one at a time, today's rule, no clock read |
 | `DXMT_WARM_ORDER` | use | (#124) With `DXMT_WARM`: which recipes the plan takes. `use`: the use rows first (`DXMT_PSO_RECORD_USE`), then every recipe of the target; ranked by the newest session that used it, then by the number of sessions, then rowid; the first `DXMT_WARM_MAX` are planned and submitted in first-use order (the character select first), recipes without use rows (recorded before #124, or unused since) after them in rowid order. A file without use rows plans exactly as `rowid` does. Parsed once per process | `rowid`: #88's plan, the oldest recipes first, streamed |
 | `DXMT_PSO_RECORD_USE` | on | (#124) With `DXMT_PSO_RECORD`: the recipes' use data, as d9mt's state cache keeps it. One row per recipe ever used, `U` + the recipe's SHA-1 → schema, lastSession, sessionsUsed, firstUseMs (u32 each), rewritten in place; and a session counter, `Ssession` → schema, the last session's number. When it opens the file, the writer reads both (bridge call 193), takes the counter + 1 as this session's number and writes it back. A newer session always has a larger number; no clock is involved. It then merges each recipe this session used (built when its recipe is recorded, or taken from warming's shared results through `warmPipelineHit`) into its row, once per recipe and session. Bounded by the number of recipes; about 3,000–5,000 merges a session on the writer thread (`RECORD uses=`). Warming's plan ranks by them | `=0`: no use data (`DXMT_WARM_ORDER=use` then plans by rowid, as for a file without it) |
 | `DXMT_DEPENDENCY_COMPRESSION` | off | `=1` (exactly), Metal 4 only (#132, after GameSir `3170d0349a`; see [DEPS](#deps)): encoder fences follow a **checkpoint chain** instead of the per-encoder weak window. About every 64 encoder IDs one encoder (the checkpoint) waits on every encoder from the previous checkpoint's coverage to 64 IDs back, and on the previous checkpoint; every other encoder depends on the latest checkpoint (simplification usually removes that wait). So when an encoder runs, everything 127+ IDs back has finished, and the trackers keep direct dependencies up to 127 IDs back (legacy: 63). The trackers stay bounded, so the dropped dependencies need this cover (GameSir instead tracks every reader and writer by explicit ID). It also records a pass's fragment read of something the same pass wrote at pre-raster, which the legacy trackers forget. Read once per device; on Metal 3 the startup line says `unsupported` and the legacy policy stays. Encoder merging (the flush-time relation scan) is unchanged | the legacy weak window (each encoder waits on the encoders 64-127 IDs back that simplification can't reach) |
-| `DXMT_CACHE_DIR` | unset | (#134) An absolute unix path that replaces `$(getconf DARWIN_USER_CACHE_DIR)` as the base of DXMT's caches, so each setup of the game on one Mac (the GW2 on Mac app's bottle, a development bottle) keeps its own: the AIR cache `<base>/dxmt/<exe>/shaders_*.db`, the recipes `<base>/dxmt/<exe>/recipes_1.db`, Metal's `<base>/dxmt/<exe>/com.apple.metal` (when Metal takes it), and the PSO archive's default `<base>/dxmt/pso/…`. The `dxmt/` level stays, so the layout under the base is unchanged. Read by the bridge's unix side on each cache open (`dxmt_cache_base`, `src/winemetal/unix/cache_dir.h`); an absolute `DXMT_SHADER_CACHE_PATH` or `DXMT_PSO_ARCHIVE_DIR` still wins for its cache. Empty or relative: ignored, with one warning (`Caches:` lines). A value longer than `PATH_MAX` makes the opens fail. The startup line shows the base in effect, `ignored` or `default`; the native PSO archive tool takes the same base | unset: `$(getconf DARWIN_USER_CACHE_DIR)`, byte for byte |
-| `DXMT_PIN_MODULE` | on | (#137) A DLL of DXMT (`d3d11.dll` for GW2) pins itself for the process (`GetModuleHandleExW`, `GET_MODULE_HANDLE_EX_FLAG_PIN`) just before it starts its first thread (`dxmt::ThreadFn`). Its threads run its own code and some never end (the recipe writer, the PSO archive's flusher, the control poller), so a `FreeLibrary` that unmapped it crashed them (GW2 at exit: the recipe writer returned from its `Sleep` into freed code). Pinned, `FreeLibrary` only drops a reference: the module and its threads stay until the process exits, and its static destructors run at process exit instead. Read once per DLL | `FreeLibrary` can unload the module while its threads run (upstream) |
+| `DXMT_CACHE_DIR` | unset | (#134) An absolute unix path that replaces `$(getconf DARWIN_USER_CACHE_DIR)` as the base of DXMT's caches, so each setup of the game on one Mac (the GW2 on Mac app's bottle, a development bottle) keeps its own: the AIR cache `<base>/dxmt/<exe>/shaders_*.db`, the recipes `<base>/dxmt/<exe>/recipes_1.db`, and Metal's `<base>/dxmt/<exe>/com.apple.metal` (when Metal takes it). The `dxmt/` level stays, so the layout under the base is unchanged. Read by the bridge's unix side on each cache open (`dxmt_cache_base`, `src/winemetal/unix/cache_dir.h`); an absolute `DXMT_SHADER_CACHE_PATH` still wins for its cache. Empty or relative: ignored, with one warning (`Caches:` lines). A value longer than `PATH_MAX` makes the opens fail. The startup line shows the base in effect, `ignored` or `default` | unset: `$(getconf DARWIN_USER_CACHE_DIR)`, byte for byte |
+| `DXMT_PIN_MODULE` | on | (#137) A DLL of DXMT (`d3d11.dll` for GW2) pins itself for the process (`GetModuleHandleExW`, `GET_MODULE_HANDLE_EX_FLAG_PIN`) just before it starts its first thread (`dxmt::ThreadFn`). Its threads run its own code and some never end (the recipe writer, the control poller), so a `FreeLibrary` that unmapped it crashed them (GW2 at exit: the recipe writer returned from its `Sleep` into freed code). Pinned, `FreeLibrary` only drops a reference: the module and its threads stay until the process exits, and its static destructors run at process exit instead. Read once per DLL | `FreeLibrary` can unload the module while its threads run (upstream) |
 | `DXMT_VIEW_KEY_ARRAY_BIT` | on | (#155) For every texture a shader reads, the encode thread checks whether the bound view's type is an array type, as the shader wants it. A texture view's key carries the answer in one bit (taken from the view index, which keeps 27 bits: 134,217,728 views per texture, and creating one more ends the process with an error line), set from the view's type wherever a key is built, so a match returns without the texture's lock. A mismatch still reads the view's descriptor under the lock and binds the array or non-array view of it, as before. Read once per process | `=0`: every check takes the texture's lock and reads the view's descriptor (upstream); the key keeps the bit |
 | `DXMT_LAYER_PROPS_POLL_MS` | 250 | (#156) How often Present asks the bridge for the layer's screen values (`WMTQueryDisplaySettingForLayer`: the display setting's version, colour space and HDR metadata, and the screen's two EDR values), in ms. Between asks the last answer stands; a resize (`ResizeBuffers`) asks again at the next Present. The call walks the layer's view, window and screen and builds the screen's device description, about 28 µs under Rosetta, under the device mutex. A display, colour space or EDR change reaches the present pass within one interval | `=0`: every Present asks, as before |
 | `DXMT_PRESENTER_FREE` | off | (#185) `=1` (exactly): a presenter (one per swap chain) is deleted when its last reference goes, and its gamma texture and its two present pipelines go with it. That reference is either the swap chain's, after `~MTLD3D11SwapChain` waited for every chunk to retire, or the retirement ledger's, on the finish thread once the chunk that presented with it retired, so the GPU is done with them either way. Each deletion logs `Presenter: freed, N alive`. Off by default until it has run in my sessions. Steam's browser is where it shows: it makes 45 to 47 swap chains per process on the arm64 engine, GW2 one | off: every presenter stays until the process ends, as upstream (`Rc` doesn't delete, and `Presenter` had no `decRef` of its own) |
@@ -143,7 +139,7 @@ Sections: a feature registers a function with `gw2::SectionRegistrar` (`src/dxmt
 
 | Line | When |
 |---|---|
-| `GW2 fork <commit>: DXMT_STATS=1 DXMT_HITCH_MS=… DXMT_PRESENT_SPLIT=… DXMT_DISPLAY_SYNC=… DXMT_PRESENT_DEADLINE=… DXMT_CAP_LIMITER=… DXMT_STENCIL_PFV=… DXMT_DEPTH_PFV=… DXMT_BG_FPS=… DXMT_BG_FPS_MINIMIZED=… DXMT_BG_POLICY=… DXMT_RENDER_THREAD_PRIORITY=… DXMT_PSO_BLEND_HASH=… DXMT_PSO_MRU=… DXMT_PSO_TOPOLOGY_KEEP=… DXMT_CHUNKS=… DXMT_MAX_FRAME_LATENCY=… DXMT_COMPILE_WAIT_MS=… DXMT_PSO_ARCHIVE=… DXMT_PSO_ARCHIVE_DIR=… DXMT_PSO_FLUSH_EVERY=… DXMT_PROMOTE_FLUSH_MIN=… DXMT_PROMOTE_FLUSH_MS=… DXMT_TIMESTAMP_MODE=… DXMT_MAP_FAST=… DXMT_SKIP_REBIND=… DXMT_CONTROL=… DXMT_RESIDENCY_SET=… DXMT_UNRETAINED=… DXMT_LIFETIME_CHECK=… DXMT_METAL4=… DXMT_SUBSAMPLE_METALFX=… DXMT_PSO_RECORD=… DXMT_AIR_READERS=… DXMT_CACHE_DIR=… DXMT_COMPILE_DEMAND=… DXMT_COMPILE_PRIORITY=… DXMT_GETDATA_SKIP_FLUSH=… DXMT_LAYER_PROPS_POLL_MS=… DXMT_MTL4_ALLOCATOR_POOL=… DXMT_MTL4_DEVICE_RESIDENCY=… DXMT_MTL4_LAYER_SET=… DXMT_MTL4_PRESENT=… DXMT_MTL4_SHOWN_WAIT=… DXMT_MTL4_TIMESTAMP_REUSE=… DXMT_PRESENTER_FREE=… DXMT_PRESENT_QUEUE=… DXMT_PSO_GENERATIONS=… DXMT_PSO_RECORD_USE=… DXMT_RELEASE_POOL=… DXMT_RENAME_TRIM=… DXMT_RETIRE_RECOVERY=… DXMT_SKIP_EMPTY_SLOTS=… DXMT_SKIP_SAME_SRV=… DXMT_SKIP_SAME_STATE=… DXMT_THREAD_PRIORITY=… DXMT_UPDATE_ONE_CALL=… DXMT_VIEW_KEY_ARRAY_BIT=… DXMT_WARM=… DXMT_WARM_JOBS=… DXMT_WARM_MAX=… DXMT_WARM_ORDER=… cpus=… refresh=… clockfloor=…` then `GW2 fork <commit> set: …` | Two lines (#43; one before), once per process, at the first Present: the build, the **effective** value of every switch above (defaults included; `DXMT_PRESENT_DEADLINE=refresh` is one refresh, `DXMT_CHUNKS` is the ring size in effect, `DXMT_MAX_FRAME_LATENCY=unset` leaves the game's value, `DXMT_PSO_ARCHIVE` is `1` when the archives are on, `0` when not asked for, `failed` when asked for but they couldn't start, `DXMT_PSO_ARCHIVE_DIR=default` is the user cache dir, `DXMT_PROMOTE_FLUSH_MIN`/`_MS` as the immediate context parsed them: `MS` is at least 1 and is shown even when `MIN=0` turns it off, `DXMT_TIMESTAMP_MODE` is `exact`, `estimate` or `boundary`, `DXMT_MAP_FAST` and `DXMT_SKIP_REBIND` are `1` or `0`, `DXMT_CONTROL` is the path or `off`, `DXMT_RESIDENCY_SET` is `1` when the set is on, `0` when switched off, `failed` when asked for but unavailable, `DXMT_UNRETAINED` is `1` or `0`, `DXMT_LIFETIME_CHECK` is `1`, `0` or `unbuilt` (asked for in a build without it), `DXMT_METAL4` is `1` (Metal 4 in use, the default), `0` (`DXMT_METAL4=0`), or `unsupported` (on, but the device, macOS or another setting keeps Metal 3; a warning says which), `DXMT_SUBSAMPLE_METALFX` is `0`, `log` or `1`, `DXMT_PSO_RECORD` is `1` or `0`, `DXMT_AIR_READERS` the AIR read connections open (`0` with the shader cache off or its reader not opened, `unopened` before any device), `DXMT_CACHE_DIR` the cache base in effect, `ignored` (empty or relative) or `default` (#134), `DXMT_COMPILE_DEMAND` is `1` or `0`, `DXMT_COMPILE_PRIORITY` and `DXMT_THREAD_PRIORITY` are `critical`, `normal`, `utility:ok`, `utility:failed` or `utility:pending`, `DXMT_GETDATA_SKIP_FLUSH` is `1` or `0`, `DXMT_LAYER_PROPS_POLL_MS` the interval in ms, `DXMT_MTL4_LAYER_SET` is `buffer` or `queue`, `DXMT_MTL4_ALLOCATOR_POOL`, `DXMT_MTL4_DEVICE_RESIDENCY` and `DXMT_MTL4_TIMESTAMP_REUSE` are `1` or `0`, `DXMT_MTL4_PRESENT` is `mtl4`, `mtl3` or `done`, `DXMT_MTL4_SHOWN_WAIT` is `next`, `write` or `unused` (`write` without `DXMT_MTL4_PRESENT=mtl3` on Metal 4), `DXMT_PSO_GENERATIONS` is `1` (in use), `lookup` (another process writes the store), `unused` (asked for, but the archives are off or failed) or `0`, `DXMT_PRESENTER_FREE` is `1` or `0`, `DXMT_PRESENT_QUEUE` is `default`, `two`, `pace` or `unused` (`pace` with `DXMT_STATS=0`), `DXMT_RELEASE_POOL` is `1` or `0`, `DXMT_RENAME_TRIM` the sweep's age in sequence ids (`0`: off), `DXMT_RETIRE_RECOVERY` is `1` or `0`, `DXMT_SKIP_EMPTY_SLOTS`, `DXMT_SKIP_SAME_SRV` and `DXMT_SKIP_SAME_STATE` are `1` or `0`, `DXMT_UPDATE_ONE_CALL` is `1` or `0` (`0` with `DXMT_MAP_FAST=0`), `DXMT_VIEW_KEY_ARRAY_BIT` is `1` or `0`, `DXMT_WARM` is `off`, `functions` or `all`, `DXMT_WARM_JOBS` the speculative jobs at most (1 to 8), `DXMT_WARM_MAX` the cap, `DXMT_PSO_RECORD_USE` is `1` or `0`, `DXMT_WARM_ORDER` is `use` or `rowid` (anything but `rowid` plans by use)), the CPUs the game sees, the refresh rate (0 if unknown), the clock's own cost in ns (#150: the median of 9 batches' mean of 256 back-to-back `QueryPerformanceCounter` reads, measured once; every `MAP` interval and every `PACE` interval but `present`'s and `presentwait`'s loses it); the second line lists every `DXMT_*`, `WINENCPU` and `WINEMSYNC` variable set (`set: none` if none). Since #60 the line is generated from the switch registry (`src/dxmt/dxmt_gw2_switches.hpp`) in this order, unchanged: a PR that adds a switch declares it with `sw::Switch` (its effective value through `sw::provideEffective` if it differs from the parsed one) and doesn't edit `LogStartup`; such switches follow `DXMT_PSO_RECORD`, sorted by name, before `cpus`, `refresh` and `clockfloor`. It adds the name here |
+| `GW2 fork <commit>: DXMT_STATS=1 DXMT_HITCH_MS=… DXMT_PRESENT_SPLIT=… DXMT_DISPLAY_SYNC=… DXMT_PRESENT_DEADLINE=… DXMT_CAP_LIMITER=… DXMT_STENCIL_PFV=… DXMT_DEPTH_PFV=… DXMT_BG_FPS=… DXMT_BG_FPS_MINIMIZED=… DXMT_BG_POLICY=… DXMT_RENDER_THREAD_PRIORITY=… DXMT_PSO_BLEND_HASH=… DXMT_PSO_MRU=… DXMT_PSO_TOPOLOGY_KEEP=… DXMT_CHUNKS=… DXMT_MAX_FRAME_LATENCY=… DXMT_COMPILE_WAIT_MS=… DXMT_PROMOTE_FLUSH_MIN=… DXMT_PROMOTE_FLUSH_MS=… DXMT_TIMESTAMP_MODE=… DXMT_MAP_FAST=… DXMT_SKIP_REBIND=… DXMT_CONTROL=… DXMT_RESIDENCY_SET=… DXMT_UNRETAINED=… DXMT_LIFETIME_CHECK=… DXMT_METAL4=… DXMT_SUBSAMPLE_METALFX=… DXMT_PSO_RECORD=… DXMT_AIR_READERS=… DXMT_CACHE_DIR=… DXMT_COMPILE_DEMAND=… DXMT_COMPILE_PRIORITY=… DXMT_GETDATA_SKIP_FLUSH=… DXMT_LAYER_PROPS_POLL_MS=… DXMT_MTL4_ALLOCATOR_POOL=… DXMT_MTL4_DEVICE_RESIDENCY=… DXMT_MTL4_LAYER_SET=… DXMT_MTL4_PRESENT=… DXMT_MTL4_SHOWN_WAIT=… DXMT_MTL4_TIMESTAMP_REUSE=… DXMT_PRESENTER_FREE=… DXMT_PRESENT_QUEUE=… DXMT_PSO_RECORD_USE=… DXMT_RELEASE_POOL=… DXMT_RENAME_TRIM=… DXMT_RETIRE_RECOVERY=… DXMT_SKIP_EMPTY_SLOTS=… DXMT_SKIP_SAME_SRV=… DXMT_SKIP_SAME_STATE=… DXMT_THREAD_PRIORITY=… DXMT_UPDATE_ONE_CALL=… DXMT_VIEW_KEY_ARRAY_BIT=… DXMT_WARM=… DXMT_WARM_JOBS=… DXMT_WARM_MAX=… DXMT_WARM_ORDER=… cpus=… refresh=… clockfloor=…` then `GW2 fork <commit> set: …` | Two lines (#43; one before), once per process, at the first Present: the build, the **effective** value of every switch above (defaults included; `DXMT_PRESENT_DEADLINE=refresh` is one refresh, `DXMT_CHUNKS` is the ring size in effect, `DXMT_MAX_FRAME_LATENCY=unset` leaves the game's value, `DXMT_PROMOTE_FLUSH_MIN`/`_MS` as the immediate context parsed them: `MS` is at least 1 and is shown even when `MIN=0` turns it off, `DXMT_TIMESTAMP_MODE` is `exact`, `estimate` or `boundary`, `DXMT_MAP_FAST` and `DXMT_SKIP_REBIND` are `1` or `0`, `DXMT_CONTROL` is the path or `off`, `DXMT_RESIDENCY_SET` is `1` when the set is on, `0` when switched off, `failed` when asked for but unavailable, `DXMT_UNRETAINED` is `1` or `0`, `DXMT_LIFETIME_CHECK` is `1`, `0` or `unbuilt` (asked for in a build without it), `DXMT_METAL4` is `1` (Metal 4 in use, the default), `0` (`DXMT_METAL4=0`), or `unsupported` (on, but the device, macOS or another setting keeps Metal 3; a warning says which), `DXMT_SUBSAMPLE_METALFX` is `0`, `log` or `1`, `DXMT_PSO_RECORD` is `1` or `0`, `DXMT_AIR_READERS` the AIR read connections open (`0` with the shader cache off or its reader not opened, `unopened` before any device), `DXMT_CACHE_DIR` the cache base in effect, `ignored` (empty or relative) or `default` (#134), `DXMT_COMPILE_DEMAND` is `1` or `0`, `DXMT_COMPILE_PRIORITY` and `DXMT_THREAD_PRIORITY` are `critical`, `normal`, `utility:ok`, `utility:failed` or `utility:pending`, `DXMT_GETDATA_SKIP_FLUSH` is `1` or `0`, `DXMT_LAYER_PROPS_POLL_MS` the interval in ms, `DXMT_MTL4_LAYER_SET` is `buffer` or `queue`, `DXMT_MTL4_ALLOCATOR_POOL`, `DXMT_MTL4_DEVICE_RESIDENCY` and `DXMT_MTL4_TIMESTAMP_REUSE` are `1` or `0`, `DXMT_MTL4_PRESENT` is `mtl4`, `mtl3` or `done`, `DXMT_MTL4_SHOWN_WAIT` is `next`, `write` or `unused` (`write` without `DXMT_MTL4_PRESENT=mtl3` on Metal 4), `DXMT_PRESENTER_FREE` is `1` or `0`, `DXMT_PRESENT_QUEUE` is `default`, `two`, `pace` or `unused` (`pace` with `DXMT_STATS=0`), `DXMT_RELEASE_POOL` is `1` or `0`, `DXMT_RENAME_TRIM` the sweep's age in sequence ids (`0`: off), `DXMT_RETIRE_RECOVERY` is `1` or `0`, `DXMT_SKIP_EMPTY_SLOTS`, `DXMT_SKIP_SAME_SRV` and `DXMT_SKIP_SAME_STATE` are `1` or `0`, `DXMT_UPDATE_ONE_CALL` is `1` or `0` (`0` with `DXMT_MAP_FAST=0`), `DXMT_VIEW_KEY_ARRAY_BIT` is `1` or `0`, `DXMT_WARM` is `off`, `functions` or `all`, `DXMT_WARM_JOBS` the speculative jobs at most (1 to 8), `DXMT_WARM_MAX` the cap, `DXMT_PSO_RECORD_USE` is `1` or `0`, `DXMT_WARM_ORDER` is `use` or `rowid` (anything but `rowid` plans by use)), the CPUs the game sees, the refresh rate (0 if unknown), the clock's own cost in ns (#150: the median of 9 batches' mean of 256 back-to-back `QueryPerformanceCounter` reads, measured once; every `MAP` interval and every `PACE` interval but `present`'s and `presentwait`'s loses it); the second line lists every `DXMT_*`, `WINENCPU` and `WINEMSYNC` variable set (`set: none` if none). Since #60 the line is generated from the switch registry (`src/dxmt/dxmt_gw2_switches.hpp`) in this order, unchanged: a PR that adds a switch declares it with `sw::Switch` (its effective value through `sw::provideEffective` if it differs from the parsed one) and doesn't edit `LogStartup`; such switches follow `DXMT_PSO_RECORD`, sorted by name, before `cpus`, `refresh` and `clockfloor`. It adds the name here |
 | `HITCH frame=… ms=… commit=…x… sync=…x… bgsleep=… dxmt(ms/calls): …` | A Present-to-Present interval of at least `DXMT_HITCH_MS`, logged at the top of the Present that ends it. `frame` is the frame that Present presents (1-based, as the latency fence counts); the interval holds the previous Present and the game's work on this frame. `commit` (waits for a free chunk) and `sync` (Map's waits for the GPU) are ms × count, from the same interval; they overlap the categories they happen in. `bgsleep` is whether the background throttle was on. The categories are as `PACE`'s `dxmt` (`presentwait` is the latency wait) |
 | `SetMaximumFrameLatency(n)` | Every call; 0 is taken as 3 |
 | `SetMaximumFrameLatency(n): DXMT_MAX_FRAME_LATENCY keeps m` | Every call while `DXMT_MAX_FRAME_LATENCY` is set: the game asked for `n`, `m` stays in effect |
@@ -478,10 +474,10 @@ thread waits in `GetPipeline` when the draw that needs a pipeline is encoded bef
 pipeline is built. A frame with such waits is a hitch DXMT causes.
 
 `COMPILE variants= air=hit/miss pso=hit/miss built= failed= build=shader:ms/max pipeline:ms/max
-queue=now/max threads= wait=Nx ms/max slow= [waitcause=queued:N/ms,variantq:N/ms,variant:N/ms,building:N/ms[,other:N/ms]
-[archbusy=N]] [variant=lock:N/ms/max,air:…,lib:…,fn:…,xlate:…,store:…] [promoted=N] [archive=hit/miss miss=new:N,known:N added= queued= unflushed= addfailed= capped= skipped= rebuilt= [gen= published= excluded= missexcl=]]`
+queue=now/max threads= wait=Nx ms/max slow= [waitcause=queued:N/ms,variantq:N/ms,variant:N/ms,building:N/ms[,other:N/ms]]
+[variant=lock:N/ms/max,air:…,lib:…,fn:…,xlate:…,store:…] [promoted=N]`
 
-Counts are **totals in the 2 s window**; the `COMPILE frame=` line below has them per frame. Times are ms. Without `DXMT_STATS` nothing is counted or timed (no clock reads), except the count of built pipelines that `DXMT_PSO_FLUSH_EVERY` needs.
+Counts are **totals in the 2 s window**; the `COMPILE frame=` line below has them per frame. Times are ms. Without `DXMT_STATS` nothing is counted or timed (no clock reads).
 
 | Field | Meaning |
 |---|---|
@@ -497,15 +493,10 @@ Counts are **totals in the 2 s window**; the `COMPILE frame=` line below has the
 | `variant` | (W0) Only in a window with variant builds: their stages, each count / total ms / max ms, elapsed on the compile workers (waits and compiler services included; not CPU time). `lock`: waiting for the AIR cache reader's lock (one reader, shared by all workers); `air`: the AIR read; `lib`: `newLibrary`; `fn`: `newFunction`; `xlate`: airconv's translation, on an AIR miss; `store`: writing the new AIR (its lock included). Warm jobs (#88) aren't counted here |
 | `promoted` | (C2) Only with `DXMT_COMPILE_DEMAND=1`: compile jobs a demand moved ahead (a waited-for pipeline and its unfinished variants, each once). Under the declared policy `queued` waits also include a pipeline waiting for its variants, unqueued (its state stays `queued` until a worker starts it) |
 | `waitcause` | (#46) Only in a window with waits: the same waits by what the waited-for pipeline task was doing when the wait started, count / total ms. `queued`: submitted, no worker had started it (behind other compile tasks). `variantq`: started, parked on its vertex or pixel shader variant, and that variant was still queued. `variant`: parked on a variant that was compiling (or between the two). `building`: inside Metal's pipeline build (`newRenderPipelineState`/`newComputePipelineState`). `other`: not classified (submitted while `DXMT_STATS` was off, or done but not yet flagged); shown only when non-zero. The counts add up to `wait`: both come from one drain of the per-cause counters, so a wait finishing during the drain lands in one window for both |
-| `archbusy` | (#46) Only with `DXMT_PSO_ARCHIVE=1`: waits that began while PSO archive adds were still queued on the unix side (each add compiles the pipeline again for the archive) |
-| `archive` | Only with `DXMT_PSO_ARCHIVE=1`: pipelines found in earlier sessions' archives / built without a hit in the window, pipelines added to this session's archive in the window, adds still queued, adds not yet serialized, adds that failed and pipelines not added because the session reached 8192 (both since start) |
-| `miss` | (#52) With `DXMT_PSO_ARCHIVE=1`: the window's lookup misses, `new` (never in an earlier session's archive) and `known` (an earlier session's `.keys` has the pipeline's key, yet Metal missed it: keying, or a pipeline lost before a flush) |
-| `skipped`, `rebuilt` | (#52) Since start: pipelines left out of the archive after Metal's packer named them in a failed flush, and flushes that succeeded only after rebuilding the archive without them |
-| `gen`, `published`, `excluded`, `missexcl` | (#75) Only with `DXMT_PSO_GENERATIONS=1`: the generation loaded at start, then the last one published; pipelines in this session's shard of that publish; adds refused since start because their key is an excluded failing shape; the window's lookup misses of an excluded shape (not counted in `new` or `known`) |
 
 **`COMPILE frame=N wait=Nx ms/max queue=Q variants= air=hit/miss pso=hit/miss built= failed=
 build=shader:ms pipeline:ms created=N/min/max cause=queued:N,variantq:N,variant:N,building:N,other:N longest=<cause>
-lead:ms queue:ms parked:ms build:ms varq:ms varc:ms depth:N archq:N [dropped=D]`** (with
+lead:ms queue:ms parked:ms build:ms varq:ms varc:ms depth:N [dropped=D]`** (with
 `DXMT_STATS`): a frame whose encode-thread
 waits in `GetPipeline` added up to at least `DXMT_COMPILE_WAIT_MS` (2 ms): their count, total
 and longest wait, and the compile queue when the next frame's encoding started. `variants` to
@@ -537,105 +528,12 @@ longest wait's pipeline task, ms, `-` where not known:
 | `build` | Metal's pipeline build (0 or close to it when Metal's own shader cache has it) |
 | `varq`, `varc` | The variant it was last parked on: its time in the queue, and its compile (AIR cache lookup or airconv, `newLibrary`, `newFunction`) |
 | `depth` | Compile tasks submitted and not finished when the wait started |
-| `archq` | PSO archive adds queued when the wait started (`DXMT_PSO_ARCHIVE=1` only) |
 
 The stamps (#46) cost one clock read per task submission, start, park, build and completion, and
-only with `DXMT_STATS`; a wait also reads the archive's counters once (a unix call) when the
-archives are on. Since C1 the compile service (`src/dxmt/dxmt_compile_service.hpp`) owns the tasks'
+only with `DXMT_STATS`. Since C1 the compile service (`src/dxmt/dxmt_compile_service.hpp`) owns the tasks'
 records: their state (queued, running, parked, building, complete, and what a task is parked on) is
 kept with `DXMT_STATS` off too, a few atomic stores per task; the timestamps and the classification
 above are unchanged and still need `DXMT_STATS` from the task's submission.
-
-**PSO archives** (`DXMT_PSO_ARCHIVE=1`, off by default). Metal binary archives
-(`MTLBinaryArchive`), managed on the unix side of the bridge (`src/winemetal/unix/pso_archive.c`,
-bridge calls 149–151):
-
-- Files (with #52 also a `<file>.keys` sidecar per archive: the keys of the pipelines in it, written after each successful flush and removed with the archive): `$(getconf DARWIN_USER_CACHE_DIR)dxmt/pso/<exe>/os-<OS build>-<GPU>/` (#134: `DXMT_CACHE_DIR` replaces `$(getconf DARWIN_USER_CACHE_DIR)`)
-  (`DXMT_PSO_ARCHIVE_DIR` replaces `…/dxmt/pso`), one `<unix time>-<pid>.mtlarchive` per session
-  with a `.sum` next to it (size and SHA-256). Another OS build or GPU gets a new directory, and
-  the old one is removed.
-- At device creation (once per process) the newest 4 sessions whose `.sum` matches are loaded for
-  lookup. An archive without a matching `.sum` (an interrupted write), one Metal refuses, and
-  older sessions are deleted; `newBinaryArchiveWithDescriptor:` can crash on a bad file, so
-  nothing is loaded unchecked.
-- Each render and compute pipeline is first built with `MTLPipelineOptionFailOnBinaryArchiveMiss`
-  against those archives (a hit), and on a miss built again normally. Then it is added to this
-  session's archive on a background queue (utility QoS), hits included, so a session's archive
-  holds every pipeline it used. Geometry and tessellation emulation (mesh pipelines) and DXMT's
-  tile pipelines are not archived.
-- The archive is serialized by a low-priority thread (`dxmt-pso-archive`) every
-  `DXMT_PSO_FLUSH_EVERY` (256) new pipelines, every 30 s if any are new, and soon after a
-  device is released. Exit never flushes (serializing can take long, and Metal's threads may be
-  gone): a session loses at most the pipelines added since the last flush. `MTLBinaryArchive` writes all its contents each
-  time: the session's file grows and is rewritten (`.tmp`, then renamed; the `.sum` last).
-- Not covered: the archive saves Metal's backend compile only. AIR translation is DXMT's own AIR
-  cache, and the draw-time pipeline lookup still happens; the state-cache prewarm (building last
-  session's pipelines at startup) is not implemented.
-
-| Line | When |
-|---|---|
-| `PSO archive: on: N archives for lookup (X MB) in <dir>; this session writes <file> (keep 4 sessions, at most 8192 pipelines each)` | Once, at the first device creation |
-| `PSO archive: loaded <file> (X MB)` | Each archive loaded for lookup |
-| `PSO archive: deleted <file>: <reason>` | An archive skipped and removed: `no .sum`, `.sum does not match …`, `unreadable`, `Metal refused it: …`, `older than the newest 4 sessions` |
-| `PSO archive: removed <os-dir> (another OS build or GPU)`, `… leftover .tmp/.sum files` | Cleanup at start |
-| `PSO archive: off: <reason>` | The archives couldn't start (no cache dir, a relative `DXMT_PSO_ARCHIVE_DIR`, …) |
-| `PSO archive: flushing every N new pipelines, every 30 s if any are new (not at exit)` | Once, when on |
-| `PSO archive: flushed <file>: N pipelines (+M), X MB in T ms` | Each flush; `(session cap reached …)` once 8192 pipelines are in it |
-| `PSO archive: flush of <file> failed after T ms: <reason>` | A failed flush, also after the rebuild below; the next one tries again |
-| `PSO archive: flush of <file> failed: <Metal's error>` | (#52) The first try of a flush failed; the archive is rebuilt and written once more in the same flush |
-| `PSO archive: Metal names pipeline no. N: <shape> (left out of the archive from now on)` | (#52) The failed flush's error named a pipeline (`pipeline no. 'N'`, counted in that archive's own order): its shape (`render vs=… fs=…\|none colors=[…] depth= stencil= samples= raster= topology=` or `compute cs=…`; a function made with constant values shows as `<name>#c<hash>`). That pipeline is left out of every later flush (`skipped`); it is still built and used |
-| `PSO archive: rebuilding <file> without the pipelines left out after an earlier failure` | (#52) A flush after a failed retry: the current archive still holds skipped pipelines, so it is rebuilt before it is written |
-| `PSO archive: the rebuilt archive's pipeline no. N failed too: <shape> (left out from the next flush)` | (#52) The retry failed on another pipeline: it is skipped as well, the current archive is kept unchanged (a partial rebuild never replaces it), and the next flush rebuilds again before writing |
-| `PSO archive: flushed <file>: … (rebuilt with N pipelines after a failed flush)` | (#52) The retry into a fresh archive (every recorded pipeline but the skipped ones) succeeded |
-| `PSO archive: N pipeline keys from M of the loaded archives classify lookup misses (known/new)` | (#52) Once, at start: the keys read from the loaded archives' `.keys` sidecars |
-| `dxmt: PSO archive: about N pipelines added since the last flush are not saved (no flush at exit)` | At exit, on Wine's stderr (DXMT's log is gone by then), if the last completed flush missed some: adds not in it plus adds still queued (a flush still running counts as not done; an add in progress can count twice) |
-| `PSO archive: N pipelines could not be added so far; first error: …` | At the next flush after an add failed |
-
-**Generations** (#75, `DXMT_PSO_GENERATIONS=1` with `DXMT_PSO_ARCHIVE=1`, off by default). The same
-archives, published by the generation publisher (`src/winemetal/unix/pso_archive_publish.c`) instead of
-one rewritten file per session, from the instance's pure policy (`pso_archive_policy.c`):
-
-- Files in `…/os-<OS build>-<GPU>/gen1/`: shards `<sha256>.shard` (an `MTLBinaryArchive`'s
-  serialization, named by its content, never rewritten); one manifest per generation,
-  `g<16 hex>.manifest` (each shard's session, size, SHA-256 and pipeline keys, newest session first,
-  then the excluded shapes, then a SHA-256 over all of it); the index `CURRENT` (the generation and its
-  manifest's SHA-256), the only file ever replaced; `LOCK`.
-- A flush publishes the pipelines added since the last publish as a new shard (a delta); a session's
-  ninth publish merges its eight shards into one. The archive written is always one never serialized
-  before: Metal fails to serialize an archive again after more pipelines were added to it, naming a
-  good pipeline (`missing 'vertex' stage in pipeline no. N`, reproduced natively by
-  `tests/gw2/pso_archive_test.m`), which the session-file mode then leaves out. The shard is written,
-  synced and renamed into place, then the manifest, then `CURRENT`; a failure at any step leaves the last
-  good generation, and the next flush tries again.
-- At start the generation `CURRENT` names is loaded if its manifest verifies, else the newest older
-  one that does (the last good one); a shard whose size or SHA-256 doesn't match is dropped. The
-  newest 4 sessions' shards are used for lookup. Only the store's writer (an exclusive `flock` on
-  `LOCK`) publishes and removes files: everything but the current and the previous generation's.
-  Another process at the same time gets lookup only and captures nothing.
-- Exact-shape failure policy: a pipeline Metal's packer names in an archive never serialized before is
-  a failing shape. Every pipeline of its full key is left out, the shard is rebuilt without them and
-  written again (at most 3 tries a flush), and the key is excluded from capture, recorded in the
-  manifest for later sessions. Nothing broader is excluded: no class of pipelines (fragment-less or
-  any other) is skipped. Excluded shapes are still built and used, only not archived. A flush whose
-  new pipelines are all excluded publishes an exclusion-only generation (no new shard, every shard
-  carried); until that succeeds the flush counts as failed and the next one tries again.
-
-| Line | When |
-|---|---|
-| `PSO archive: on (generations[, lookup only]): generation G, N shards for lookup (X MB) in <dir>; this session publishes new generations\|captures nothing (keep 4 sessions, at most 8192 pipelines each)` | Once, at the first device creation |
-| `PSO archive: N pipeline keys classify lookup misses (known/new), M failing shapes are excluded from capture` | Once, at start |
-| `PSO archive: loaded shard <sha256 prefix> (session <time>-<pid>, X MB, N pipeline keys)` | Each shard used for lookup |
-| `PSO archive: shard <prefix> (session …) not used: Metal refused it: …` | A verified shard Metal won't open; left out of the next generation |
-| `PSO archive: dropped shard <prefix> (session …) of generation G: <reason>` | At start: `missing or unreadable`, `size or SHA-256 does not match`, `older than the newest sessions kept` |
-| `PSO archive: generation G failed verification: <reason>; using the last good generation` (or `…; no earlier generation verifies, starting empty`), `PSO archive: no valid index (CURRENT); using generation G, the newest that verifies` | At start, when the index or its manifest is bad |
-| `PSO archive: another process (pid P) writes <dir>: lookup only, this session captures nothing` | At start, when another process holds the store |
-| `PSO archive: removed N files no generation since the previous one uses (or leftovers)` | At start (writer only) |
-| `PSO archive: published generation G: N pipelines (+M) in shard <prefix>, X MB, S shards, E excluded shapes, in T ms` | Each successful flush: N pipelines in the new shard, M added since the last publish; `(merged this session's 8 shards into one)`, `(after excluding K failing shapes)`, `(session cap reached …)` when they apply |
-| `PSO archive: publish of generation G failed: <reason>` | One try of a flush failed (Metal's error, or the step: `cannot write the manifest`, `cannot replace the index`, …) |
-| `PSO archive: Metal names pipeline no. N of an archive never serialized before: <shape> (its key is excluded from capture from now on)` | That failure named a pipeline: its shape (as in #52's line); the next try rebuilds without it |
-| `PSO archive: publish of generation G failed after T ms: <reason> (generation P stays)` | The flush gave up; `CURRENT` still names generation P |
-| `PSO archive: published generation G: no shard, the N new pipelines are all excluded shapes; S shards, E excluded shapes, in T ms` | A flush whose new pipelines were all excluded, with an exclusion the store didn't record yet: the exclusion-only generation |
-| `PSO archive: nothing to publish: the N new pipelines are all excluded shapes` | The same, when the store already records every one of those exclusions |
 
 ### CMDS
 
@@ -1330,11 +1228,11 @@ so only the first run after a version change builds LLVM (about 25 minutes per a
 - **Native tests**: `zsh -n` on the zsh scripts and a self-check of `.github/gw2/warnings.zsh`, then
   `tests/gw2/run.zsh pure` and `metal`. The zsh checks run here because macOS has zsh, so they install
   nothing (#174). The runner's GPU is an Apple Paravirtual device
-  with Metal 3 and no Metal 4. There, `autorelease_count_test`, `commit_record_metal_test`, `pso_archive_test` and
+  with Metal 3 and no Metal 4. There, `autorelease_count_test`, `commit_record_metal_test` and
   `shared_event_listener_test` pass. `chunk_submission_test` and `mtl4fx_test` run their Metal 3 half and
   skip, while `mtl4_bridge_test`, `mtl4_queue_test`, `mtl4_specialize_test` and `paired_replay_test` skip
   outright (no Metal 4).
-  `pso_archive_tool_test` skips without the AIR copy from my Mac (`GW2_AIR_DB`). `thread_priority_test` skips
+  `thread_priority_test` skips
   because the runner's jobs run clamped to the utility band (maximum priority 20). A skip shows as `skip`
   with the test's reason. It never counts as a pass. The Metal 4 paths are still tested only on my Mac.
   The display tests (`present_cursor_test`) only build here, with `tests/gw2/run.zsh display --build-only`.
@@ -1457,19 +1355,6 @@ the pass and the next clear as the context's do and the drawable read back in th
 buffer. With `DXMT_STATS` on for those runs, `METAL4 beforepass` must count most of the frames on
 today's order (all, unless a pass completed before its present) and be 0 with `done`, and with `done` every present must come after its encode.
 
-The PSO archive (#75): `pso_archive_policy_test.c` (pure) checks keep, skip and classify under the
-legacy and the exact-shape policies; `pso_archive_publish_test.c` (pure, a fake shard writer) checks
-the generation publisher: round trips, a failure injected at each of its 7 steps leaving the last good
-generation, corrupt shards, manifests and index, the writer lock, collection and session retention.
-`pso_archive_test.m` (metal, arm64 and x86_64) drives sessions through the bridge's unix entry points:
-`pso_archive_parity.zsh` runs each scripted session (Metal's real re-serialization failure, fake packer
-failures, a truncated archive, the cap, retention, the exit report) through the instance with the
-publisher off and through #55's file (`tests/gw2/fixtures/legacy_pso_archive.c`, unchanged), and
-compares reports, counters, files and `.keys` byte for byte; `pso_archive_generations.zsh` checks the
-publisher across processes (hits, exclusion, last good generation, lock, a `kill -9`, merging, and
-exclusion-only generations: a fresh store's sole failing pipeline, a failing sole delta after a publish,
-a failed exclusion-only publish retried).
-
 `shared_event_listener_test.m` (#127) runs the shared-event listener's real unix handlers
 (`winemetal_unix.c`'s `#ifndef DXMT_NATIVE` block, cut out of the source by its build lines, with a
 stand-in `NtSetEvent`) as the PE side drives them: start on a thread of its own, destroy from another,
@@ -1522,21 +1407,6 @@ device, as warming does (every function, then every pipeline), on 1 to 16 thread
 phase's wall time, the builds by class (both functions new, one seen, …) and a `RESULT threads=
 wall=` line. Its header has the build line and where Metal keeps the tool's own cache, which has to
 be deleted before each cold run. It started as the perf review's one-thread `stagecache` (2026-11-10).
-
-The native PSO archive tool (#111): `pso_archive_tool_test.mm` (metal) builds the tool for x86_64 and
-arm64 and a generator that writes synthetic recipes from real AIR: an isolated copy of DXMT's AIR
-cache (`$GW2_AIR_DB`, else lane C's `work/dxmt-squeeze/native/w0/sample.db` in the GW2 on Mac
-workspace; skipped without it), copied again into the test's directory. Its recipes go through C3's
-serializer in five shapes (full VS/PS, blending, sparse color slots, MSAA, fragment-less), each checked
-to build on the device. `pso_archive_tool.zsh` then checks that `run` publishes all of them, that fresh
-processes on both architectures hit every one, `status`, the refusal under a held writer lock (the
-store unchanged), a second run's newer generation, an injected crash at one recipe isolated by
-the bisection, the rest published and hit, and six faked named packer failures (a third build with
-`PSO_ARCHIVE_TESTING`) excluded over several flushes, the rest published and the six classified as
-excluded misses. First, without AIR or Metal (so even when the rest is skipped), `DXMT_CACHE_DIR`
-(#136): empty or relative, `status` warns once and its defaults stay under the user cache dir;
-absolute, they are under it; longer than `PATH_MAX`, `status` and `run` exit 1 unless every path is
-given.
 
 `cache_dir_test.mm` (pure, #134) checks `DXMT_CACHE_DIR` through the bridge's unix side: absolute, a
 cache open (`CacheWriter`, `CacheReader`) creates `<dir>/dxmt/<exe>/<file>` and nothing in the user cache
@@ -1686,47 +1556,3 @@ layer sets on the queue: never more than 16, and with `DXMT_PRESENTER_FREE=1` ba
 each phase (a Metal 3 present, `DXMT_MTL4_PRESENT=mtl3`, takes none). Since #224 it ends with 8
 tracked presents on each path, Metal 4, Metal 4 with `DXMT_MTL4_PRESENT=mtl3` and plain Metal 3, and
 prints each one's PRESENT line.
-
-## PSO archive tool
-
-`tools/gw2/pso_archive_tool.cpp` (#111) is a macOS executable, not part of the DLL build: it builds
-the pipelines W1 recorded (`recipes_1.db`, `DXMT_PSO_RECORD`) after the game exits and publishes them
-as one generation of the PSO archive store, which a session with `DXMT_PSO_ARCHIVE=1
-DXMT_PSO_GENERATIONS=1` loads for lookup (see [COMPILE](#compile), *Generations*). It runs the game's
-own code, linked natively: the recipes are read through the bridge's `CacheEnumerate` and planned by
-W2/W3's `warmPlanAdd` (same order and target filter as `DXMT_WARM`); each function comes from the AIR
-cache through `CacheReader` (read-only, never a translation); each pipeline is built by C3's
-`Metal3PipelineBuilder`, so `_MTLDevice_newRenderPipelineState`'s descriptor conversion and the
-archive's lookup and capture (`pso_archive_new_render`) are the bridge's; the store is opened and
-published with `WMTPSOArchiveInit`/`WMTPSOArchiveFlush` (generations, the exact-shape policy, its
-retries and the last good generation). Build it with `tools/gw2/build-pso-archive-tool.zsh <output>
-[x86_64|arm64]`; GW2 on Mac wraps it as `scripts/pso-archive-tool.zsh build|run|status`.
-
-| Command | What it does |
-|---|---|
-| `run` | Builds every recipe in a child process and publishes one generation (this run is one session of the store: its shard, plus the newest 3 other sessions' shards). A publish failure that names a pipeline excludes its shape (the archive's exact-shape policy, 3 writes a flush); the child flushes again while the failures keep naming shapes (up to 64 flushes). A child that crashes, or whose publish fails without Metal naming a pipeline, is bisected in probe processes, each publishing a range into an empty scratch store no game reads; a recipe that fails alone is left out and the rest published (up to 4 rounds). Then a fresh process verifies the lookup |
-| `verify` | A fresh process builds the recipes against the published generation and reports hits and misses; it captures and publishes nothing |
-| `status` | Each store's current generation (shards, pipeline keys, size, excluded shapes), whether its writer lock is held, and the recipe file. Opens nothing for writing; probes the lock for an instant |
-
-Options: `--cache-dir` (DXMT's per-exe cache, default `<base>dxmt/<exe>`, where `<base>` is `DXMT_CACHE_DIR` if it's absolute (#134), else `$(getconf DARWIN_USER_CACHE_DIR)`; the archive's default store is `<base>dxmt/pso`. An empty or relative `DXMT_CACHE_DIR` is ignored with one stderr warning worded like the DLL's, `pso_archive_tool: Caches: DXMT_CACHE_DIR="<value>" isn't an absolute unix path; ignored, …` (#136). A `<base>` that can't be resolved, a `DXMT_CACHE_DIR` longer than `PATH_MAX`, is exit 1 when a default needs it, never a path relative to the working directory),
-`--recipes`, `--air` (default `<cache-dir>/shaders_<target>.db`), `--archive-dir` (as
-`DXMT_PSO_ARCHIVE_DIR`; another directory is a store no game reads), `--exe` (default `Gw2-64.exe`),
-`--keep` (sessions a generation keeps, default 4 as the DLL), `--limit`, `--metal-version` (default as
-DXMT picks it: 320 on macOS 15+ with an Apple7 GPU), `--quiet`.
-
-Output lines (stdout): `RESULT recipes= selected= built= failed= nofunction= airmiss= fnfailed=
-othertarget= malformed= hits= misses= known= new= missexcl= excluded= skipped= generation= published=
-flush= mode=` per child (`failed`: Metal refused the pipeline, listed as `BUILDFAILED <index> <recipe key>
-<error>` without `--quiet`; `nofunction`: a function missing, its AIR (`airmiss`) or the library
-(`fnfailed`); `hits`/`misses` as the archive counts them; `skipped`: pipelines left out after Metal's packer named
-their shape; `mode` `writer` or `lookup`), `ISOLATED
-<index> exit=<code>` per recipe the bisection left out, `VERIFY …` (the verifying process's result) and
-`LEFTOUT <n>`. The archive's own report lines go to stderr.
-
-Exit codes: 0 done; 1 usage or input error (no recipes or AIR file, no device, no `<base>` for a default path); 3 the store is busy:
-another process (a running game with generations on) holds its writer lock, and nothing was written;
-4 publishing failed; 5 a failure the bisection couldn't isolate; 6 published, but the verifying process
-failed (`VERIFY failed exit=<n>`; the generation stays). A failed run leaves the last good
-generation. A game started while the tool writes gets the store's lookup-only role for that session.
-`PSO_ARCHIVE_TOOL_TEST_CRASH=<index>` (tests only) aborts a child at that recipe; a build with
-`build-pso-archive-tool.zsh <output> <arch> testing` also takes the archive's `PSO_ARCHIVE_TEST_*` fakes.

@@ -1,8 +1,8 @@
 #pragma once
 
 /* gw2 (#134): the base of DXMT's caches, under which every relative cache path resolves (the AIR
- * cache dxmt/<exe>/shaders_*.db, the recipes dxmt/<exe>/recipes_1.db, Metal's dxmt/<exe>/com.apple.metal,
- * the PSO archive's default dxmt/pso). DXMT_CACHE_DIR when it is an absolute unix path, so a setup
+ * cache dxmt/<exe>/shaders_*.db, the recipes dxmt/<exe>/recipes_1.db, Metal's dxmt/<exe>/com.apple.metal).
+ * DXMT_CACHE_DIR when it is an absolute unix path, so a setup
  * (the GW2 on Mac app's bottle, a development bottle) can keep its caches apart; otherwise, unset,
  * empty or relative, the user cache dir ($(getconf DARWIN_USER_CACHE_DIR)) as before. The PE side
  * logs the choice once (dxmt_gw2_cache_dir.hpp, same rule). Returns what confstr returns: the length

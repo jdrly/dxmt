@@ -1,6 +1,6 @@
 #pragma once
 
-// gw2 (#5): shader and pipeline compile telemetry, and the PE side of the PSO archives.
+// gw2 (#5): shader and pipeline compile telemetry.
 //
 // - The COMPILE section (2 s window, DXMT_STATS): new shader variants, AIR cache hits/misses,
 //   pipeline cache hits/misses, pipelines built, build time, the compile queue, and the encode
@@ -8,11 +8,8 @@
 // - A per-frame "COMPILE frame=..." line for a frame whose encode-thread waits reach
 //   DXMT_COMPILE_WAIT_MS (default 2), at most one per 200 ms, with the variants, cache lookups
 //   and builds of all threads while that frame was encoded.
-// - DXMT_PSO_ARCHIVE=1 (off by default): Metal binary archives for pipelines, kept on the unix
-//   side of the bridge (src/winemetal/unix/pso_archive.c); a thread here serializes them every
-//   DXMT_PSO_FLUSH_EVERY new pipelines and logs each flush.
 //
-// Everything is counted only with DXMT_STATS on, except what the archive needs.
+// Everything is counted only with DXMT_STATS on.
 
 #include "dxmt_gw2_thread_priority.hpp"
 #include <atomic>
@@ -32,7 +29,7 @@ void compileVariantNew();
 void compileFirstVariant(int64_t created);
 void compilePipelineLookup(bool hit);
 // Compile workers. compileClock() is the start of a build (0, no clock read, without DXMT_STATS);
-// the *Built calls take it. compilePipelineBuilt also counts for the archive flushes.
+// the *Built calls take it.
 void compileAirLookup(bool hit);
 int64_t compileClock();
 void compileShaderBuilt(int64_t t0);
@@ -84,23 +81,12 @@ private:
   const compile::JobRecord *job_ = nullptr;
   int cause_ = 0;
   int64_t depth_ = 0;
-  int64_t archq_ = -1;
 };
 
 // The switches as parsed (once), for the code and the startup line.
 struct CompileSettings {
-  double wait_ms = 2;             // DXMT_COMPILE_WAIT_MS
-  bool archive_requested = false; // DXMT_PSO_ARCHIVE=1
-  std::string archive_dir;        // DXMT_PSO_ARCHIVE_DIR; empty: the user cache dir
-  uint64_t flush_every = 256;     // DXMT_PSO_FLUSH_EVERY
+  double wait_ms = 2; // DXMT_COMPILE_WAIT_MS
 };
 const CompileSettings &compileSettings();
-// The archives are on: requested, and psoArchiveInit got them started.
-bool psoArchiveOn();
-
-// PSO archives: once per process, with the Metal device (no-op unless DXMT_PSO_ARCHIVE=1).
-void psoArchiveInit(uint64_t mtl_device);
-// Asks for a flush (non-blocking), e.g. when a device goes away.
-void psoArchiveRequestFlush();
 
 } // namespace dxmt::gw2
