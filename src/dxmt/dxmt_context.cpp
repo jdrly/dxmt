@@ -1474,6 +1474,11 @@ ArgumentEncodingContext::flushCommandsImpl(CommandBuffer &cmdbuf, uint64_t seqId
           } else {
             // no Metal 3 buffer: nothing waits for `shown`, and this frame presents the Metal 4 way
             mtl3 = false;
+            // gw2 (#271): with DXMT_MTL4_SHOWN_WAIT=write a present before it may still be left to a write,
+            // and this one may have replaced its texture as the one writes are checked against: wait now
+            if (gw2_shown_write_)
+              if (uint64_t value = gw2_shown_.waitBefore())
+                cmdbuf.waitShown(value);
             static std::atomic<bool> s_logged{false};
             if (!s_logged.exchange(true, std::memory_order_relaxed))
               ERR("Metal 4: no Metal 3 command buffer for a present; it presents the Metal 4 way "

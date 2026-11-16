@@ -9,7 +9,8 @@
 //   access with ResourceAccess::Write (gw2NoteShownWrite, in both ArgumentEncodingContext::access
 //   overloads for textures) flags its encoder when written() says so. A merge passes the flag on.
 // - flush: before a flagged encoder that isn't Null, waitBefore(); after a Metal 3 present, the wait
-//   right away when the switch is off or presented() said so, else flushed(value, false).
+//   right away when the switch is off or presented() said so, else flushed(value, false); a present
+//   without a Metal 3 command buffer calls waitBefore() too.
 //
 // Part 1, where the wait goes:
 // - `next` (the default, the switch off): right after every present, before any of the next frame.
@@ -23,7 +24,8 @@
 //   write the back buffer: it is D3D11_USAGE_DEFAULT, and Map takes only dynamic and staging resources.
 // - A read of the presented texture doesn't wait. A merged-away encoder hands the wait to the one it
 //   merged into. A write after the present in the same chunk waits for that present. A second
-//   texture (a second swap chain or a resize) waits right after its present.
+//   texture (a second swap chain or a resize) waits right after its present, and a present that falls
+//   back to the Metal 4 way (no Metal 3 command buffer) places a deferred wait at once.
 //
 // Part 2, the queue arithmetic (#271's acceptance test; the runner presents to no display): 600
 // frames at 60 Hz on the GPU, 13.6 ms each (0.2's median), every 10th 18.0 ms, the last 2 ms of each
@@ -85,10 +87,12 @@ public:
     return unsigned(chunk_.size() - 1);
   }
 
+  // fallback: the Metal 3 command buffer couldn't be made, and it presents the Metal 4 way
   unsigned
-  present(const void *texture) {
+  present(const void *texture, bool fallback = false) {
     Enc e;
     e.present = true;
+    e.fallback = fallback;
     if (write_)
       e.now = shown_.presented(texture);
     chunk_.push_back(e);
@@ -116,6 +120,14 @@ public:
       if (e.flag && !e.null)
         if (uint64_t v = shown_.waitBefore())
           waits.push_back({i, v});
+      if (e.present && e.fallback) {
+        // no `shown` of its own; a present left to a write waits now (its texture may not be the
+        // source any more)
+        if (write_)
+          if (uint64_t v = shown_.waitBefore())
+            waits.push_back({i, v});
+        continue;
+      }
       if (e.present) {
         uint64_t value = ++values_;
         bool now = !write_ || e.now;
@@ -131,7 +143,7 @@ public:
 
 private:
   struct Enc {
-    bool flag = false, present = false, now = true, null = false;
+    bool flag = false, present = false, now = true, null = false, fallback = false;
   };
   bool write_;
   ShownWait shown_;
@@ -260,6 +272,18 @@ placement() {
     unsigned after = ctx.encoder({BB});
     auto w = ctx.flush();
     CHECK(w.size() == 2 && w[0].value == 2 && w[1].before == after && w[1].value == 3);
+  }
+  // a second swap chain's present that falls back to the Metal 4 way: the first texture's deferred
+  // wait is placed at once, since a write to it isn't flagged any more
+  {
+    Context ctx(true);
+    twoFrames(ctx);
+    unsigned p = ctx.present(BB2, true);
+    auto w = ctx.flush();
+    CHECK(w.size() == 1 && w[0].before == p && w[0].value == 2);
+    ctx.encoder({BB}); // after the wait for present 2
+    w = ctx.flush();
+    CHECK(w.empty());
   }
   // a second swap chain: its present waits right away, and a write to the first texture is behind it
   {
