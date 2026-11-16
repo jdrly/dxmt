@@ -71,7 +71,7 @@ public:
   // (destroyed after it) may still run chunks that use them. Command buffers that don't retain them
   // (DXMT_UNRETAINED=1), or the lifetime check that assumes they aren't retained, need every
   // committed chunk retired first. The immediate context goes first (in the members' own order), so
-  // its promote-flush watchdog can't commit another chunk after the wait.
+  // nothing commits another chunk after the wait.
   ~MTLD3D11DeviceImpl() {
     if (!gw2::lifetime::keepUntilRetired())
       return;

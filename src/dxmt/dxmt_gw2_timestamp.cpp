@@ -78,8 +78,6 @@ timestampModeName(TimestampMode mode) {
     return "exact";
   case TimestampMode::Estimate:
     return "estimate";
-  case TimestampMode::Boundary:
-    return "boundary";
   }
   return "estimate";
 }
@@ -91,10 +89,8 @@ timestampMode() {
     TimestampMode m = TimestampMode::Estimate;
     if (v == "exact" || v == "0")
       m = TimestampMode::Exact;
-    else if (v == "boundary")
-      m = TimestampMode::Boundary;
     else if (!v.empty() && v != "estimate")
-      Logger::warn(std::format("DXMT_TIMESTAMP_MODE={} is not exact, estimate or boundary; using estimate", v));
+      Logger::warn(std::format("DXMT_TIMESTAMP_MODE={} is not exact or estimate; using estimate", v));
     switch (m) {
     case TimestampMode::Exact:
       Logger::info("Timestamp queries: exact (DXMT_TIMESTAMP_MODE): each End closes the open pass and commits at "
@@ -103,10 +99,6 @@ timestampMode() {
     case TimestampMode::Estimate:
       Logger::info("Timestamp queries: estimate (DXMT_TIMESTAMP_MODE): no pass split and no commit; the value is "
                    "interpolated between the GPU start and end of the command buffer the query lands in");
-      break;
-    case TimestampMode::Boundary:
-      Logger::info("Timestamp queries: boundary (DXMT_TIMESTAMP_MODE): no pass split; the commit happens at the next "
-                   "pass change; the value is interpolated in that command buffer");
       break;
     }
     return m;
