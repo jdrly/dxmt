@@ -91,6 +91,14 @@ void metal4EncodeCounters(const WMTMtl4BindingState &state);
 // `before_pass`: its pass's commit hadn't completed (METAL4 beforepass). Any thread.
 void metal4PresentCounted(bool before_pass, uint64_t at_ns);
 
+// gw2 (#271): DXMT_MTL4_SHOWN_WAIT=write is in effect on a queue: METAL4 gets its shown field
+void metal4ShownWaitInUse();
+// gw2 (#271), with DXMT_STATS and DXMT_MTL4_SHOWN_WAIT=write, encode thread: a Metal 3 present whose
+// wait for `shown` was left to a later write (METAL4 shown deferred); that wait placed before the
+// chunk's encoder `index` of `count` (shown waited and at)
+void metal4ShownDeferred();
+void metal4ShownWaited(unsigned index, unsigned count);
+
 class Mtl4Queue {
 public:
   // gw2 (#204): the most allocators the pool keeps idle (DXMT_MTL4_ALLOCATOR_POOL=1)
