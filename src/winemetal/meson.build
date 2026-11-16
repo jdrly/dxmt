@@ -4,6 +4,18 @@ winemetal_src = [
   'winemetal_thunks.c'
 ]
 
+# gw2 (#182): athei/dxmt fc63ce8. winemetal takes only the unix call setup (unix_lib.o) from
+# winecrt0. An ARM64EC image gets its CHPE metadata from libmingwex's chpe.o, which also defines
+# __icall_helper_arm64ec. Since Wine 11.21 (Mach9's engine) winebuild generates the CHPE metadata
+# and winecrt0's arm64ec.o defines only __icall_helper_arm64ec, so with winecrt0 searched first
+# athei's link against Wine's build tree took both and failed on the symbol defined twice. Search
+# libmingwex first: chpe.o is then the only provider, as for the DLLs that don't link winecrt0, and
+# the link is the one Mach9's own winemetal.dll gets. With an older Wine, chpe.o provides it too.
+winemetal_crt_deps = []
+if cpu_family == 'aarch64'
+  winemetal_crt_deps += cc.find_library('mingwex')
+endif
+
 winemetal_ld_args = []
 
 winemetal_link_depends = []
@@ -32,18 +44,6 @@ elif wine_install_path != ''
   winebuild = find_program(join_paths(wine_install_path, 'bin/winebuild'), 'winebuild')
 else
   error('One of the options -Dwine_build_path or -Dwine_install_path is required')
-endif
-
-# gw2 (#182): athei/dxmt fc63ce8. winemetal takes only the unix call setup (unix_lib.o) from
-# winecrt0. An ARM64EC image gets its CHPE metadata from libmingwex's chpe.o, which also defines
-# __icall_helper_arm64ec. Since Wine 11.21 (Mach9's engine) winebuild generates the CHPE metadata
-# and winecrt0's arm64ec.o defines only __icall_helper_arm64ec, so with winecrt0 searched first
-# athei's link against Wine's build tree took both and failed on the symbol defined twice. Search
-# libmingwex first: chpe.o is then the only provider, as for the DLLs that don't link winecrt0, and
-# the link is the one Mach9's own winemetal.dll gets. With an older Wine, chpe.o provides it too.
-winemetal_crt_deps = []
-if cpu_family == 'aarch64'
-  winemetal_crt_deps += cc.find_library('mingwex')
 endif
 
 winemetal_dll = shared_library('winemetal', winemetal_src,

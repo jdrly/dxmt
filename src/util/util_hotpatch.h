@@ -8,14 +8,6 @@
 
 #pragma once
 
-#if defined(DECLSPEC_CHPE_PATCHABLE)
-#define DXMT_HOTPATCHABLE DECLSPEC_CHPE_PATCHABLE
-#elif defined(__arm64ec__)
-#define DXMT_HOTPATCHABLE __attribute__((hybrid_patchable))
-#else
-#define DXMT_HOTPATCHABLE
-#endif
-
 // gw2 (#248): a patchable entry whose body another patchable entry needs. On ARM64EC a call to a
 // DXMT_HOTPATCHABLE function goes through its patchable x64 entry even from inside this module, so
 // an entry that called another ran a hook on both of them twice: with Present calling Present1, a
@@ -35,4 +27,12 @@
 #define DXMT_HOTPATCHABLE_SHARED(entry, body, params, args)                                         \
   __attribute__((always_inline)) HRESULT body params { return entry args; }                       \
   DXMT_HOTPATCHABLE HRESULT STDMETHODCALLTYPE entry params final
+#endif
+
+#if defined(DECLSPEC_CHPE_PATCHABLE)
+#define DXMT_HOTPATCHABLE DECLSPEC_CHPE_PATCHABLE
+#elif defined(__arm64ec__)
+#define DXMT_HOTPATCHABLE __attribute__((hybrid_patchable))
+#else
+#define DXMT_HOTPATCHABLE
 #endif
