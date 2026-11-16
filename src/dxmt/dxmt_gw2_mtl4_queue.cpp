@@ -20,6 +20,10 @@ std::atomic<bool> g_any{false};
 // gw2 (#227, #242): DXMT_MTL4_PRESENT in use, as METAL4 present= names it
 std::atomic<const char *> g_present_name{"mtl4"};
 std::atomic<uint64_t> g_before_pass{0}; // gw2 (#242)
+// gw2 (#271): DXMT_MTL4_SHOWN_WAIT=write's presents with a deferred wait, the waits placed and their
+// positions in their chunks (per mille of the chunk's encoders before the wait)
+std::atomic<uint64_t> g_shown_deferred{0}, g_shown_waited{0}, g_shown_at_permille{0};
+std::atomic<bool> g_shown_on{false};
 // gw2 (#204): every queue's command allocators alive now, and their sizes at their last reset (not
 // reset with the window)
 std::atomic<uint64_t> g_allocators{0}, g_alloc_held_bytes{0};
@@ -35,6 +39,14 @@ std::string
 metal4Section(double, uint32_t) {
   if (!g_any.load(std::memory_order_relaxed))
     return {};
+  // gw2 (#271): only with DXMT_MTL4_SHOWN_WAIT=write in effect
+  std::string shown;
+  if (g_shown_on.load(std::memory_order_relaxed)) {
+    uint64_t waited = g_shown_waited.exchange(0, std::memory_order_relaxed);
+    uint64_t at = g_shown_at_permille.exchange(0, std::memory_order_relaxed);
+    shown = std::format(" shown=deferred:{},waited:{},at:{:.2f}", g_shown_deferred.exchange(0, std::memory_order_relaxed),
+                        waited, waited ? at / 1000.0 / waited : 0.0);
+  }
   return std::format(
       "commits={} buffers={} allocmb={:.2f} allocators={} allocheld={:.2f} slow={} errors={} resadds={} missed={} "
       "unsupported={} bytesover={} blitbar={} present={} beforepass={}",
@@ -45,7 +57,7 @@ metal4Section(double, uint32_t) {
       g_missed.exchange(0, std::memory_order_relaxed), g_unsupported.exchange(0, std::memory_order_relaxed),
       g_bytes_overflow.exchange(0, std::memory_order_relaxed), g_blit_barriers.exchange(0, std::memory_order_relaxed),
       g_present_name.load(std::memory_order_relaxed), g_before_pass.exchange(0, std::memory_order_relaxed)
-  );
+  ) + shown;
 }
 
 SectionRegistrar s_metal4("METAL4", &metal4Section);
@@ -87,6 +99,25 @@ metal4PresentCounted(bool before_pass, uint64_t at_ns) {
   if (before_pass)
     g_before_pass.fetch_add(1, std::memory_order_relaxed);
   presentAtSample(at_ns);
+}
+
+void
+metal4ShownWaitInUse() {
+  g_shown_on.store(true, std::memory_order_relaxed);
+}
+
+void
+metal4ShownDeferred() {
+  if (statsEnabled())
+    g_shown_deferred.fetch_add(1, std::memory_order_relaxed);
+}
+
+void
+metal4ShownWaited(unsigned index, unsigned count) {
+  if (!statsEnabled())
+    return;
+  g_shown_waited.fetch_add(1, std::memory_order_relaxed);
+  g_shown_at_permille.fetch_add(count ? uint64_t(index) * 1000 / count : 0, std::memory_order_relaxed);
 }
 
 Mtl4Queue::Mtl4Queue(WMT::Device device, uint32_t slots, bool allocator_pool) :
@@ -385,7 +416,8 @@ const std::vector<Mtl4Commit *> &
 Mtl4Queue::wait(uint64_t seq) {
   auto &s = slot(seq);
   // gw2 (#227): the Metal 3 presents first. Each needs only this queue's commits before it, and the
-  // commits after it wait for its `shown`, which waitMetal3 signals itself after a failure
+  // commits after it wait for its `shown` (gw2 #271: with DXMT_MTL4_SHOWN_WAIT=write, from the first
+  // one that writes the presented texture), which waitMetal3 signals itself after a failure
   for (auto &present : s.metal3)
     waitMetal3(present);
   for (auto *commit : s.commits) {
@@ -438,7 +470,7 @@ void
 Mtl4Queue::waitIdle() {
   if (!event_)
     return;
-  // gw2 (#227): the Metal 3 presents first, in present order (each one's `frame` comes after the
+  // gw2 (#227): the Metal 3 presents first, in present order (each one's `frame` may come after the
   // `shown` of the one before), so a failed one can't leave the queue waiting for `shown`
   std::vector<const Metal3Present *> presents;
   for (auto &slot : slots_)

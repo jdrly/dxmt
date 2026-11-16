@@ -81,7 +81,11 @@ public:
   uint64_t beginMetal3Present(WMT::CommandBuffer present);
   // `present` signals `shown` at `value` and is committed; the chunk holds it (Mtl4Queue::wait waits
   // for it, retire lets it go), and the command buffers committed from now on wait for `shown`.
-  void commitMetal3Present(WMT::CommandBuffer present, uint64_t value);
+  // gw2 (#271): `wait` false (DXMT_MTL4_SHOWN_WAIT=write): they don't; waitShown places the wait later.
+  void commitMetal3Present(WMT::CommandBuffer present, uint64_t value, bool wait = true);
+  // gw2 (#271): commits the open command buffer; the command buffers committed from now on wait for
+  // `shown` at `value`
+  void waitShown(uint64_t value);
 
   Mtl4Queue &
   queue() {

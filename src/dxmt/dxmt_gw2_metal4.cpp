@@ -47,6 +47,14 @@ sw::Switch<bool> kMtl4TimestampReuse{"DXMT_MTL4_TIMESTAMP_REUSE", false, sw::leg
 sw::Switch<std::string> kMtl4Present{"DXMT_MTL4_PRESENT", "mtl4", mtl4PresentGrammar};
 // gw2 (#204)
 sw::Switch<bool> kMtl4AllocatorPool{"DXMT_MTL4_ALLOCATOR_POOL", false, sw::legacy::exactlyOne};
+// gw2 (#271): `next` (the default) or `write`. The startup line shows `unused` for `write` without
+// DXMT_MTL4_PRESENT=mtl3 on Metal 4
+sw::Switch<std::string> kMtl4ShownWait{"DXMT_MTL4_SHOWN_WAIT", "next", mtl4ShownWaitGrammar};
+sw::Effective kMtl4ShownWaitLine{"DXMT_MTL4_SHOWN_WAIT", [] {
+  if (kMtl4ShownWait() != "write")
+    return std::string("next");
+  return std::string(mtl4ShownWaitWrite() && metal4Active() ? "write" : "unused");
+}};
 } // namespace
 
 bool
@@ -69,6 +77,12 @@ mtl4PresentMetal3() {
 bool
 mtl4PresentDone() {
   static const bool on = kMtl4Present() == "done";
+  return on;
+}
+
+bool
+mtl4ShownWaitWrite() {
+  static const bool on = kMtl4ShownWait() == "write" && mtl4PresentMetal3();
   return on;
 }
 

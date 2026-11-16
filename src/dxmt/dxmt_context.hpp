@@ -28,6 +28,8 @@
 #include "dxmt_gw2_rebind.hpp"
 #include "dxmt_gw2_residency.hpp"
 #include "dxmt_gw2_mtl4_encoding.hpp"
+#include "dxmt_gw2_metal4.hpp"
+#include "dxmt_gw2_shown_wait.hpp"
 #include "dxmt_occlusion_query.hpp"
 #include "dxmt_presenter.hpp"
 #include "dxmt_residency.hpp"
@@ -135,6 +137,8 @@ struct EncoderData {
   FenceSet fence_update;
   EncoderBarrierState barrier_state;
   bool gw2_checkpoint = false; // gw2 (#132): a stage of this encoder is a checkpoint (DEPS only)
+  // gw2 (#271): it writes the texture a present read (DXMT_MTL4_SHOWN_WAIT=write, dxmt_gw2_shown_wait.hpp)
+  bool gw2_shown_wait = false;
 };
 
 struct GSDispatchArgumentsMarshal {
@@ -264,6 +268,8 @@ struct PresentData : EncoderData {
   double after;
   double deadline; // gw2: present at encode time + deadline (s) when no minimum duration applies; 0 = plain
   DXMTPresentMetadata metadata;
+  // gw2 (#271): with DXMT_MTL4_SHOWN_WAIT=write, false when the wait for its `shown` is left to a write
+  bool gw2_shown_now = true;
 };
 
 struct SpatialUpscaleData : EncoderData {
@@ -383,6 +389,7 @@ public:
   access(Rc<Texture> const &texture, unsigned level, unsigned slice, int flags) {
     auto allocation = texture->current();
     retainAllocation(allocation);
+    gw2NoteShownWrite(allocation, flags); // gw2 (#271)
     if (!allocation->flags().test(TextureAllocationFlag::GpuReadonly)) {
       if (likely(allocation->flags().test(TextureAllocationFlag::ShaderReadonly))) {
         track<stage>(allocation->fenceTrackers[0], flags);
@@ -400,6 +407,7 @@ public:
     assert(viewId);
     auto allocation = texture->current();
     retainAllocation(allocation);
+    gw2NoteShownWrite(allocation, flags); // gw2 (#271)
     auto &view = texture->view(viewId, allocation);
     if (!allocation->flags().test(TextureAllocationFlag::GpuReadonly)) {
       if (likely(allocation->flags().test(TextureAllocationFlag::ShaderReadonly))) {
@@ -418,6 +426,15 @@ public:
   }
 
   CounterAllocation *getCounterAllocation(Rc<Counter> const &counter);
+
+  // gw2 (#271): every texture access the encoders make passes here, so a write to the texture a
+  // present read flags its encoder, whatever the command (DXMT_MTL4_SHOWN_WAIT=write; nothing is set
+  // without it, and a source is only ever recorded with it)
+  void
+  gw2NoteShownWrite(TextureAllocation *allocation, int flags) {
+    if (unlikely(gw2_shown_.source() != nullptr) && (flags & ResourceAccess::Write) && gw2_shown_.written(allocation))
+      encoder_current->gw2_shown_wait = true;
+  }
 
   template <PipelineStage stage = PipelineStage::Compute>
   std::pair<BufferAllocation *, uint64_t>
@@ -1077,6 +1094,9 @@ private:
 
   bool present_split_ = env::getEnvVar("DXMT_PRESENT_SPLIT") != "0";
   gw2::EncodeCounters gw2_enc_; // gw2 (#4): the encode thread's ENCODE counters
+  // gw2 (#271): DXMT_MTL4_SHOWN_WAIT=write's state across chunks (encode thread)
+  bool gw2_shown_write_ = gw2::mtl4ShownWaitWrite();
+  gw2::ShownWait gw2_shown_;
   gw2::RebindCounters gw2_rebind_; // gw2 (#30): the encode thread's REBIND counters
   bool skip_rebind_ = gw2::skipRebind(); // gw2 (#30): DXMT_SKIP_REBIND
   bool rebind_logged_ = false;           // gw2 (#30): the first skip is logged

@@ -170,11 +170,17 @@ Mtl4Encoding::beginMetal3Present(WMT::CommandBuffer present) {
 }
 
 void
-Mtl4Encoding::commitMetal3Present(WMT::CommandBuffer present, uint64_t value) {
+Mtl4Encoding::commitMetal3Present(WMT::CommandBuffer present, uint64_t value, bool wait) {
   present.encodeSignalEvent(queue_.shownEvent(), value);
   present.commit();
   queue_.addMetal3Present(seq_, present, value);
   // nothing is open here (the pass went into `present`): this commits nothing
+  if (wait)
+    encodeWaitForEvent(queue_.shownEvent(), value);
+}
+
+void
+Mtl4Encoding::waitShown(uint64_t value) {
   encodeWaitForEvent(queue_.shownEvent(), value);
 }
 
