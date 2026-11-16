@@ -1,12 +1,13 @@
 // gw2-test: pure
 // gw2-build: clang++ -std=c++20 -Itests/gw2/shim -Isrc/dxmt tests/gw2/update_scope_test.cpp src/dxmt/dxmt_gw2_stats.cpp src/dxmt/dxmt_gw2_switches.cpp -o $OUT
 //
-// gw2 (#145): host-side test of gw2::UpdateScope, the counting of an UpdateSubresource that
-// DXMT_UPDATE_ONE_CALL handles without its Map and Unmap. MAP and PACE must count what the two calls'
-// MapScopes and ApiScopes counted (the issue's acceptance: dcb.discard and dcb.unmap keep their counts
-// with the switch on and off), and both lines must take the one timed interval. gw2 (#150): a Map's
-// MapScope takes its ApiScope's interval (two clock reads a timed call), and the clock's floor makes an
-// empty interval read 0 on average. Simulated Win32 threads (shim/windows.h). Run it on the Mac:
+// gw2 (#145): host-side test of gw2::UpdateScope, the counting of an UpdateSubresource that the
+// immediate context handles in one call, without its Map and Unmap. MAP and PACE must count what the
+// two calls' MapScopes and ApiScopes counted (the issue's acceptance: dcb.discard and dcb.unmap keep
+// their counts whichever way the update is made), and both lines must take the one timed interval.
+// gw2 (#150): a Map's MapScope takes its ApiScope's interval (two clock reads a timed call), and the
+// clock's floor makes an empty interval read 0 on average. Simulated Win32 threads (shim/windows.h).
+// Run it on the Mac:
 //
 //   clang++ -std=c++20 -Itests/gw2/shim -Isrc/dxmt tests/gw2/update_scope_test.cpp \
 //     src/dxmt/dxmt_gw2_stats.cpp src/dxmt/dxmt_gw2_switches.cpp -o /tmp/update_scope_test && /tmp/update_scope_test
@@ -35,8 +36,8 @@ constexpr unsigned kNoOverwrite = (unsigned)MapOp::NoOverwrite;
 constexpr unsigned kUnmap = (unsigned)MapOp::Unmap;
 constexpr unsigned kMap = (unsigned)Api::Map;
 
-// The nested path DXMT_UPDATE_ONE_CALL=0 keeps: UpdateSubresource1 calls Map, then Unmap, each with
-// its own ApiScope and MapScope (d3d11_context_imm.cpp).
+// The nested path, which the base context's UpdateSubresource1 still takes: Map, then Unmap, each with
+// its own ApiScope and MapScope (d3d11_context_impl.cpp).
 static void
 nestedUpdate(MapCounters &c, ApiThreadCache &cache, MapOp op) {
   {
