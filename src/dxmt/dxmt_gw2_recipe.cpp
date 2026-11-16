@@ -19,6 +19,7 @@
 #include <format>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 
 // gw2 (#57): see dxmt_gw2_recipe.hpp.
@@ -309,7 +310,11 @@ writerThread() {
         uint32_t first_ms = uint32_t(node->value[0]) | uint32_t(node->value[1]) << 8 |
                             uint32_t(node->value[2]) << 16 | uint32_t(node->value[3]) << 24;
         std::string id = node->key.substr(1);
-        bool known = ledger.recipes.count(id) != 0;
+        // gw2 (#295): the entry before note(), to undo it if the row can't be written
+        std::optional<RecipeUse> before;
+        if (auto it = ledger.recipes.find(id); it != ledger.recipes.end())
+          before = it->second;
+        bool known = before.has_value();
         if (!use_ok || !ledger.note(id, first_ms, use_value)) {
           r.present.fetch_add(1, std::memory_order_relaxed); // counted already, or no use data this session
         } else if (!known && accounted + node->key.size() + use_value.size() > kBudgetBytes) {
@@ -326,6 +331,8 @@ writerThread() {
           r.uses.fetch_add(1, std::memory_order_relaxed);
         } else {
           r.failed.fetch_add(1, std::memory_order_relaxed);
+          ledger.unnote(id, before); // gw2 (#295): the file doesn't have this session's use
+          unclaim(r, node->key);     // a later sighting may write it, as for a recipe row
           if (++consecutive_failures >= kMaxConsecutiveFailures)
             stopRecording(r, Stop::WriterFailed,
                           str::format("Recipes: ", kMaxConsecutiveFailures, " writes in a row into ", shown,

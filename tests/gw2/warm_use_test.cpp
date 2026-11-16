@@ -354,6 +354,35 @@ main() {
                 past && once ? "ok  " : "FAIL");
   }
 
+  // gw2 (#295): a use row the writer couldn't store is undone, so the next use in the session merges
+  // again: a recipe new to the file loses its entry, a known one gets its earlier-session entry back
+  {
+    gw2::UseLedger l;
+    l.begin();
+    std::string id(20, 'b');
+    std::vector<uint8_t> merged;
+    bool first = l.note(id, 7, merged);
+    l.unnote(id, std::nullopt);
+    bool gone = l.recipes.count(id) == 0;
+    bool again = l.note(id, 7, merged) && l.recipes[id].sessions == 1;
+
+    gw2::RecipeUse u;
+    u.last_session = l.session - 1;
+    u.sessions = 3;
+    u.first_ms = 9;
+    std::string known(20, 'c');
+    l.recipes[known] = u;
+    std::optional<gw2::RecipeUse> copy = l.recipes[known];
+    bool noted = l.note(known, 2, merged);
+    l.unnote(known, copy);
+    auto &back = l.recipes[known];
+    bool restored = back.last_session == u.last_session && back.sessions == 3 && back.first_ms == 9;
+    bool ok = first && gone && again && noted && restored;
+    CHECK(ok, "unnote: first %d gone %d again %d noted %d restored %d", first, gone, again, noted, restored);
+    std::printf("%s ledger: a use whose row failed is undone, and the next use in the session merges again\n",
+                ok ? "ok  " : "FAIL");
+  }
+
   // the warm-hit seam: CompleteFromShared and the run-time claim call warmPipelineHit, which counts the
   // hit and calls the recorder's hook (recipeUse)
   {

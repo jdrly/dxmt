@@ -16,7 +16,8 @@
 //   back exactly 600 ids before the clock stays and one 601 before goes; one whose will_free_at is
 //   ahead of the clock stays. A resource last mapped through another queue is swept only when that
 //   queue's clock passes its ids. Then a thread destroys 2,000 resources while walks run, and every
-//   allocation they made is freed exactly once.
+//   allocation they made is freed exactly once. First of all (#295), page growth of a buffer over 1 GiB
+//   returns without growing, and a 1 KiB buffer's still grows.
 // - off (DXMT_RENAME_TRIM unset, DXMT_STATS=1): the same burst and clock: the queue stays at its peak,
 //   swept is 0, nothing is freed.
 // - none (both off): nothing is listed, so a walk counts nothing.
@@ -35,6 +36,7 @@
 #include <set>
 #include <string>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 namespace {
@@ -328,6 +330,24 @@ destroyDuringWalks() {
               (unsigned long long)made);
 }
 
+// gw2 (#295): a second renameImmediate in one chunk enters page growth. For a buffer over 1 GiB the
+// 32-bit doubling wrapped to 0 and never ended (alarm: a hang kills the test); it must return, unGrown.
+// A 1 KiB buffer still grows.
+void
+growthBounded() {
+  gw2::RenameClock clock;
+  for (uint32_t length : {0x40000010u, 1024u}) {
+    TestBuffer r;
+    r.dynamic->enableGrowth(length);
+    alarm(20);
+    r.dynamic->renameImmediate(5, 0, &clock);
+    uint32_t second = r.dynamic->renameImmediate(5, 0, &clock);
+    alarm(0);
+    bool grown = second & DynamicBuffer::RenameGrown;
+    CHECK(grown == (length == 1024u), "growth of a %u-byte buffer: result %u", length, second);
+  }
+}
+
 template <typename R>
 void
 peakKept(const char *what) {
@@ -362,6 +382,7 @@ int
 main(int argc, char **argv) {
   std::string mode = argc > 1 ? argv[1] : "";
   if (mode == "on") {
+    growthBounded();
     burstSwept<TestBuffer>("buffer", kPage);
     burstSwept<TestTexture>("linear texture", kImage);
     ageBoundaries<TestBuffer>("buffer");
