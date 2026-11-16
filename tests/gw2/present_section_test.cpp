@@ -17,12 +17,12 @@
 //   late GPU ends, the vsync grid, the frame limiter and no grid), and its line must equal the new
 //   line up to " drawwait=".
 // - presentPassRecord (src/dxmt/dxmt_gw2_commit_record.hpp): the record a chunk notes for its pass.
+// - skipArithmetic: skippedRefreshes and skipWasQueued on known values.
 //
 // Run it from the checkout's root (or through tests/gw2/run.zsh).
 
 #include "dxmt_gw2_commit_record.hpp"
 #include "dxmt_gw2_present.hpp"
-#include "dxmt_gw2_present_pace.hpp"
 #include "dxmt_gw2_stats.hpp"
 #include "winemetal.h"
 #include <algorithm>
@@ -155,7 +155,7 @@ section() {
         skipped = (int64_t)std::floor((g_late_ms + 0.25) / refresh_ms);
         g_late_ms = std::max(0.0, g_late_ms - skipped * refresh_ms);
       } else {
-        skipped = skippedRefreshes(gap, refresh_ms, vsyncs); // gw2 (#157): shared with LiveSkips
+        skipped = skippedRefreshes(gap, refresh_ms, vsyncs); // gw2 (#157)
       }
       if (skipped > 0) {
         if (skipWasQueued(r.encode_ns, g_last_presented_ns))
@@ -438,12 +438,27 @@ passRecord() {
   CHECK(presentPassRecord(std::span<const int>(), kPresentLastCommit) == nullptr, "no records");
 }
 
+// gw2 (#157): the skip count the section and the oracle share (moved here with the deleted pace test, #281)
+static void
+skipArithmetic() {
+  using dxmt::gw2::skippedRefreshes;
+  using dxmt::gw2::skipWasQueued;
+  const double refresh_ms = 1000.0 / 60;
+  CHECK(skippedRefreshes(refresh_ms, refresh_ms, 1) == 0, "one refresh at a target of one");
+  CHECK(skippedRefreshes(2 * refresh_ms, refresh_ms, 1) == 1, "two refreshes at a target of one");
+  CHECK(skippedRefreshes(2 * refresh_ms, refresh_ms, 2) == 0, "two refreshes at a target of two");
+  CHECK(skippedRefreshes(0.4 * refresh_ms, refresh_ms, 1) == 0, "never below 0");
+  CHECK(skipWasQueued(10, 20), "encoded before the last frame was shown: queued");
+  CHECK(!skipWasQueued(20, 20) && !skipWasQueued(30, 20), "encoded at or after it: not queued");
+}
+
 int
 main() {
   CHECK(dxmt::gw2::g_present != nullptr, "the PRESENT section registered");
   if (!dxmt::gw2::g_present)
     return 1;
   passRecord();
+  skipArithmetic();
   fields();
   parity();
   if (failures) {

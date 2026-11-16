@@ -1511,10 +1511,6 @@ ArgumentEncodingContext::flushCommandsImpl(CommandBuffer &cmdbuf, uint64_t seqId
           // DXMT_MTL4_PRESENT=mtl3 it is in the Metal 3 buffer, whose record follows every commit (#227)
           readbacks.present_commit = mtl3 ? gw2::kPresentLastCommit : uint32_t(cmdbuf.segments().size() - 1);
         }
-        if (gw2::presentPaceOn()) // gw2 (#157): pace answers this block
-          gw2::presentPaceBlocked(
-              std::chrono::duration_cast<std::chrono::nanoseconds>(data->presenter->lastNextDrawable()).count(), frame_id_
-          );
         if (!mtl3)
           cmdbuf.signalDrawable(drawable); // commits the present pass first
         // gw2 (#227): with mtl3 the command buffer presents, as on Metal 3: Metal calls the drawable's
@@ -1600,10 +1596,6 @@ ArgumentEncodingContext::flushCommandsImpl(CommandBuffer &cmdbuf, uint64_t seqId
           gw2::presentTrack(drawable.handle, frame_id_);
           readbacks.present_commit = gw2::kPresentLastCommit;
         }
-        if (gw2::presentPaceOn()) // gw2 (#157): pace answers this block
-          gw2::presentPaceBlocked(
-              std::chrono::duration_cast<std::chrono::nanoseconds>(data->presenter->lastNextDrawable()).count(), frame_id_
-          );
         if (data->after > 0) {
           cmdbuf.presentDrawableAfterMinimumDuration(drawable, data->after);
           if (stats)
