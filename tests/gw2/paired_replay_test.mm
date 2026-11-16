@@ -62,7 +62,7 @@
 //   Set*Bytes overflow, the bytes arena refilled at least once inside the rows pass's replay, and the
 //   replays put allocations into the chunk's residency set.
 // - gw2 (#154): Metal 4 chunks end as flushCommands ends them with timestamp queries pending (GW2 always
-//   has some): openForTimestamps, then the commit. With DXMT_MTL4_TIMESTAMP_REUSE off (the default) the
+//   has some): openForTimestamps, then the commit. With DXMT_MTL4_TIMESTAMP_REUSE=0 the
 //   frame makes three commits: frame, present, and an empty one after the present for the queries. A
 //   second Metal 4 frame, on resources of its own, runs with the switch on: two commits, and the
 //   present's has a GPU end for the queries to read. A chunk with no encoder gets one command buffer for
@@ -803,7 +803,7 @@ struct Metal3Target {
 // Metal 4: DXMT's own encoding over gw2::Mtl4Queue
 struct Metal4Target {
   Mtl4Encoding &encoding;
-  bool timestamp_reuse = false; // gw2 (#154): DXMT_MTL4_TIMESTAMP_REUSE, off by default
+  bool timestamp_reuse = false; // gw2 (#154): DXMT_MTL4_TIMESTAMP_REUSE, =0 here; on by default
   bool in_rows = false; // the rows pass's replay is running (its arena refills are the resumes)
   uint32_t rows_refills = 0;
 

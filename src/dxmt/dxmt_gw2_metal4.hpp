@@ -22,9 +22,9 @@ bool metal4Requested();
 // upstream's own line (the same grammar) and makes the MetalFX spatial swapchain.
 bool metalfxSpatialSwapchain();
 
-// gw2 (#154): DXMT_MTL4_TIMESTAMP_REUSE (off unless exactly "1"), read once per process. On, a Metal 4
-// chunk's timestamp queries read its last command buffer, the present's after a present. Off (the
-// default) gives them an empty command buffer of their own after it, as before #154.
+// gw2 (#154): DXMT_MTL4_TIMESTAMP_REUSE (on unless exactly "0"), read once per process.
+// On (the default), a Metal 4 chunk's timestamp queries read its last command buffer, the present's
+// after a present. =0 gives them an empty command buffer of their own after it, as before #154.
 bool mtl4TimestampReuse();
 
 // gw2 (#227): DXMT_MTL4_PRESENT=mtl3 (exactly), read once per process: a queue on Metal 4 presents

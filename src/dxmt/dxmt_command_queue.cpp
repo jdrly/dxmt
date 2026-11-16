@@ -228,7 +228,7 @@ CommandQueue::CommandQueue(WMT::Device device) :
               ? "Metal 4: timestamp queries read the chunk's last command buffer, the present's after a present "
                 "(DXMT_MTL4_TIMESTAMP_REUSE=1)"
               : "Metal 4: a chunk with timestamp queries commits an empty command buffer for them after its last one "
-                "(DXMT_MTL4_TIMESTAMP_REUSE=0, the default)"
+                "(DXMT_MTL4_TIMESTAMP_REUSE=0)"
       );
       // gw2 (#227): a test switch for #223; unset, no line
       if (gw2::mtl4PresentMetal3())

@@ -41,8 +41,8 @@ namespace {
 sw::Switch<bool> kMetalfxSpatialSwapchain{
     "DXMT_METALFX_SPATIAL_SWAPCHAIN", false, sw::legacy::exactlyOne, sw::Line::Unlisted
 };
-// gw2 (#154)
-sw::Switch<bool> kMtl4TimestampReuse{"DXMT_MTL4_TIMESTAMP_REUSE", false, sw::legacy::exactlyOne};
+// gw2 (#154): on unless exactly "0" (the default since #301)
+sw::Switch<bool> kMtl4TimestampReuse{"DXMT_MTL4_TIMESTAMP_REUSE", true, sw::legacy::notZero};
 // gw2 (#227): `mtl4` (the default) or `mtl3`
 sw::Switch<std::string> kMtl4Present{"DXMT_MTL4_PRESENT", "mtl4", mtl4PresentGrammar};
 // gw2 (#204)

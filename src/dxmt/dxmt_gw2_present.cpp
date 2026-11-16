@@ -19,8 +19,8 @@
 // - aftergpu: presentedTime minus the frame's last GPU end that DXMT records, avg/max ms: the wait
 //   for the vsync and the compositor. A chunk records its last command buffer's end: on Metal 3 with
 //   the present split that is the present buffer's, on Metal 4 the chunk's last commit's (after a
-//   present, the empty command buffer for timestamp queries unless DXMT_MTL4_TIMESTAMP_REUSE=1; with
-//   DXMT_MTL4_PRESENT=mtl3, the Metal 3 present buffer, #227). The
+//   present, the present's, or with DXMT_MTL4_TIMESTAMP_REUSE=0 the empty command buffer for timestamp
+//   queries; with DXMT_MTL4_PRESENT=mtl3, the Metal 3 present buffer, #227). The
 //   GPU ends are kept per frame until the frame's record is joined; a record whose frame the finish
 //   thread hasn't finished yet waits for the next window, once. nogpu: shown frames without a
 //   usable GPU end (none recorded, or still unfinished a window later).
