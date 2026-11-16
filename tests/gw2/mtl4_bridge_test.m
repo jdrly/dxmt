@@ -483,11 +483,12 @@ test_replay(struct mtl4 *m) {
     }
     [(id<MTL4ComputeCommandEncoder>)enc endEncoding];
   }
-  /* gw2 (#297): a packet the replay must refuse, in a pass and binding state of its own: an indexed
-     draw whose offset is the index buffer's end. It counts in unsupported; the commit completes */
+  /* gw2 (#297): packets the replay must refuse, in a pass and binding state of their own: an indexed
+     draw whose offset is the index buffer's end, and a texture at the first index past the table's
+     slots. Each counts in unsupported; the commit completes */
   struct WMTMtl4BindingState bounds_state;
   memset(&bounds_state, 0, sizeof(bounds_state));
-  bounds_state.tables[WMTMtl4TableFragment] = new_table(m->device, 8, 0);
+  bounds_state.tables[WMTMtl4TableFragment] = new_table(m->device, 8, WMT_MTL4_MAX_TEXTURES);
   bounds_state.residency_set = H(m->chunk);
   {
     id<MTLTexture> bounds_target = resident_texture(m, MTLTextureUsageRenderTarget);
@@ -513,6 +514,9 @@ test_replay(struct mtl4 *m) {
     draw->index_buffer = H(indices);
     draw->index_buffer_offset = indices.length;
     draw->instance_count = 1;
+    struct wmtcmd_render_settexture *tex = chain_add(&c, sizeof(*tex), WMTRenderCommandSetFragmentTexture);
+    tex->texture = H(source);
+    tex->index = WMT_MTL4_MAX_TEXTURES;
     replay(_MTL4RenderCommandEncoder_encodeCommands, enc, &bounds_state, &c);
     [(id<MTL4RenderCommandEncoder>)enc endEncoding];
   }
@@ -562,7 +566,8 @@ test_replay(struct mtl4 *m) {
   CHECK(!render_state.unsupported && !blit_state.unsupported && !compute_state.unsupported,
         "unsupported packets: render %u blit %u compute %u", render_state.unsupported, blit_state.unsupported,
         compute_state.unsupported);
-  CHECK(bounds_state.unsupported == 1, "bounds: unsupported=%u, want 1 (the draw)", bounds_state.unsupported);
+  CHECK(bounds_state.unsupported == 2, "bounds: unsupported=%u, want 2 (the draw, the texture)",
+        bounds_state.unsupported);
   CHECK(!render_state.bytes_overflow && !compute_state.bytes_overflow, "bytes overflow");
   CHECK(render_state.bytes_offset == 256 + 16, "render bytes_offset=%llu, want 272",
         (unsigned long long)render_state.bytes_offset);

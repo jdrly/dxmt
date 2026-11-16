@@ -502,7 +502,7 @@ set_bytes(struct replay *r, unsigned stage, const void *bytes, uint64_t length, 
 static inline void
 set_texture(struct replay *r, unsigned stage, obj_handle_t texture, unsigned index) {
   id<MTL4ArgumentTable> table = (id<MTL4ArgumentTable>)r->state->tables[stage];
-  if (!table) {
+  if (!table || index >= WMT_MTL4_MAX_TEXTURES) { /* gw2 (#297): as set_address bounds buffers */
     r->state->unsupported++;
     return;
   }
