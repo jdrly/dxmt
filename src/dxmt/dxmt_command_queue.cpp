@@ -20,7 +20,6 @@
 #include "dxmt_command_queue.hpp"
 #include "dxmt_gw2_compile.hpp"
 #include "dxmt_gw2_deps.hpp"
-#include "dxmt_gw2_layer_set.hpp"
 #include "dxmt_gw2_present.hpp"
 #include "dxmt_gw2_residency.hpp"
 #include "dxmt_gw2_metal4.hpp"
@@ -206,8 +205,6 @@ CommandQueue::CommandQueue(WMT::Device device) :
     else if (!gw2::residencyAttachMtl4Queue(device, mtl4->queue()))
       gw2::metal4Failed("attaching the residency set to the Metal 4 queue");
     else {
-      if (gw2::mtl4PresentDone()) // gw2 (#242)
-        mtl4->enablePresentWhenDone();
       submission_ = std::make_unique<Metal4Submission>(std::move(mtl4), event); // gw2 (#78)
       metal4_ = true;
       // gw2 (#204): the allocator policy in effect
@@ -222,16 +219,9 @@ CommandQueue::CommandQueue(WMT::Device device) :
             "Metal 4: on (DXMT_METAL4=1, the default): this device's chunks go to an MTL4CommandQueue, with ",
             chunk_count_, " command allocators (one per chunk slot) and commit feedback"
         ));
-      // gw2 (#184): the queue holds only the device's set; a queue takes at most 32. gw2 (#226): unless
-      // DXMT_MTL4_LAYER_SET=queue, the placement before #184, for at most 16 presenters
-      if (gw2::mtl4LayerSet() == gw2::LayerSet::Queue)
-        Logger::info(str::format(
-            "Metal 4: each layer's residency set is on the queue (DXMT_MTL4_LAYER_SET=queue), at most ",
-            gw2::kLayerSetQueuePlaces
-        ));
-      else
-        Logger::info("Metal 4: drawables stay resident through their layer's residency set, used by each present's "
-                     "command buffer; the queue holds no layer's set");
+      // gw2 (#184): the queue holds only the device's set; a queue takes at most 32
+      Logger::info("Metal 4: drawables stay resident through their layer's residency set, used by each present's "
+                   "command buffer; the queue holds no layer's set");
       // gw2 (#154)
       Logger::info(
           gw2::mtl4TimestampReuse()
@@ -249,9 +239,6 @@ CommandQueue::CommandQueue(WMT::Device device) :
         Logger::info("Metal 4: the next frame waits for a Metal 3 present only before it writes the presented "
                      "texture (DXMT_MTL4_SHOWN_WAIT=write)");
       }
-      // gw2 (#242): a test switch for #223; unset, no line
-      if (gw2::mtl4PresentDone())
-        Logger::info("Metal 4: the drawable is presented when its pass's commit has completed (DXMT_MTL4_PRESENT=done)");
     }
   }
   // gw2 (#78): Metal 3, unless the queue is on Metal 4

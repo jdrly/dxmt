@@ -1,5 +1,4 @@
 #include "dxmt_gw2_mtl4_queue.hpp"
-#include "dxmt_gw2_present.hpp"
 #include "dxmt_gw2_residency.hpp"
 #include "dxmt_gw2_stats.hpp"
 #include "log/log.hpp"
@@ -17,9 +16,8 @@ std::atomic<uint64_t> g_commits{0}, g_max_buffers{0}, g_max_alloc_bytes{0}, g_sl
 // part 3: the replays' counters (WMTMtl4BindingState)
 std::atomic<uint64_t> g_res_adds{0}, g_missed{0}, g_unsupported{0}, g_bytes_overflow{0}, g_blit_barriers{0};
 std::atomic<bool> g_any{false};
-// gw2 (#227, #242): DXMT_MTL4_PRESENT in use, as METAL4 present= names it
+// gw2 (#227): DXMT_MTL4_PRESENT in use, as METAL4 present= names it
 std::atomic<const char *> g_present_name{"mtl4"};
-std::atomic<uint64_t> g_before_pass{0}; // gw2 (#242)
 // gw2 (#271): DXMT_MTL4_SHOWN_WAIT=write's presents with a deferred wait, the waits placed and their
 // positions in their chunks (per mille of the chunk's encoders before the wait)
 std::atomic<uint64_t> g_shown_deferred{0}, g_shown_waited{0}, g_shown_at_permille{0};
@@ -49,14 +47,14 @@ metal4Section(double, uint32_t) {
   }
   return std::format(
       "commits={} buffers={} allocmb={:.2f} allocators={} allocheld={:.2f} slow={} errors={} resadds={} missed={} "
-      "unsupported={} bytesover={} blitbar={} present={} beforepass={}",
+      "unsupported={} bytesover={} blitbar={} present={}",
       g_commits.exchange(0, std::memory_order_relaxed), g_max_buffers.exchange(0, std::memory_order_relaxed),
       g_max_alloc_bytes.exchange(0, std::memory_order_relaxed) / 1e6, g_allocators.load(std::memory_order_relaxed),
       g_alloc_held_bytes.load(std::memory_order_relaxed) / 1e6, g_slow.exchange(0, std::memory_order_relaxed),
       g_errors.exchange(0, std::memory_order_relaxed), g_res_adds.exchange(0, std::memory_order_relaxed),
       g_missed.exchange(0, std::memory_order_relaxed), g_unsupported.exchange(0, std::memory_order_relaxed),
       g_bytes_overflow.exchange(0, std::memory_order_relaxed), g_blit_barriers.exchange(0, std::memory_order_relaxed),
-      g_present_name.load(std::memory_order_relaxed), g_before_pass.exchange(0, std::memory_order_relaxed)
+      g_present_name.load(std::memory_order_relaxed)
   ) + shown;
 }
 
@@ -90,15 +88,6 @@ metal4EncodeCounters(const WMTMtl4BindingState &state) {
   g_unsupported.fetch_add(state.unsupported, std::memory_order_relaxed);
   g_bytes_overflow.fetch_add(state.bytes_overflow, std::memory_order_relaxed);
   g_blit_barriers.fetch_add(state.blit_barriers, std::memory_order_relaxed);
-}
-
-void
-metal4PresentCounted(bool before_pass, uint64_t at_ns) {
-  if (!statsEnabled())
-    return;
-  if (before_pass)
-    g_before_pass.fetch_add(1, std::memory_order_relaxed);
-  presentAtSample(at_ns);
 }
 
 void
@@ -287,27 +276,8 @@ Mtl4Queue::begin(uint64_t seq) {
   return *commit;
 }
 
-// gw2 (#242)
-struct Mtl4Queue::Present {
-  WMT::MetalDrawable drawable;
-  WMTDrawablePresentMode mode;
-  double value;
-};
-
 void
 Mtl4Queue::commit(uint64_t seq) {
-  submit(seq, nullptr);
-}
-
-void
-Mtl4Queue::commitPresent(uint64_t seq, WMT::MetalDrawable drawable, WMTDrawablePresentMode mode, double value) {
-  assert(current(seq) && "Metal 4: a present's commit with no command buffer open");
-  Present present{drawable, mode, value};
-  submit(seq, &present);
-}
-
-void
-Mtl4Queue::submit(uint64_t seq, const Present *present) {
   auto &s = slot(seq);
   auto *commit = s.open;
   if (!commit)
@@ -324,12 +294,7 @@ Mtl4Queue::submit(uint64_t seq, const Present *present) {
   commit->value = ++next_value_;
   s.commits.push_back(commit);
   WMT::MTL4CommandBuffer cmdbuf = commit->cmdbuf;
-  if (present) // gw2 (#242)
-    queue_.commitPresent(
-        cmdbuf, &commit->feedback, event_, commit->value, present->drawable, present->mode, present->value
-    );
-  else
-    queue_.commit(&cmdbuf, 1, &commit->feedback, event_, commit->value);
+  queue_.commit(&cmdbuf, 1, &commit->feedback, event_, commit->value);
   committed_value_.store(commit->value, std::memory_order_release);
   if (statsEnabled())
     g_commits.fetch_add(1, std::memory_order_relaxed);
@@ -353,12 +318,6 @@ Mtl4Queue::enableMetal3Present() {
   if (metal3_present_)
     g_present_name.store("mtl3", std::memory_order_relaxed);
   return metal3_present_;
-}
-
-void
-Mtl4Queue::enablePresentWhenDone() {
-  present_done_ = true;
-  g_present_name.store("done", std::memory_order_relaxed);
 }
 
 void
@@ -424,13 +383,6 @@ Mtl4Queue::wait(uint64_t seq) {
     waitCommit(commit, seq);
     if (commit->feedback.error)
       g_errors.fetch_add(1, std::memory_order_relaxed);
-    // gw2 (#242): a commit that carried the drawable's present. Its present was called before wait():
-    // by the feedback handler before it set done, or by the encode thread before the chunk came here
-    auto &fb = commit->feedback;
-    if (fb.present_encode > 0) {
-      double at = fb.present_time > fb.present_encode ? fb.present_time - fb.present_encode : 0;
-      metal4PresentCounted(fb.present_early != 0, uint64_t(at * 1e9));
-    }
   }
   if (statsEnabled())
     atomicMax(g_max_buffers, s.commits.size());

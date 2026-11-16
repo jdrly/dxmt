@@ -8,8 +8,6 @@
 // - each caller's read sequence (when the environment is sampled, what is cached where), with the
 //   environment changing between reads;
 // - the generated startup line against today's format, byte for byte.
-// gw2 (#226): and DXMT_MTL4_LAYER_SET's two values, with its declaration's name, fallback and grammar
-// (src/dxmt/dxmt_gw2_layer_set.hpp).
 // Not part of the DLL build; run it on the Mac from the repository root (or through
 // tests/gw2/run.zsh):
 //
@@ -18,7 +16,6 @@
 
 #include "dxmt_gw2_switches.hpp"
 #include "dxmt_gw2_present.hpp"
-#include "dxmt_gw2_layer_set.hpp"
 #include <climits>
 #include <cstdio>
 #include <format>
@@ -618,7 +615,7 @@ testStartupLine() {
 }
 
 // gw2 (#227): DXMT_MTL4_PRESENT, declared as dxmt_gw2_metal4.cpp declares it, with its grammar from
-// dxmt_gw2_present.hpp: exactly `mtl3` or (#242) `done`, anything else `mtl4`; on the startup line by name
+// dxmt_gw2_present.hpp: exactly `mtl3`, anything else `mtl4` (#277: `done` too); on the startup line by name
 static void
 testMtl4Present() {
   Env env;
@@ -626,12 +623,12 @@ testMtl4Present() {
   sw::Switch<std::string> present{"DXMT_MTL4_PRESENT", "mtl4", gw2::mtl4PresentGrammar, sw::Line::Listed,
                                   now.registry};
   CHECK_EQ(present(), std::string("mtl4"), "unset");
-  for (const char *other : {"", "mtl4", "MTL3", "mtl3 ", " mtl3", "mtl", "3", "1", "metal3", "mtl33", "DONE",
-                            "Done", "done ", " done", "don", "done1", "mtl3done", "mtl4,done"}) {
+  for (const char *other : {"", "mtl4", "MTL3", "mtl3 ", " mtl3", "mtl", "3", "1", "metal3", "mtl33", "done",
+                            "DONE", "Done", "done ", " done", "don", "done1", "mtl3done", "mtl4,done"}) {
     env.vars["DXMT_MTL4_PRESENT"] = other;
     CHECK_EQ(present(), std::string("mtl4"), std::string("\"") + other + "\"");
   }
-  for (const char *value : {"mtl3", "done"}) {
+  for (const char *value : {"mtl3"}) {
     env.vars["DXMT_MTL4_PRESENT"] = value;
     CHECK_EQ(present(), std::string(value), value);
     CHECK_EQ(*now.registry.effective("DXMT_MTL4_PRESENT"), std::string(value), "line value");
@@ -643,31 +640,9 @@ testMtl4Present() {
   CHECK_EQ(*now.registry.effective("DXMT_MTL4_PRESENT"), std::string("mtl4"), "line value, unset");
 }
 
-// gw2 (#226): DXMT_MTL4_LAYER_SET, declared as dxmt_presenter.cpp declares it: `queue`, or `buffer`
-// for anything else, and on the startup line by name
-static void
-testLayerSet() {
-  const std::vector<std::pair<std::optional<std::string>, std::string>> cases = {
-      {std::nullopt, "buffer"}, {"", "buffer"},     {"buffer", "buffer"}, {"queue", "queue"},
-      {"QUEUE", "buffer"},      {" queue", "buffer"}, {"queue ", "buffer"}, {"1", "buffer"},
-      {"0", "buffer"},          {"queues", "buffer"},
-  };
-  for (auto &[input, want] : cases) {
-    Env env;
-    if (input)
-      env.vars[gw2::kLayerSetSwitch] = *input;
-    sw::Registry registry(env.source());
-    sw::Switch<std::string> layer_set{gw2::kLayerSetSwitch, gw2::kLayerSetDefault, gw2::layerSetValue,
-                                      sw::Line::Listed, registry};
-    CHECK_EQ(layer_set(), want, "DXMT_MTL4_LAYER_SET=" + show(input));
-    CHECK_EQ(sw::startupLine(registry, {}), "DXMT_MTL4_LAYER_SET=" + want, "startup line, " + show(input));
-  }
-}
-
 int
 main() {
   testMtl4Present();
-  testLayerSet();
   testMigratedGrammars();
   testReadSequences();
   testRequestedVsEffective();

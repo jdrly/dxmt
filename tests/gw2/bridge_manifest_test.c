@@ -70,9 +70,9 @@ main(void) {
   CHECK(WMTCall_CacheEnumerate == 193 && WMTReserved_194 == 194 && WMTReserved_199 == 199); // lane C (#64; 193: W2/W3)
   CHECK(WMTCall_WMTSetThreadBasePrioritySelf == 200); // #151
   CHECK(WMTCall_MTLResidencySet_allocationCount == 201); // #153
-  CHECK(WMTCall_MTL4CommandQueue_commitPresent == 202);  // #242
+  CHECK(WMTReserved_202 == 202); // was #242's call, a hole since #277
   CHECK(WMTCall_Count == 203);
-  CHECK(calls == 182 && reserved == 21 && wow64 == 9);
+  CHECK(calls == 181 && reserved == 22 && wow64 == 9);
 
 #ifdef DXMT_NATIVE
   // Through the real table: a handler at every call number, NULL at every reserved one
