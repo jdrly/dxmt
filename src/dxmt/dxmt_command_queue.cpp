@@ -206,8 +206,6 @@ CommandQueue::CommandQueue(WMT::Device device) :
     else if (!gw2::residencyAttachMtl4Queue(device, mtl4->queue()))
       gw2::metal4Failed("attaching the residency set to the Metal 4 queue");
     else {
-      if (gw2::mtl4PresentDone()) // gw2 (#242)
-        mtl4->enablePresentWhenDone();
       submission_ = std::make_unique<Metal4Submission>(std::move(mtl4), event); // gw2 (#78)
       metal4_ = true;
       // gw2 (#204): the allocator policy in effect
@@ -249,9 +247,6 @@ CommandQueue::CommandQueue(WMT::Device device) :
         Logger::info("Metal 4: the next frame waits for a Metal 3 present only before it writes the presented "
                      "texture (DXMT_MTL4_SHOWN_WAIT=write)");
       }
-      // gw2 (#242): a test switch for #223; unset, no line
-      if (gw2::mtl4PresentDone())
-        Logger::info("Metal 4: the drawable is presented when its pass's commit has completed (DXMT_MTL4_PRESENT=done)");
     }
   }
   // gw2 (#78): Metal 3, unless the queue is on Metal 4

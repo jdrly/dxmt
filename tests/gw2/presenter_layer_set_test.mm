@@ -74,19 +74,11 @@
 // Whether this check catches a missing `shown` wait (delete the encodeWaitForEvent in
 // Mtl4Encoding::commitMetal3Present in a scratch copy) is for the Mac run to show.
 //
-// gw2 (#242): DXMT_MTL4_PRESENT=done. Both phases run a third time with each present as the context
-// encodes it with that switch (Mtl4Encoding::presentWhenDone: the pass's commit carries the drawable's
-// signal and present, and the unix side presents once the commit has completed); each chunk's records
-// must show exactly one commit that carried a present, and none on the other two paths, so the new
-// bridge call (MTL4CommandQueue_commitPresent, the only writer of present_encode) is unused there. The
-// colour check runs on the Metal 4 present too, with DXMT_STATS on: as today (signalDrawable, then the
-// present from the encode thread, Mtl4Encoding::present) and with done, each with and without the
-// frame's commit before the present. Fences order the frame's clear, the pass and the next frame's
-// clear, as the context's fences do, and the test reads the drawable back in the pass's command
-// buffer, before the signal. Every drawable must hold its own frame's colour. The METAL4 line must count
-// beforepass= most of the frames on today's order (a pass that completed before the present is counted
-// correctly, so not all is required; the line prints the count) and 0 with done; with done, every frame's present must come
-// after its encode (presentat above 0) and none before its pass completed.
+// gw2 (#242): the colour check runs on the Metal 4 present too (signalDrawable, then the present from
+// the encode thread), with and without the frame's commit before the present. Fences order the frame's
+// clear, the pass and the next frame's clear, as the context's fences do, and the test reads the
+// drawable back in the pass's command buffer, before the signal. Every drawable must hold its own
+// frame's colour.
 //
 // gw2 (#226): DXMT_MTL4_LAYER_SET=queue puts each presenter's layer set on the queue, as before #184,
 // for at most 16 presenters of the process. Both builds read the switch from the environment, and
@@ -254,7 +246,6 @@ struct Fixture {
   id<MTLResidencySet> device_set; // as the device's set (#29): on the queue, with the back buffers
   id<MTLCommandQueue> mtl3;       // gw2 (#227): the command queue's MTLCommandQueue
   bool mtl3_present = false;      // gw2 (#227): DXMT_MTL4_PRESENT=mtl3
-  bool done_present = false;      // gw2 (#242): DXMT_MTL4_PRESENT=done
   std::vector<id<MTLBuffer>> arenas; // the chunks' bytes arenas
   uint32_t lt_queue = 0;              // the lifetime check's id of the queue (its build only)
   uint64_t seq = 0;
@@ -348,25 +339,16 @@ present(Fixture &fx, SwapChain &sc, const char *what, uint32_t index, uint64_t t
           dxmt::gw2::presentTrack(drawable.handle, track_frame);
           pass_commit = uint32_t(encoding.segments().size() - 1);
         }
-        if (fx.done_present) {
-          encoding.presentWhenDone(drawable, WMTDrawablePresent, 0); // gw2 (#242)
-        } else {
-          encoding.signalDrawable(drawable); // commits the present pass first
-          drawable.present();
-        }
+        encoding.signalDrawable(drawable); // commits the present pass first
+        drawable.present();
       }
       sc.presenter->gw2LifetimeUse(fx.lt_queue, seq); // the context's stamp (lifetime-check build)
       held = sc.presenter;
       fx.presents++;
     }
     auto &commits = fx.queue->wait(seq);
-    uint32_t carried = 0; // gw2 (#242): commits whose present the unix side made (commitPresent)
-    for (auto *commit : commits) {
+    for (auto *commit : commits)
       CHECK(!commit->feedback.error, "%s %u: the present's command buffer reported an error", what, index);
-      carried += commit->feedback.present_encode > 0 ? 1 : 0;
-    }
-    CHECK(carried == (fx.done_present ? 1u : 0u), "%s %u: %u commits carried the present (DXMT_MTL4_PRESENT=%s)",
-          what, index, carried, fx.done_present ? "done" : fx.mtl3_present ? "mtl3" : "mtl4");
     checkMetal3(fx, seq, fx.mtl3_present ? 1 : 0, what, index);
     if (track_frame) { // ReportCompletedChunk: the present pass's record, then the chunk's last one
       auto &presents = fx.queue->metal3Presents(seq);
@@ -546,28 +528,16 @@ sameColour(const uint8_t *pixel, const uint8_t (&bgra)[4]) {
 }
 
 // gw2 (#242): which present colours() runs, as DXMT_MTL4_PRESENT names it
-enum class Present { Mtl4, Mtl3, Done };
+enum class Present { Mtl4, Mtl3 };
 
 static const char *
 presentName(Present how) {
-  return how == Present::Mtl3 ? "mtl3" : how == Present::Done ? "done" : "mtl4";
-}
-
-// gw2 (#242): a field's value in a section line, or "(none)"
-static std::string
-field(const std::string &line, const char *name) {
-  std::string key = std::string(" ") + name + "=";
-  auto at = line.find(key);
-  if (at == std::string::npos)
-    return "(none)";
-  at += key.size();
-  return line.substr(at, line.find(' ', at) - at);
+  return how == Present::Mtl3 ? "mtl3" : "mtl4";
 }
 
 // gw2 (#227): 320 frames through the Metal 3 present on the Metal 4 queue (see the header). `split`:
 // the frame's commit before the present, as DXMT_PRESENT_SPLIT=1 does; without it, beginMetal3Present
-// commits it. gw2 (#242): `how`: also the Metal 4 present, today's or DXMT_MTL4_PRESENT=done's, with
-// DXMT_STATS on for METAL4 beforepass and PRESENT presentat.
+// commits it. gw2 (#242): `how`: also the Metal 4 present.
 static void
 colours(Fixture &fx, Present how, bool split) {
   constexpr uint32_t kFrames = 320;
@@ -589,8 +559,6 @@ colours(Fixture &fx, Present how, bool split) {
     if (dxmt::gw2::g_present)
       dxmt::gw2::g_present(2000, 0);
   }
-  uint32_t carried = 0, early = 0; // gw2 (#242): commits that carried the present, and early ones
-  double at_sum = 0;
   std::vector<id<MTLBuffer>> readbacks;
   struct Pending {
     uint64_t seq;
@@ -601,15 +569,8 @@ colours(Fixture &fx, Present how, bool split) {
   std::deque<Pending> pending;
   auto retireOldest = [&] {
     auto &oldest = pending.front();
-    for (auto *commit : fx.queue->wait(oldest.seq)) {
+    for (auto *commit : fx.queue->wait(oldest.seq))
       CHECK(!commit->feedback.error, "%s %u: a Metal 4 command buffer reported an error", mode, oldest.frame);
-      auto &fb = commit->feedback;
-      if (fb.present_encode > 0) {
-        carried++;
-        early += fb.present_early ? 1 : 0;
-        at_sum += fb.present_time - fb.present_encode;
-      }
-    }
     checkMetal3(fx, oldest.seq, metal4 ? 0 : 1, mode, oldest.frame);
     dxmt::gw2::lifetime::completed(fx.lt_queue, oldest.seq);
     oldest.held = nullptr;
@@ -679,12 +640,8 @@ colours(Fixture &fx, Present how, bool split) {
           destinationBytesPerImage:kSize * kSize * 4
                            options:MTLBlitOptionNone];
         [copy endEncoding];
-        if (how == Present::Done) {
-          encoding.presentWhenDone(drawable, WMTDrawablePresent, 0);
-        } else {
-          encoding.signalDrawable(drawable); // commits the present pass first
-          encoding.present(drawable, WMTDrawablePresent, 0);
-        }
+        encoding.signalDrawable(drawable); // commits the present pass first
+        drawable.present();
         sc.presenter->gw2LifetimeUse(fx.lt_queue, seq);
         pending.push_back({seq, i, sc.presenter, WMT::Reference<WMT::MetalDrawable>(drawable)});
         fx.presents++;
@@ -755,33 +712,10 @@ colours(Fixture &fx, Present how, bool split) {
               wrong, next);
   CHECK(readbacks.size() == kFrames, "%s: %zu of %u frames presented", mode, readbacks.size(), kFrames);
   CHECK(wrong == 0, "%s: %u frames read a back buffer that wasn't theirs (%u the next frame's)", mode, wrong, next);
-  // gw2 (#242): the present's order. Only commitPresent writes present_encode
-  std::printf("%s: %u commits carried the present, %u of them presented before their pass completed, "
-              "%.3f ms from the encode to the present on average\n",
-              mode, carried, early, carried ? at_sum * 1e3 / carried : 0.0);
-  CHECK(carried == (how == Present::Done ? readbacks.size() : 0), "%s: %u commits carried the present", mode, carried);
   if (metal4) {
     std::string metal4_line = dxmt::gw2::g_metal4 ? dxmt::gw2::g_metal4(2000, 0) : std::string();
     std::string present_line = dxmt::gw2::g_present ? dxmt::gw2::g_present(2000, 0) : std::string();
     std::printf("METAL4 (%s): %s\nPRESENT (%s): %s\n", mode, metal4_line.c_str(), mode, present_line.c_str());
-    // today's order presents microseconds after the commit, so nearly every pass is still running; one that
-    // completed first (the thread descheduled in between) is counted correctly, so the check takes most,
-    // not all. With done it must be none
-    std::string before = field(metal4_line, "beforepass");
-    unsigned long count = std::strtoul(before.c_str(), nullptr, 10);
-    if (how == Present::Done)
-      CHECK(before == "0", "%s: METAL4 beforepass=%s, want 0", mode, before.c_str());
-    else
-      CHECK(before != "(none)" && count > readbacks.size() / 2 && count <= readbacks.size(),
-            "%s: METAL4 beforepass=%s of %zu frames, want most", mode, before.c_str(), readbacks.size());
-    CHECK(field(present_line, "presentat") != "(none)", "%s: PRESENT has no presentat", mode);
-    if (how == Present::Done) {
-      CHECK(early == 0, "%s: %u presents before their pass completed", mode, early);
-      CHECK(carried && at_sum > 0, "%s: the presents went out %.6f s after their encode in all", mode, at_sum);
-    } else {
-      CHECK(field(present_line, "presentat") == "0.00/0.00", "%s: presentat=%s on today's order", mode,
-            field(present_line, "presentat").c_str());
-    }
     dxmt::gw2::g_stats = false;
   }
   releaseSwapChain(fx, sc);
@@ -841,25 +775,23 @@ main() {
     CHECK(dxmt::gw2::lifetime::check(), "DXMT_LIFETIME_CHECK=1 in the lifetime-check build");
     CHECK(dxmt::gw2::g_lifecheck, "the lifetime check registered its LIFECHECK section");
     fx.lt_queue = dxmt::gw2::lifetime::attachQueue();
-    for (Present how : {Present::Mtl4, Present::Mtl3, Present::Done}) { // gw2 (#227, #242)
+    for (Present how : {Present::Mtl4, Present::Mtl3}) { // gw2 (#227, #242)
       fx.mtl3_present = how == Present::Mtl3;
-      fx.done_present = how == Present::Done;
       std::printf("DXMT_MTL4_PRESENT=%s\n", presentName(how));
       phases(fx, dxmt::gw2::lifetime::presenterFree()); // the switch, from the environment
     }
 #else
-    for (Present how : {Present::Mtl4, Present::Mtl3, Present::Done}) { // gw2 (#227, #242)
+    for (Present how : {Present::Mtl4, Present::Mtl3}) { // gw2 (#227, #242)
       fx.mtl3_present = how == Present::Mtl3;
-      fx.done_present = how == Present::Done;
       std::printf("DXMT_MTL4_PRESENT=%s\n", presentName(how));
       phases(fx, false); // the default: presenters stay, as before #185
       phases(fx, true);
     }
 #endif
-    fx.mtl3_present = fx.done_present = false;
+    fx.mtl3_present = false;
     // gw2 (#227): the colour check, with the frame's commit before the present and without; gw2 (#242):
     // through each present
-    for (Present how : {Present::Mtl3, Present::Mtl4, Present::Done}) {
+    for (Present how : {Present::Mtl3, Present::Mtl4}) {
       colours(fx, how, true);
       colours(fx, how, false);
     }
