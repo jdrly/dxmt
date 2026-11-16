@@ -24,6 +24,7 @@
 #include "dxmt_format.hpp"
 #include "dxmt_gw2_metal4.hpp"
 #include "dxmt_gw2_present.hpp"
+#include "dxmt_gw2_present_choice.hpp"
 #include "dxmt_gw2_residency.hpp"
 #include "dxmt_gw2_stats.hpp"
 #include "dxmt_names.hpp"
@@ -1515,27 +1516,20 @@ ArgumentEncodingContext::flushCommandsImpl(CommandBuffer &cmdbuf, uint64_t seqId
           cmdbuf.signalDrawable(drawable); // commits the present pass first
         // gw2 (#227): with mtl3 the command buffer presents, as on Metal 3: Metal calls the drawable's
         // present once it schedules the buffer
-        if (data->after > 0) {
-          if (mtl3)
-            mtl3_present.presentDrawableAfterMinimumDuration(drawable, data->after);
+        // gw2 (#283): the kind of present is picked once, for the Metal 3 buffer and for the drawable
+        const gw2::PresentChoice choice = gw2::presentChoice(data->after, data->deadline);
+        if (mtl3)
+          gw2::presentThrough(mtl3_present, drawable, choice);
+        else
+          drawable.present(choice.mode, choice.value);
+        if (stats) {
+          auto &frame_stats = currentFrameStatistics();
+          if (choice.mode == WMTDrawablePresentAfterMinimumDuration)
+            frame_stats.present_after++;
+          else if (choice.mode == WMTDrawablePresentWithDeadline)
+            frame_stats.present_deadline++;
           else
-            drawable.present(WMTDrawablePresentAfterMinimumDuration, data->after);
-          if (stats)
-            currentFrameStatistics().present_after++;
-        } else if (data->deadline > 0) {
-          if (mtl3)
-            mtl3_present.presentDrawableWithDeadline(drawable, data->deadline);
-          else
-            drawable.present(WMTDrawablePresentWithDeadline, data->deadline);
-          if (stats)
-            currentFrameStatistics().present_deadline++;
-        } else {
-          if (mtl3)
-            mtl3_present.presentDrawable(drawable);
-          else
-            drawable.present();
-          if (stats)
-            currentFrameStatistics().present_plain++;
+            frame_stats.present_plain++;
         }
         if (mtl3) {
           // the queue's next commits wait for it. gw2 (#271): with DXMT_MTL4_SHOWN_WAIT=write, only from

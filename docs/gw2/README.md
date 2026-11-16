@@ -1477,6 +1477,10 @@ copy of it from `215e15a`: everything before ` drawwait=` must be the same, so `
 `aftergpu`, `nogpu`, `missed` and `starved` keep their values. It also checks the skip count the
 section uses (`skippedRefreshes`, `skipWasQueued`) on known values.
 
+`present_choice_test.cpp` (pure, #283) checks the kind of present the Metal 4 branch of the context's
+present case picks once (`dxmt_gw2_present_choice.hpp`): a minimum duration over a deadline over a
+plain present, and that each choice calls exactly one of a Metal 3 command buffer's three presents.
+
 `shown_wait_test.cpp` (pure, #271) checks `DXMT_MTL4_SHOWN_WAIT` (`dxmt_gw2_shown_wait.hpp`) through a model of the encoding context's two halves (the flag on a texture write, the wait in the flush). Off, the wait follows every present. With `write`, a frame that writes only offscreen textures doesn't wait, and each kind of write to the back buffer (render target, clears, UAV clear, CopyResource, CopySubresourceRegion, UpdateSubresource, compute and pixel UAV, resolve, MetalFX output) waits right before its encoder, once; a read doesn't; a merged encoder hands the wait on; a write after the present in the same chunk waits for it; a second swap chain's present waits right away, and one that falls back to the Metal 4 way places the first texture's deferred wait. Then the queue arithmetic: 600 frames at 60 Hz, 13.6 ms of GPU work, every 10th 18 ms, three drawables that come back a refresh late (flip) or on time (copy), and a pass that must end by 1 ms after a vsync. These timings are a model (it gives `aftergpu` 33 ms with flip and 50 with copy; my logs read 32.2 and 48.3). With flip, off skips a refresh for each long frame and `write` none, also with 12 ms of back-buffer writes; with copy, off skips none; a 35 ms frame still skips with `write`. Its `RESULT` line gives the counts.
 
 `presenter_layer_set_test.mm` (metal, #184, #185, #224) runs DXMT's presenter on a real Metal 4
