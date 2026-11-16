@@ -36,7 +36,7 @@
 // allocator at reset> allocators=<alive now> allocheld=<their sizes at their last reset, MB>
 // slow=<chunks the finish thread waited for over 1 s> errors=.
 
-#include "Metal.hpp"
+#include "Metal4.hpp"
 #include <atomic>
 #include <cstdint>
 #include <memory>

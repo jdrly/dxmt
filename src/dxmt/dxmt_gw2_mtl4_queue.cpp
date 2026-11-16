@@ -69,7 +69,7 @@ newTable(WMT::Device device) {
   info.max_textures = 32;
   info.max_samplers = 0;
   WMT::Error err;
-  auto table = device.newArgumentTable(info, err);
+  auto table = WMT::newArgumentTable(device, info, err);
   if (!table)
     Logger::warn(std::format(
         "Metal 4: newArgumentTable failed ({})", err ? err.description().getUTF8String() : std::string("no error")
@@ -112,7 +112,7 @@ metal4ShownWaited(unsigned index, unsigned count) {
 Mtl4Queue::Mtl4Queue(WMT::Device device, uint32_t slots, bool allocator_pool) :
     device_(device),
     allocator_pool_(allocator_pool) {
-  queue_ = device.newMTL4CommandQueue();
+  queue_ = WMT::newMTL4CommandQueue(device);
   event_ = device.newSharedEvent();
   if (!queue_ || !event_)
     return;
@@ -144,7 +144,7 @@ Mtl4Queue::Mtl4Queue(WMT::Device device, uint32_t slots, bool allocator_pool) :
   // device on Metal 3 (nothing was committed yet); later ones are fatal (acquire)
   for (uint32_t i = 0; i < slots + 2; i++) {
     auto record = std::make_unique<Mtl4Commit>();
-    record->cmdbuf = device.newMTL4CommandBuffer();
+    record->cmdbuf = WMT::newMTL4CommandBuffer(device);
     if (!record->cmdbuf)
       return; // valid() is false
     free_.push_back(record.get());
@@ -172,7 +172,7 @@ Mtl4Queue::~Mtl4Queue() {
 // gw2 (#204): the allocator counts follow every allocator made and released, with or without the pool
 bool
 Mtl4Queue::newAllocator(Allocator &allocator) {
-  allocator.ref = device_.newCommandAllocator();
+  allocator.ref = WMT::newCommandAllocator(device_);
   allocator.bytes = 0;
   if (!allocator.ref)
     return false;
@@ -239,7 +239,7 @@ Mtl4Queue::acquire() {
     }
   }
   auto record = std::make_unique<Mtl4Commit>();
-  record->cmdbuf = device_.newMTL4CommandBuffer();
+  record->cmdbuf = WMT::newMTL4CommandBuffer(device_);
   if (!record->cmdbuf) {
     // Earlier chunks may still be on the GPU and this one can't be encoded or committed: stop the
     // process rather than commit nothing and wait for it, or free what the GPU still uses.
