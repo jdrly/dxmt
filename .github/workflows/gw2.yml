@@ -17,7 +17,8 @@
 #   (#248). Artifact dxmt-arm64-<commit>:
 #   aarch64-windows, i386-windows, aarch64-unix, VERSION, kept 7 days.
 # tests: zsh -n for the zsh scripts and warnings.zsh's self-check, then tests/gw2/run.zsh pure,
-#   and metal on the runner's Metal device. The display tests only build here (#225).
+#   and metal on the runner's Metal device. The display tests only build here (#225). A push skips
+#   this job when a green pull request run tested the same tree (the tested job, #273).
 # lint: actionlint for the workflows.
 # artifact: the installable build of the commit (as build-dxmt.zsh stages it: x86_64-windows,
 #   i386-windows, x86_64-unix, VERSION), kept 7 days, for scripts/dxmt-use.zsh save.
@@ -368,8 +369,51 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
+  # gw2 (#273): whether a green pull request run tested this push's tree. Then the push skips
+  # Native tests, which that run ran on the same files. A lookup that fails counts as "not
+  # tested", so the tests run.
+  tested:
+    name: Tested tree
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    outputs:
+      green: ${{ steps.look.outputs.green }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Whether a green pull request tested this tree
+        id: look
+        run: |
+          green=0
+          if [[ $GITHUB_EVENT_NAME == push ]]; then
+            tree=$(gh api "repos/$GH_REPO/commits/$COMMIT" -q .commit.tree.sha) || tree=""
+            while read -r pr head; do
+              [[ -n $pr && -n $tree ]] || continue
+              [[ $(gh api "repos/$GH_REPO/commits/$head" -q .commit.tree.sha) == "$tree" ]] || continue
+              run=$(gh api "repos/$GH_REPO/actions/workflows/gw2.yml/runs?event=pull_request&status=success&head_sha=$head" \
+                -q '.workflow_runs[0].html_url // empty') || run=""
+              if [[ -n $run ]]; then
+                green=1
+                echo "pull request #$pr's green run tested this tree: $run" | tee -a "$GITHUB_STEP_SUMMARY"
+                break
+              fi
+            done < <(gh api "repos/$GH_REPO/commits/$COMMIT/pulls" -q '.[] | select(.merged_at != null) | "\(.number) \(.head.sha)"')
+            if (( !green )); then
+              echo "::warning::no green pull request run tested the tree of $COMMIT, so this push runs Native tests" |
+                tee -a "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+          echo "green=$green" >>"$GITHUB_OUTPUT"
+
   tests:
     name: Native tests
+    needs: tested
+    if: needs.tested.outputs.green != '1'
     runs-on: xcode-27
     timeout-minutes: 30
     env:
@@ -435,7 +479,13 @@ jobs:
 
   publish:
     name: Publish
-    needs: [build, artifact, arm64, tests, lint]
+    needs: [tested, build, artifact, arm64, tests, lint]
+    # Native tests may be skipped, and only when a green pull request ran them on this tree
+    if: >-
+      ${{ !cancelled() && needs.build.result == 'success' && needs.artifact.result == 'success' &&
+      needs.arm64.result == 'success' && needs.lint.result == 'success' &&
+      (needs.tests.result == 'success' ||
+      (needs.tests.result == 'skipped' && needs.tested.outputs.green == '1')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
