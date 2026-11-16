@@ -22,18 +22,6 @@ mapFast() {
   return on;
 }
 
-namespace {
-// gw2 (#145): on unless exactly "0"; the startup line shows 0 when DXMT_MAP_FAST=0 leaves it nothing to do
-sw::Switch<bool> kUpdateOneCall{"DXMT_UPDATE_ONE_CALL", true, sw::legacy::notZero};
-sw::Effective kUpdateOneCallLine{"DXMT_UPDATE_ONE_CALL", [] { return sw::formatValue(updateOneCall()); }};
-} // namespace
-
-bool
-updateOneCall() {
-  static const bool on = mapFast() && kUpdateOneCall();
-  return on;
-}
-
 MapKind
 bufferMapKind(uint32_t usage, uint32_t bind_flags) {
   // D3D11_BIND_VERTEX_BUFFER = 1, INDEX_BUFFER = 2, CONSTANT_BUFFER = 4; D3D11_USAGE_DYNAMIC = 2
