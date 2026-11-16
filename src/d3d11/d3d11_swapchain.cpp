@@ -1970,7 +1970,7 @@ CreateSwapChain(
   if (ConvertSwapChainFormat(pDesc->Format) == WMTPixelFormatInvalid) {
     return E_INVALIDARG;
   }
-  if (gw2::metalfxSpatialSwapchain()) { // gw2 (#60): the switch dxmt_gw2_metal4.cpp declares
+  if (env::getEnvVar("DXMT_METALFX_SPATIAL_SWAPCHAIN") == "1") {
     if (pDevice->GetMTLDevice().supportsFXSpatialScaler()) {
       *ppSwapChain = new MTLD3D11SwapChain<true>(
           pFactory, pDevice, layer_factory.ptr(), hWnd, pDesc, pFullscreenDesc

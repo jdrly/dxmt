@@ -23,6 +23,9 @@ dxmt_src = [
   'dxmt_counter.cpp',
   'dxmt_fence.cpp',
   'dxmt_keyed_mutex.cpp',
+]
+# gw2: my fork's sources, in a list of their own so upstream's list ends as upstream wrote it
+dxmt_src += [
   'dxmt_gw2_stats.cpp',
   'dxmt_gw2_switches.cpp',
   'dxmt_gw2_thread_priority.cpp', # gw2 (#151, #152)

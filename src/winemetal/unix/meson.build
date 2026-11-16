@@ -50,6 +50,14 @@ bridge_manifest_test = executable('bridge_manifest_test',
 )
 test('bridge-manifest', bridge_manifest_test, suite : ['gw2'])
 
+# gw2 (#161): the vertex stage of a geometry-shader draw without an index buffer, converted by the
+# native airconv of src/airconv/darwin (airconv_cli_darwin; no Metal device needed). It lives here so
+# that file ends as upstream's does.
+test('airconv-gs-vertex', find_program('../../../tests/gw2/airconv_gs_vertex.zsh'),
+  args  : [ airconv_cli_darwin, meson.current_build_dir() / 'airconv-gs-vertex' ],
+  suite : [ 'gw2' ]
+)
+
 if not dxmt_crossbuild
   subdir_done()
 endif
