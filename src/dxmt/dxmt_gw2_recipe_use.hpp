@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -151,6 +152,16 @@ struct UseLedger {
     u.first_ms = std::min(u.first_ms, first_ms);
     value = recipeUseValue(u);
     return true;
+  }
+
+  // gw2 (#295): the row note() made wasn't stored. The recipe is as it was before note()
+  // (`before`; nullopt: it had no entry), so a later use in this session merges and writes again.
+  void
+  unnote(const std::string &id, const std::optional<RecipeUse> &before) {
+    if (before)
+      recipes[id] = *before;
+    else
+      recipes.erase(id);
   }
 };
 
