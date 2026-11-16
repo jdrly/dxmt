@@ -99,7 +99,7 @@ main(void) {
   CHECK(wmt_native_dispatch(WMTReserved_179, NULL) != 0);
   CHECK(wmt_native_dispatch(WMTReserved_194, NULL) != 0);
   CHECK(wmt_native_dispatch(WMTCall_Count, NULL) != 0);
-  printf("real table: dispatched 5 calls by name, 4 holes refused\n");
+  printf("real table: dispatched 4 calls by name, 5 holes refused\n");
 #endif
 
   if (failures) {
