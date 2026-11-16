@@ -11,8 +11,6 @@
 // gw2-build: done
 // gw2-run: for arch in x86_64 arm64; do ${OUT}_$arch; MTL_DEBUG_LAYER=1 ${OUT}_$arch; MTL_SHADER_VALIDATION=1 ${OUT}_$arch; done
 // gw2-run: for arch in x86_64 arm64; do for free in 0 1; do DXMT_LIFETIME_CHECK=1 DXMT_PRESENTER_FREE=$free ${OUT}_check_$arch; done; done
-// gw2-run: for arch in x86_64 arm64; do DXMT_MTL4_LAYER_SET=queue ${OUT}_$arch; DXMT_MTL4_LAYER_SET=queue MTL_DEBUG_LAYER=1 ${OUT}_$arch; DXMT_MTL4_LAYER_SET=queue MTL_SHADER_VALIDATION=1 ${OUT}_$arch; done
-// gw2-run: for arch in x86_64 arm64; do for free in 0 1; do DXMT_LIFETIME_CHECK=1 DXMT_PRESENTER_FREE=$free DXMT_MTL4_LAYER_SET=queue ${OUT}_check_$arch; done; done
 //
 // gw2 (#184): a Metal 4 queue takes at most 32 residency sets. The presenter used to add its layer's
 // set to the device's queue at its first present, to leave it in ~Presenter. But an Rc doesn't delete
@@ -80,14 +78,6 @@
 // drawable back in the pass's command buffer, before the signal. Every drawable must hold its own
 // frame's colour.
 //
-// gw2 (#226): DXMT_MTL4_LAYER_SET=queue puts each presenter's layer set on the queue, as before #184,
-// for at most 16 presenters of the process. Both builds read the switch from the environment, and
-// the run lines run them again with it. With it, the test counts the sets on the queue
-// (Presenter::layerSetsOnQueue()): never more than 16; 16 once 40 swap chains presented the Metal 4
-// way; with DXMT_PRESENTER_FREE=1, and through the Metal 3 present (which names no layer set), what it
-// was before each phase. Without it the queue holds no layer's set. The phases' presents then also
-// pass with the layer's set on the queue, through the fallback after 16.
-//
 // gw2 (#224): with DXMT_STATS on for its part, after the colour check, three more swap chains present 8
 // times each, tracked as the context and the finish thread track them (presentTrack, the present
 // pass's GPU span from the record the chunk notes, the frame's last GPU end): on Metal 4, on Metal 4
@@ -107,7 +97,6 @@
 #import <Metal/Metal.h>
 #import <QuartzCore/QuartzCore.h>
 #include "dxmt_presenter.hpp"
-#include "dxmt_gw2_layer_set.hpp"
 #include "dxmt_gw2_lifetime.hpp"
 #include "dxmt_gw2_mtl4_encoding.hpp"
 #include "dxmt_gw2_mtl4_queue.hpp"
@@ -250,7 +239,6 @@ struct Fixture {
   uint32_t lt_queue = 0;              // the lifetime check's id of the queue (its build only)
   uint64_t seq = 0;
   uint32_t presents = 0;
-  uint32_t most_queue_sets = 0; // gw2 (#226): the most layer sets on the queue after a present
 };
 
 static SwapChain
@@ -370,7 +358,6 @@ present(Fixture &fx, SwapChain &sc, const char *what, uint32_t index, uint64_t t
   held = nullptr; // RetireChunk: after reset(), the ledger's holds
   fx.queue->retire(seq);
   fx.arenas.clear();
-  fx.most_queue_sets = std::max(fx.most_queue_sets, Presenter::layerSetsOnQueue());
 }
 
 // gw2 (#224): a present through a plain Metal 3 command buffer, as the context's Metal 3 branch makes
@@ -449,20 +436,6 @@ phases(Fixture &fx, bool free) {
 #endif
   const char *mode = free ? "DXMT_PRESENTER_FREE=1" : "DXMT_PRESENTER_FREE=0";
   uint32_t before = Presenter::alive();
-  // gw2 (#226): the layer sets on the queue after a phase. buffer: none. queue: kept presenters keep
-  // theirs, so 40 swap chains fill the 16 places; deleted ones give them back; the Metal 3 present
-  // (DXMT_MTL4_PRESENT=mtl3) takes none
-  bool queue = dxmt::gw2::mtl4LayerSet() == dxmt::gw2::LayerSet::Queue;
-  bool takes = queue && !fx.mtl3_present;
-  auto expectSets = [&](const char *when, uint32_t before_sets) {
-    uint32_t sets = Presenter::layerSetsOnQueue();
-    uint32_t want = !queue ? 0 : (free || !takes) ? before_sets : dxmt::gw2::kLayerSetQueuePlaces;
-    std::printf("%s: %s, %u layer sets on the queue (most so far %u)\n", mode, when, sets, fx.most_queue_sets);
-    CHECK(sets == want, "%s: %s: %u layer sets on the queue, want %u", mode, when, sets, want);
-    CHECK(fx.most_queue_sets <= dxmt::gw2::kLayerSetQueuePlaces, "%s: %u layer sets on the queue at once", mode,
-          fx.most_queue_sets);
-  };
-  uint32_t sets_before = Presenter::layerSetsOnQueue();
 
   // a program that replaces its swap chain: each made, presented with, released
   for (uint32_t i = 0; i < kSwapChains; i++) {
@@ -477,11 +450,9 @@ phases(Fixture &fx, bool free) {
   std::printf("%s: replaced %u swap chains one after another, %u presenters left alive\n", mode, kSwapChains,
               left);
   CHECK(left == (free ? 0 : kSwapChains), "%s: %u presenters left alive", mode, left);
-  expectSets("replaced swap chains", sets_before);
 
   // a program with many windows: all alive at once
   before = Presenter::alive();
-  sets_before = Presenter::layerSetsOnQueue();
   std::vector<SwapChain> alive;
   for (uint32_t i = 0; i < kSwapChains; i++) {
     @autoreleasepool {
@@ -496,9 +467,6 @@ phases(Fixture &fx, bool free) {
   }
   CHECK(Presenter::alive() - before == kSwapChains, "%s: %u presenters alive with %u swap chains", mode,
         Presenter::alive() - before, kSwapChains);
-  if (takes) // 40 alive: every place is taken, the rest went through the fallback
-    CHECK(Presenter::layerSetsOnQueue() == dxmt::gw2::kLayerSetQueuePlaces,
-          "%s: %u layer sets on the queue with %u swap chains alive", mode, Presenter::layerSetsOnQueue(), kSwapChains);
   for (auto &sc : alive)
     releaseSwapChain(fx, sc);
   alive.clear();
@@ -506,7 +474,6 @@ phases(Fixture &fx, bool free) {
   std::printf("%s: %u swap chains alive at once, %u presenters left alive once released\n", mode, kSwapChains,
               left);
   CHECK(left == (free ? 0 : kSwapChains), "%s: %u presenters left alive", mode, left);
-  expectSets("swap chains alive at once, released", sets_before);
 }
 
 // gw2 (#227): frame i's back buffer colour, BGRA8Unorm. Red cycles through three values 100 apart, so
@@ -768,8 +735,6 @@ main() {
     CHECK(queue.enableMetal3Present(), "the Metal 3 present's events");
     fx.mtl3 = [fx.device newCommandQueue];
     [fx.mtl3 addResidencySet:fx.device_set];
-    std::printf("DXMT_MTL4_LAYER_SET=%s\n",
-                dxmt::gw2::mtl4LayerSet() == dxmt::gw2::LayerSet::Queue ? "queue" : "buffer");
 
 #ifdef DXMT_GW2_LIFETIME_CHECK
     CHECK(dxmt::gw2::lifetime::check(), "DXMT_LIFETIME_CHECK=1 in the lifetime-check build");
