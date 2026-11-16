@@ -231,13 +231,17 @@ DynamicBuffer::renameImmediate(uint64_t current_seq_id, uint64_t coherent_seq_id
   uint32_t result = 0;
   if (grow_length_ && name_seq_id_ == current_seq_id) {
     // the next page holds at least two (16-aligned, at least 256-byte) suballocations
-    uint32_t sub = (std::max(grow_length_, 256u) + 15) & ~15u;
-    uint32_t next = page_ * 2;
-    while (next < sub * 2)
-      next *= 2;
-    if (next <= kMaxGrowPage) {
-      page_ = next;
-      result |= RenameGrown;
+    uint64_t sub = (uint64_t(std::max(grow_length_, 256u)) + 15) & ~uint64_t(15);
+    // gw2 (#295): a suballocation over half the largest page never grows the page, and for one
+    // over 1 GiB the 32-bit doubling below wrapped to 0 and never ended
+    if (sub <= kMaxGrowPage / 2) {
+      uint32_t next = page_ * 2;
+      while (next < sub * 2)
+        next *= 2;
+      if (next <= kMaxGrowPage) {
+        page_ = next;
+        result |= RenameGrown;
+      }
     }
   }
   Rc<BufferAllocation> next = takeFree(coherent_seq_id, result);
