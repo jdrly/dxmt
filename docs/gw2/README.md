@@ -1228,11 +1228,11 @@ a nonzero exit fails the run; exit 77 is *skipped*, never counted as passed; a t
 is listed as unregistered. `--meson <build>/x64` adds the meson tests of the `gw2` suite (B1's
 `bridge-native-smoke`). Native tests take their threads from `tests/gw2/shim/thread.hpp` (X2):
 `dxmt::thread`, `mutex` and `condition_variable` are `std::`'s and priorities are no-ops, so a test
-checks coordination, not Wine's scheduling. The script builds the selected tests first,
-`GW2_TEST_JOBS` at a time (default: the Mac's CPU count), and prints `built <n> tests in <s> s` when
-they are done. Then it runs them one after the other in name order, so no test runs beside a
-compiler. A test whose build lines name a file in `$T` itself, not `$OUT` or `${OUT}_<suffix>`, may
-share that file with another such test, so those tests build in a chain, one after the other (#308).
+checks coordination, not Wine's scheduling. I build the selected tests first, `GW2_TEST_JOBS` at a
+time (default: my Mac's CPU count), print `built <n> tests in <s> s`, and then run them one after the
+other in name order, so no test runs beside a compiler. A test whose build lines name a file in `$T`
+itself, not `$OUT` or `${OUT}_<suffix>`, may share that file with another such test, so I build those
+in a chain, one after the other (#308).
 
 `compile_service_test.cpp` (C1) runs scripted job graphs (GW2-shaped bursts of pipelines sharing
 variants, parking, failures, the spurious-dependency rerun, growth to 2 × CPUs) through the compile
