@@ -10,7 +10,8 @@
 #   ccache.zsh stats
 #       print the runner's core count, this run's hits and misses (ccache's statistics log,
 #       $CCACHE_STATSLOG: the counters inside a restored cache are those of the push that saved it)
-#       and the cache's size
+#       and the cache's size. A Build step with two trees gives each its own log, named
+#       <$CCACHE_STATSLOG without .log>-<tree>.log (#307), and each log is printed under its name
 #
 # A cache is valid for one toolchain: the runner image, Xcode's clang, the macOS floor, the
 # llvm-mingw pin and the cross compilers, each by its resolved path and version line. That text is
@@ -72,12 +73,16 @@ setup() {
 }
 
 stats() {
+  local log
   print -r -- "cores: $(sysctl -n hw.ncpu)"
   if [[ ${CCACHE_DISABLE:-} == 1 ]]; then
     print -r -- "ccache was off: this push's day has a cache already"
     return 0
   fi
-  "$ccache" --show-log-stats --verbose
+  for log in ${CCACHE_STATSLOG%.log}*.log(N); do
+    print -r -- "${log:t}:"
+    CCACHE_STATSLOG=$log "$ccache" --show-log-stats --verbose
+  done
   du -sh "$CCACHE_DIR"
 }
 
