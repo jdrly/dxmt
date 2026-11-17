@@ -72,8 +72,8 @@ env:
   # Mach9's pins/redist.env (athei/mach9) at the engine's release
   LLVM_MINGW_VERSION: "20261104"
   LLVM_MINGW_SHA256: 66cbd5178c4a71b0d473e68ede172f8eb7d15d023e67f39201d0a69e21f6bf3c
-  MACH9_VERSION: v0.3.1
-  MACH9_SHA256: 90aff9a897ed0ff9aac44d0e06f0aecd3ee985afb38037f3f915451e51fa974e
+  MACH9_VERSION: v0.4.0
+  MACH9_SHA256: 3b81aac9b93d5652872673b400769ec525f3bc2f1f7e2ec82c9f851d0a0db05d
   # ccache's own macOS release (a universal binary), for the three builds
   CCACHE_VERSION: 4.14.3
   CCACHE_SHA256: 764dd2a8100ff83e6bbd7b9a1e2016cc401be34bee8a70ea99698186622c34d5
