@@ -5,12 +5,16 @@
 // with fake jobs and std:: threads (shim/thread.hpp). No Metal, no Wine.
 //
 // Scripted job graphs run through the service. A gate holds every job a worker runs. At each step the
-// test waits until the system is quiescent (every worker gated or idle), then releases the
-// lowest-numbered gated job and records what it returned (done, failed, or parked on a dependency,
-// including the spurious-dependency rerun). No scenario may get stuck, every job must complete exactly
-// once, and the compile queue's +1/-1 count must return to zero. The scenarios include GW2-shaped
-// bursts: pipelines that share shader variants, arriving faster than the workers. Until #198 the same
-// graphs also ran through upstream's old scheduler and the traces had to match.
+// test waits until the step is settled (every job that can run is at the gate, up to the workers, and
+// the service counts exactly those as running), then releases the lowest-numbered gated job and
+// records what it returned (done, failed, or parked on a dependency, including the
+// spurious-dependency rerun). No scenario may get stuck, every job must complete exactly once, and the
+// compile queue's +1/-1 count must return to zero. The scenarios include GW2-shaped bursts: pipelines
+// that share shader variants, arriving faster than the workers. Until #198 the same graphs also ran
+// through upstream's old scheduler and the traces had to match.
+//
+// The declared cases wait for the exact set of jobs they expect at the gate, then 8 ms more, and
+// compare (#303). No check passes or fails on whether a worker reaches the gate within some time.
 //
 // Also: the job records' states with STATS off (no timestamps), and demands classified by the job's
 // state when they begin.
@@ -134,6 +138,7 @@ struct FakeJob {
   Gate *gate = nullptr;
   std::atomic_bool ready{false};
   std::atomic<int> done_count{0};
+  std::atomic<FakeJob *> returned_dep{nullptr}; // the dependency its last run returned (#303)
   bool failed = false;
   compile::JobRecord record;
 
@@ -151,16 +156,15 @@ struct Gate {
   std::condition_variable cv;
   std::set<int> gated;
   std::set<int> released;
-  uint64_t events = 0; // bumps on every enter and return
+  bool open = false; // every job passes: a stuck scenario's teardown (#303)
   std::vector<std::string> outcomes;
 
   void
   enter(int id) {
     std::unique_lock<std::mutex> l(m);
     gated.insert(id);
-    events++;
     cv.notify_all();
-    cv.wait(l, [&] { return released.count(id) > 0; });
+    cv.wait(l, [&] { return open || released.count(id) > 0; });
     released.erase(id);
     gated.erase(id);
   }
@@ -168,7 +172,12 @@ struct Gate {
   returned(std::string what) {
     std::lock_guard<std::mutex> l(m);
     outcomes.push_back(std::move(what));
-    events++;
+    cv.notify_all();
+  }
+  void
+  openAll() {
+    std::lock_guard<std::mutex> l(m);
+    open = true;
     cv.notify_all();
   }
 };
@@ -178,6 +187,7 @@ std::atomic<uint64_t> g_parks{0}, g_early_runs{0};
 FakeJob *
 FakeJob::run() {
   t_ran_a_job = true;
+  returned_dep = nullptr;
   if (!gate) {
     // ungated (stress): a declared job must find every dependency done when it starts
     if (std::any_of(deps.begin(), deps.end(), [](FakeJob *d) { return !d->GetIsDone(); }))
@@ -197,10 +207,12 @@ FakeJob::run() {
     auto *d = deps[i];
     if (int(i) == lie_once) {
       lie_once = -1;
+      returned_dep = d;
       gate->returned(std::to_string(id) + "->park" + std::to_string(d->id) + "(spurious)");
       return d;
     }
     if (!d->GetIsDone()) {
+      returned_dep = d;
       gate->returned(std::to_string(id) + "->park" + std::to_string(d->id));
       return d;
     }
@@ -254,27 +266,37 @@ struct Trace {
   bool stuck = false;
 };
 
-// Quiescent: every worker is gated, or nothing has changed for `settle`.
-static bool
-waitQuiescent(Gate &g, size_t workers, std::chrono::milliseconds settle, std::chrono::seconds limit) {
-  auto end = Clock::now() + limit;
-  uint64_t last = ~0ull;
-  auto stable_since = Clock::now();
+// Waits until exactly `want` is at the gate (5 s at most), then 8 ms more, and returns what is there:
+// a late worker only delays the check, and a job that starts when it shouldn't still shows in the
+// extra 8 ms (#303).
+static std::set<int>
+gatedAs(Gate &gate, const std::set<int> &want) {
+  auto end = Clock::now() + std::chrono::seconds(5);
   while (Clock::now() < end) {
     {
-      std::lock_guard<std::mutex> l(g.m);
-      if (g.gated.size() >= workers)
-        return true;
-      if (g.events != last) {
-        last = g.events;
-        stable_since = Clock::now();
-      }
+      std::lock_guard<std::mutex> l(gate.m);
+      if (gate.gated == want)
+        break;
     }
-    if (Clock::now() - stable_since >= settle)
-      return true;
     std::this_thread::sleep_for(std::chrono::microseconds(200));
   }
-  return false;
+  std::this_thread::sleep_for(std::chrono::milliseconds(8));
+  std::lock_guard<std::mutex> l(gate.m);
+  return gate.gated;
+}
+
+// Waits until `n` jobs are at the gate (each on its own worker); false after 10 s.
+static bool
+waitGated(Gate &gate, size_t n) {
+  std::unique_lock<std::mutex> l(gate.m);
+  return gate.cv.wait_for(l, std::chrono::seconds(10), [&] { return gate.gated.size() >= n; });
+}
+
+// The lowest-numbered job at the gate (-1: none).
+static int
+gatedFirst(Gate &gate) {
+  std::lock_guard<std::mutex> l(gate.m);
+  return gate.gated.empty() ? -1 : *gate.gated.begin();
 }
 
 static size_t
@@ -299,18 +321,55 @@ runScenario(const ScenarioFn &build) {
   Trace t;
   {
     Scheduler sched;
-    auto settle = std::chrono::milliseconds(8);
     size_t total = sc.jobs.size();
-    for (int step = 0; step < 10000; step++) {
+    std::vector<FakeJob *> submitted;
+    // #303 (#198's wait on job state): settled when the jobs at the gate are as many as can run,
+    // min(workers, submitted - done - parked), and the service counts exactly those as running. The
+    // first catches a worker that took a job but isn't at the gate yet, the second one that returned
+    // but hasn't counted itself out. "Parked" is the harness's own record: the job's last run returned
+    // a dependency that isn't done. No quiet period decides it, so a late worker only delays a step.
+    // (runnable, done): read job by job, so it is counted again after the gate and the running count,
+    // and a step whose jobs completed meanwhile isn't settled
+    auto tally = [&] {
+      std::pair<size_t, size_t> r{0, 0};
+      for (auto *j : submitted) {
+        auto *dep = j->returned_dep.load();
+        if (j->GetIsDone())
+          r.second++;
+        else if (!(dep && !dep->GetIsDone()))
+          r.first++;
+      }
+      return r;
+    };
+    auto settled = [&] {
+      auto end = Clock::now() + std::chrono::seconds(10);
+      while (Clock::now() < end) {
+        auto before = tally();
+        size_t gated;
+        {
+          std::lock_guard<std::mutex> l(gate.m);
+          gated = gate.gated.size();
+        }
+        bool counted = sched.runningWorkers() == gated;
+        if (counted && gated == std::min(currentWorkers(), before.first) && tally() == before)
+          return true;
+        std::this_thread::sleep_for(std::chrono::microseconds(200));
+      }
+      return false;
+    };
+    for (int step = 0; step < 10000 && !t.stuck; step++) {
       // one submit at a time, each settled: the growth trigger reads the running count, which a
       // worker raises after it pops, so submits racing the pops would make growth timing-dependent
       if (auto it = sc.submit_at.find(step); it != sc.submit_at.end())
         for (int id : it->second) {
           sched.submit(sc.jobs[id].get());
-          if (!waitQuiescent(gate, currentWorkers(), settle, std::chrono::seconds(10)))
+          submitted.push_back(sc.jobs[id].get());
+          if (!settled()) {
             t.stuck = true;
+            break;
+          }
         }
-      if (!waitQuiescent(gate, currentWorkers(), settle, std::chrono::seconds(10))) {
+      if (t.stuck || !settled()) {
         t.stuck = true;
         break;
       }
@@ -359,7 +418,11 @@ runScenario(const ScenarioFn &build) {
       (void)total;
     }
     // let the last completion settle before stopping
-    waitQuiescent(gate, currentWorkers(), settle, std::chrono::seconds(10));
+    if (!t.stuck && !settled())
+      t.stuck = true;
+    // a stuck run may leave a job at the gate, or one on its way there: let it through, or the
+    // service's stop joins its worker forever
+    gate.openAll();
   }
   {
     std::lock_guard<std::mutex> l(g_threads_mutex);
@@ -532,7 +595,7 @@ recordsAndDemands() {
     compile::Service<FakeJob *> sched(compile::Options{1, 1});
     sched.submit(p);
     sched.submit(v);
-    auto quiet = [&] { waitQuiescent(gate, 1, std::chrono::milliseconds(8), std::chrono::seconds(5)); };
+    auto quiet = [&](const std::set<int> &at_gate) { gatedAs(gate, at_gate); }; // the state the checks read
     auto release = [&](int id) { // and wait for what it returns
       size_t before;
       {
@@ -551,7 +614,7 @@ recordsAndDemands() {
       std::lock_guard<std::mutex> l(g_waits_mutex);
       return g_waits.size();
     };
-    quiet();
+    quiet({1});
     CHECK(p->record.state.load() == compile::JobState::Running, "the pipeline runs (STATS off)");
     CHECK(v->record.state.load() == compile::JobState::Queued, "the variant is queued (STATS off)");
     CHECK(!v->record.timed.load() && v->record.submit_ns.load() == 0, "no timeline with STATS off");
@@ -559,7 +622,7 @@ recordsAndDemands() {
     while (waits() < 1)
       std::this_thread::yield();
     release(p->id); // it parks on the variant; the worker takes the variant
-    quiet();
+    quiet({0});
     CHECK(p->record.state.load() == compile::JobState::Parked && p->record.parked_on.load() == &v->record,
           "the pipeline is parked on its variant");
     CHECK(v->record.state.load() == compile::JobState::Running, "the variant runs");
@@ -567,11 +630,11 @@ recordsAndDemands() {
     while (waits() < 2)
       std::this_thread::yield();
     release(v->id); // done: the pipeline is a continuation
-    quiet();
+    quiet({1});
     release(p->id);
     demand_v.join();
     demand_p.join();
-    quiet();
+    quiet({});
     {
       std::lock_guard<std::mutex> l(g_waits_mutex);
       CHECK(g_waits.size() == 2 && g_waits[0].state == compile::JobState::Queued &&
@@ -592,7 +655,7 @@ recordsAndDemands() {
   {
     compile::Service<FakeJob *> sched(compile::Options{1, 1});
     sched.submit(sc2.jobs[0].get());
-    waitQuiescent(gate2, 1, std::chrono::milliseconds(8), std::chrono::seconds(5));
+    gatedAs(gate2, {0});
     {
       std::lock_guard<std::mutex> l(gate2.m);
       gate2.released.insert(0);
@@ -635,13 +698,6 @@ releaseJob(Gate &gate, int id) {
       return gate.outcomes[before];
   }
   return "timeout";
-}
-
-static std::set<int>
-gatedNow(Gate &gate, size_t workers) {
-  waitQuiescent(gate, workers, std::chrono::milliseconds(8), std::chrono::seconds(10));
-  std::lock_guard<std::mutex> l(gate.m);
-  return gate.gated;
 }
 
 static std::string
@@ -726,11 +782,11 @@ declaredNoPark() {
   sched.submit(sc.jobs[0].get());
   sched.submit(sc.jobs[1].get());
   sched.submit(p);
-  auto g = gatedNow(gate, 3);
+  auto g = gatedAs(gate, {0, 1});
   CHECK(g == std::set<int>({0, 1}), "declared: the pipeline waits for its variants, unqueued (gated %s)", str(g).c_str());
   CHECK(p->record.state.load() == compile::JobState::Queued, "declared: the waiting pipeline is still 'queued'");
   auto a = releaseJob(gate, 0), b = releaseJob(gate, 1);
-  g = gatedNow(gate, 3);
+  g = gatedAs(gate, {2});
   CHECK(g == std::set<int>({2}), "declared: runnable once both are done (gated %s)", str(g).c_str());
   auto c = releaseJob(gate, 2);
   CHECK(c == "2->done", "declared: it ran once, without parking (%s)", c.c_str());
@@ -754,7 +810,7 @@ declaredDemand() {
     compile::Service<FakeJob *> sched(declared(1, 1));
     for (int i = 0; i < 6; i++)
       sched.submit(sc.jobs[i].get());
-    auto g = gatedNow(gate, 1);
+    auto g = gatedAs(gate, {0});
     CHECK(g == std::set<int>({0}), "demand: job 0 runs (gated %s)", str(g).c_str());
     std::thread demander([&] { compile::demand(p->record, p->ready); });
     while (gw2::g_promoted_count.load() < 2)
@@ -765,10 +821,9 @@ declaredDemand() {
     CHECK(gw2::g_promoted_count.load() == 2, "demand: the pipeline and its variant promoted once each (%llu)",
           (unsigned long long)gw2::g_promoted_count.load());
     for (int step = 0; step < 6; step++) {
-      auto gs = gatedNow(gate, 1);
-      if (gs.empty())
+      if (!waitGated(gate, 1)) // one worker: the job it runs next, whichever that is
         break;
-      order.push_back(releaseJob(gate, *gs.begin()));
+      order.push_back(releaseJob(gate, gatedFirst(gate)));
     }
     demander.join();
     demander2.join();
@@ -796,31 +851,31 @@ declaredSpeculative() {
   for (int i = 0; i < 3; i++)
     sched.submit(sc.jobs[i].get(), compile::Lane::Speculative);
   sched.submit(sc.jobs[3].get());
-  auto g = gatedNow(gate, 3);
+  auto g = gatedAs(gate, {0, 3});
   CHECK(g == std::set<int>({0, 3}), "speculative: one speculative job beside the normal one (gated %s)", str(g).c_str());
   // a demand pending (on the running normal job): no speculative job starts
   auto *n = sc.jobs[3].get();
+  uint64_t promoted = gw2::g_promoted_count.load();
   std::thread demander([&] { compile::demand(n->record, n->ready); });
-  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  while (gw2::g_promoted_count.load() == promoted) // the demand is registered (it promotes job 3)
+    std::this_thread::yield();
   releaseJob(gate, 0);
-  g = gatedNow(gate, 3);
+  g = gatedAs(gate, {3});
   CHECK(g == std::set<int>({3}), "speculative: none starts while a demand waits (gated %s)", str(g).c_str());
   releaseJob(gate, 3);
   demander.join();
-  g = gatedNow(gate, 3);
+  g = gatedAs(gate, {1});
   CHECK(g == std::set<int>({1}), "speculative: admission resumes after the demand (gated %s)", str(g).c_str());
   // a demand on a queued speculative job promotes it past the speculative limit
   auto *s4 = sc.jobs[4].get();
   sched.submit(s4, compile::Lane::Speculative);
   std::thread demander4([&] { compile::demand(s4->record, s4->ready); });
-  g = gatedNow(gate, 3);
-  for (int tries = 0; tries < 100 && g.size() < 2; tries++)
-    g = gatedNow(gate, 3);
+  g = gatedAs(gate, {1, 4});
   CHECK(g == std::set<int>({1, 4}), "speculative: a demanded speculative job runs at once (gated %s)", str(g).c_str());
   releaseJob(gate, 4);
   demander4.join();
   releaseJob(gate, 1);
-  g = gatedNow(gate, 3);
+  gatedAs(gate, {2});
   releaseJob(gate, 2);
   std::printf("%s declared, speculative admission\n", failures ? "?   " : "ok  ");
 }
@@ -837,12 +892,12 @@ declaredUnknownDependency() {
     j->gate = &gate;
   compile::Service<FakeJob *> sched(declared(1, 1));
   sched.submit(p);
-  gatedNow(gate, 1);
+  gatedAs(gate, {1});
   auto a = releaseJob(gate, 1);
   sched.submit(sc.jobs[0].get());
-  gatedNow(gate, 1);
+  gatedAs(gate, {0});
   auto b = releaseJob(gate, 0);
-  gatedNow(gate, 1);
+  gatedAs(gate, {1});
   auto c = releaseJob(gate, 1);
   bool ok = a == "1->park0" && b == "0->done" && c == "1->done";
   CHECK(ok, "unknown dependency: %s %s %s", a.c_str(), b.c_str(), c.c_str());
@@ -875,18 +930,18 @@ declaredLateSpeculativeDependency() {
   auto *d = sc.jobs[0].get();
   compile::Service<FakeJob *> sched(declared(2, 2));
   sched.submit(p);
-  gatedNow(gate, 2);
+  gatedAs(gate, {1});
   auto a = releaseJob(gate, 1); // P parks on the unknown D
   gw2::g_promoted_count = 0;
   std::thread demander([&] { compile::demand(p->record, p->ready); });
   while (gw2::g_promoted_count.load() < 1) // the demand has promoted P (and registered D)
     std::this_thread::yield();
   sched.submit(d, compile::Lane::Speculative);
-  auto g = gatedNow(gate, 2);
+  auto g = gatedAs(gate, {0});
   CHECK_OR_EXIT(g == std::set<int>({0}), "late dependency: the demand reaches the speculative dependency (gated %s)",
                 str(g).c_str());
   auto b = releaseJob(gate, 0);
-  g = gatedNow(gate, 2);
+  g = gatedAs(gate, {1});
   CHECK_OR_EXIT(g == std::set<int>({1}), "late dependency: the demanded job resumes (gated %s)", str(g).c_str());
   auto c = releaseJob(gate, 1);
   demander.join();
@@ -912,20 +967,22 @@ declaredSpeculativeResume() {
     compile::Service<FakeJob *> sched(declared(3, 3));
     sched.submit(n);
     sched.submit(s1, compile::Lane::Speculative);
-    auto g = gatedNow(gate, 3);
+    auto g = gatedAs(gate, {1, 2});
     CHECK(g == std::set<int>({1, 2}), "resume (a): N and S run (gated %s)", str(g).c_str());
     auto a = releaseJob(gate, 1); // S parks on U
+    uint64_t promoted = gw2::g_promoted_count.load();
     std::thread demander([&] { compile::demand(n->record, n->ready); });
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    while (gw2::g_promoted_count.load() == promoted) // the demand is registered (it promotes N)
+      std::this_thread::yield();
     sched.submit(sc.jobs[0].get());
-    g = gatedNow(gate, 3);
+    g = gatedAs(gate, {0, 2});
     CHECK(g == std::set<int>({0, 2}), "resume (a): U runs beside N (gated %s)", str(g).c_str());
     releaseJob(gate, 0); // U done: S is released, but a demand waits
-    g = gatedNow(gate, 3);
+    g = gatedAs(gate, {2});
     CHECK(g == std::set<int>({2}), "resume (a): S doesn't resume while the demand waits (gated %s)", str(g).c_str());
     releaseJob(gate, 2);
     demander.join();
-    g = gatedNow(gate, 3);
+    g = gatedAs(gate, {1});
     CHECK(g == std::set<int>({1}), "resume (a): S resumes after the demand (gated %s)", str(g).c_str());
     auto c = releaseJob(gate, 1);
     CHECK(a == "1->park0" && c == "1->done", "resume (a): %s %s", a.c_str(), c.c_str());
@@ -941,19 +998,19 @@ declaredSpeculativeResume() {
       j->gate = &gate;
     compile::Service<FakeJob *> sched(declared(3, 3));
     sched.submit(s1, compile::Lane::Speculative);
-    gatedNow(gate, 3);
+    gatedAs(gate, {1});
     releaseJob(gate, 1); // S1 parks; its slot is free
     sched.submit(s2, compile::Lane::Speculative);
-    auto g = gatedNow(gate, 3);
+    auto g = gatedAs(gate, {2});
     CHECK(g == std::set<int>({2}), "resume (b): S2 takes the free slot (gated %s)", str(g).c_str());
     sched.submit(sc.jobs[0].get());
-    g = gatedNow(gate, 3);
+    g = gatedAs(gate, {0, 2});
     CHECK(g == std::set<int>({0, 2}), "resume (b): U runs (gated %s)", str(g).c_str());
     releaseJob(gate, 0); // S1 released while S2 runs
-    g = gatedNow(gate, 3);
+    g = gatedAs(gate, {2});
     CHECK(g == std::set<int>({2}), "resume (b): S1 waits for S2's slot (gated %s)", str(g).c_str());
     releaseJob(gate, 2);
-    g = gatedNow(gate, 3);
+    g = gatedAs(gate, {1});
     CHECK(g == std::set<int>({1}), "resume (b): S1 resumes once S2 is done (gated %s)", str(g).c_str());
     releaseJob(gate, 1);
   }
@@ -977,17 +1034,18 @@ releasedOrder(int demand_rank) {
   compile::Service<FakeJob *> sched(declared(1, 1));
   for (int i = 1; i <= 3; i++) {
     sched.submit(sc.jobs[i].get());
-    gatedNow(gate, 1);
+    gatedAs(gate, {i});
     releaseJob(gate, i); // parks on U
   }
   sched.submit(sc.jobs[0].get());
-  gatedNow(gate, 1);
+  gatedAs(gate, {0});
   order.push_back(releaseJob(gate, 0)); // U done: 1-3 released
-  auto first = gatedNow(gate, 1);       // the first released job runs (gated)
+  waitGated(gate, 1);
+  int first = gatedFirst(gate); // the first released job runs (gated)
   std::thread demander;
   std::vector<int> rest;
   for (int i = 1; i <= 3; i++)
-    if (!first.count(i))
+    if (i != first)
       rest.push_back(i);
   if (demand_rank >= 0) {
     auto *target = sc.jobs[demand_rank].get();
@@ -997,10 +1055,9 @@ releasedOrder(int demand_rank) {
       std::this_thread::yield();
   }
   for (int step = 0; step < 3; step++) {
-    auto g = gatedNow(gate, 1);
-    if (g.empty())
+    if (!waitGated(gate, 1)) // one worker: the job it runs next, whichever that is
       break;
-    order.push_back(releaseJob(gate, *g.begin()));
+    order.push_back(releaseJob(gate, gatedFirst(gate)));
   }
   if (demander.joinable())
     demander.join();
@@ -1025,13 +1082,6 @@ declaredPromoteReleased() {
         got.c_str());
   std::printf("%s declared, a demanded released job is promoted past the other released ones: %s\n", ok ? "ok  " : "FAIL",
               got.c_str());
-}
-
-// Waits until `n` jobs are at the gate (each on its own worker); false after 10 s.
-static bool
-waitGated(Gate &gate, size_t n) {
-  std::unique_lock<std::mutex> l(gate.m);
-  return gate.cv.wait_for(l, std::chrono::seconds(10), [&] { return gate.gated.size() >= n; });
 }
 
 // gw2 (#159): Options::speculative_jobs (DXMT_WARM_JOBS). Slowness comes from the fake clock, whose
@@ -1059,8 +1109,7 @@ declaredSpeculativeJobs() {
     for (auto &j : sc.jobs)
       sched.submit(j.get(), compile::Lane::Speculative);
     for (int i = 0; i < 3; i++) {
-      waitGated(gate, 1);
-      auto g = gatedNow(gate, currentWorkers());
+      auto g = gatedAs(gate, {i});
       CHECK(g == std::set<int>({i}), "%s: one speculative job at a time (gated %s)", what, str(g).c_str());
       releaseJob(gate, i);
     }
@@ -1080,17 +1129,14 @@ declaredSpeculativeJobs() {
     CHECK(currentWorkers() == 4, "N=3: a worker more than the speculative jobs (%zu)", currentWorkers());
     for (int i = 0; i < 6; i++)
       sched.submit(sc.jobs[i].get(), compile::Lane::Speculative);
-    waitGated(gate, 1);
-    auto g = gatedNow(gate, 4);
+    auto g = gatedAs(gate, {0});
     CHECK(g == std::set<int>({0}), "N=3: one at a time before a run was slow (gated %s)", str(g).c_str());
     releaseJob(gate, 0); // slow: the average is 5 ms
-    waitGated(gate, 3);
-    g = gatedNow(gate, 4);
+    g = gatedAs(gate, {1, 2, 3});
     CHECK(g == std::set<int>({1, 2, 3}), "N=3: three at once after a slow run (gated %s)", str(g).c_str());
     CHECK(gw2::g_speculative_peak.load() == 3, "N=3: jobs= peak %u", gw2::g_speculative_peak.load());
     sched.submit(n6);
-    waitGated(gate, 4);
-    g = gatedNow(gate, 4);
+    g = gatedAs(gate, {1, 2, 3, 6});
     CHECK(g == std::set<int>({1, 2, 3, 6}), "N=3: the fourth worker takes a normal job (gated %s)", str(g).c_str());
     // a demand pending (on the running normal job): a freed slot stays free
     uint64_t promoted = gw2::g_promoted_count.load();
@@ -1098,24 +1144,22 @@ declaredSpeculativeJobs() {
     while (gw2::g_promoted_count.load() == promoted)
       std::this_thread::yield();
     releaseJob(gate, 1);
-    g = gatedNow(gate, 4);
+    g = gatedAs(gate, {2, 3, 6});
     CHECK(g == std::set<int>({2, 3, 6}), "N=3: no speculative job starts while a demand waits (gated %s)",
           str(g).c_str());
     // a demand on the last queued speculative job: it goes ahead of the one queued before it
     auto *s5 = sc.jobs[5].get();
     std::thread demander5([&] { compile::demand(s5->record, s5->ready); });
-    waitGated(gate, 4);
-    g = gatedNow(gate, 4);
+    g = gatedAs(gate, {2, 3, 5, 6});
     CHECK(g == std::set<int>({2, 3, 5, 6}), "N=3: the demanded speculative job runs before job 4 (gated %s)",
           str(g).c_str());
     releaseJob(gate, 5);
     demander5.join();
-    g = gatedNow(gate, 4);
+    g = gatedAs(gate, {2, 3, 6});
     CHECK(g == std::set<int>({2, 3, 6}), "N=3: still none while the first demand waits (gated %s)", str(g).c_str());
     releaseJob(gate, 6);
     demander.join();
-    waitGated(gate, 3);
-    g = gatedNow(gate, 4);
+    g = gatedAs(gate, {2, 3, 4});
     CHECK(g == std::set<int>({2, 3, 4}), "N=3: admission resumes up to three after the demands (gated %s)",
           str(g).c_str());
     for (int i : {2, 3, 4})

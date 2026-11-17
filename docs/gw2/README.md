@@ -1311,7 +1311,10 @@ variants, parking, failures, the spurious-dependency rerun, growth to 2 × CPUs)
 service, with every worker's job held at a gate and released one at a time. No scenario may get
 stuck, every job completes exactly once, and the queue's count returns to zero. Until #198 it also
 ran them through the scheduler the service replaced and compared the traces
-([ADR 0015](adr/0015-compile-service-tests-without-the-old-scheduler.md)). Since #152 it also checks, for each `DXMT_COMPILE_PRIORITY` setting and both policies, that
+([ADR 0015](adr/0015-compile-service-tests-without-the-old-scheduler.md)). Since #303 no check
+depends on how fast a worker reaches the gate: a scenario's step is settled when the jobs at the gate
+are as many as can run and the service counts exactly those as running, and the declared cases wait
+for the set of jobs they expect at the gate, then 8 ms more, and compare. Since #152 it also checks, for each `DXMT_COMPILE_PRIORITY` setting and both policies, that
 every worker, the first two and those a submit adds, applies the service's priority once, on itself,
 before its first job. Since #159 it checks `DXMT_WARM_JOBS` (`Options::speculative_jobs`) on the
 declared policy: one speculative job at a time while the runs are fast, and at 1 while they are
