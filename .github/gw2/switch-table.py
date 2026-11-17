@@ -10,8 +10,8 @@ backticks. The two sets must be equal, apart from NOT_MINE below.
 
 It also compares the Default column with the fallback of every sw::Switch<bool> and
 sw::Switch<uint32_t> declared with a literal: true is "on", false is "off", 0 is "off" or "0",
-another number is that number. And every row's last cell, Status (#320), has to start with one of
-STATUSES in backticks.
+another number is that number. And every row has five cells, the last one Status (#320), which
+has to start with one of STATUSES in backticks.
 
 Exit 0 when they agree, 1 with one line per difference. It reads files and builds nothing.
 """
@@ -40,7 +40,7 @@ STATUSES = ("default", "experiment", "diagnostic", "test", "settled")
 
 LITERAL = re.compile(r'"(DXMT_[A-Z0-9_]+)"')
 DECLARED = re.compile(r'sw::Switch<(bool|uint32_t)>\s+\w+\s*\{\s*"(DXMT_[A-Z0-9_]+)"\s*,\s*(true|false|\d+)\s*,')
-ROW = re.compile(r"^\| `(DXMT_[A-Z0-9_]+)` \|([^|]*)\|(?:.*\|)?([^|]*)\|\s*$")
+ROW = re.compile(r"^\| `(DXMT_[A-Z0-9_]+)` \|")
 STATUS = re.compile(r"`(%s)`" % "|".join(STATUSES))
 
 
@@ -54,7 +54,7 @@ def source_names(texts):
 
 
 def table_rows(readme):
-    """name -> (Default cell, Status cell), and the names that have more than one row."""
+    """name -> the row's cells, and the names that have more than one row."""
     rows, twice, inside = {}, [], False
     for line in readme.splitlines():
         if line.startswith("## "):
@@ -66,7 +66,7 @@ def table_rows(readme):
         if m.group(1) in rows:
             twice.append(m.group(1))
         else:
-            rows[m.group(1)] = (m.group(2).strip(), m.group(3).strip())
+            rows[m.group(1)] = [cell.strip() for cell in line.strip().split("|")[1:-1]]
     return rows, twice
 
 
@@ -96,11 +96,13 @@ def differences(texts, readme):
     for name in sorted(set(twice)):
         out.append(f"{name}: two rows in the table")
     for name, value in sorted(declared.items()):
-        if name in rows and not default_matches(value, rows[name][0]):
-            out.append(f"{name}: declared with {value}, the table's Default says {rows[name][0]!r}")
-    for name, (_, status) in sorted(rows.items()):
-        if not STATUS.match(status):
-            out.append(f"{name}: the Status cell {status!r} doesn't start with one of "
+        if len(rows.get(name, [])) == 5 and not default_matches(value, rows[name][1]):
+            out.append(f"{name}: declared with {value}, the table's Default says {rows[name][1]!r}")
+    for name, cells in sorted(rows.items()):
+        if len(cells) != 5:
+            out.append(f"{name}: {len(cells)} cells, the table has 5")
+        elif not STATUS.match(cells[4]):
+            out.append(f"{name}: the Status cell {cells[4]!r} doesn't start with one of "
                        + ", ".join(f"`{s}`" for s in STATUSES))
     return out
 
@@ -135,14 +137,14 @@ def self_test():
     ]
     assert got == want, got
     statuses = head + "| `DXMT_A` | on | a | b | |\n| `DXMT_N` | 250 | a | b | `testing` |\n" \
-                      "| `DXMT_Z` | off | a | b | default |\n| `DXMT_RAW` | `x` | a | b |\n"
+                      "| `DXMT_Z` | on | `default` |\n| `DXMT_RAW` | `x` | a | b | default |\n"
     got = differences(src, statuses)
     tail = " doesn't start with one of `default`, `experiment`, `diagnostic`, `test`, `settled`"
     want = [
         "DXMT_A: the Status cell ''" + tail,
         "DXMT_N: the Status cell '`testing`'" + tail,
-        "DXMT_RAW: the Status cell 'b'" + tail,
-        "DXMT_Z: the Status cell 'default'" + tail,
+        "DXMT_RAW: the Status cell 'default'" + tail,
+        "DXMT_Z: 3 cells, the table has 5",
     ]
     assert got == want, got
     assert differences(src, "# no table\n") == ['no rows under "## Switches" in the README']
