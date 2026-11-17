@@ -1216,12 +1216,12 @@ is listed as unregistered. `--meson <build>/x64` adds the meson tests of the `gw
 `dxmt::thread`, `mutex` and `condition_variable` are `std::`'s and priorities are no-ops, so a test
 checks coordination, not Wine's scheduling.
 
-`compile_service_test.cpp` (C1) holds the compile service's legacy parity fixture: scripted job graphs
-(GW2-shaped bursts of pipelines sharing variants, parking, failures, the spurious-dependency rerun,
-growth to 2 × CPUs) run against the service and against the scheduler it replaced
-(`tests/gw2/fixtures/legacy_task_scheduler.hpp`, unchanged), with every worker's job held at a gate
-and released one at a time; the traces (which jobs run, what they return, the worker count) must be
-identical. Since #152 it also checks, for each `DXMT_COMPILE_PRIORITY` setting and both policies, that
+`compile_service_test.cpp` (C1) runs scripted job graphs (GW2-shaped bursts of pipelines sharing
+variants, parking, failures, the spurious-dependency rerun, growth to 2 × CPUs) through the compile
+service, with every worker's job held at a gate and released one at a time. No scenario may get
+stuck, every job completes exactly once, and the queue's count returns to zero. Until #198 it also
+ran them through the scheduler the service replaced and compared the traces
+([ADR 0015](adr/0015-compile-service-tests-without-the-old-scheduler.md)). Since #152 it also checks, for each `DXMT_COMPILE_PRIORITY` setting and both policies, that
 every worker, the first two and those a submit adds, applies the service's priority once, on itself,
 before its first job. Since #159 it checks `DXMT_WARM_JOBS` (`Options::speculative_jobs`) on the
 declared policy: one speculative job at a time while the runs are fast, and at 1 while they are

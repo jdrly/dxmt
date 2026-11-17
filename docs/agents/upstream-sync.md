@@ -70,7 +70,7 @@ upstream code adds a row here.
 
 | What | From (upstream) | To (my fork) | PR |
 |---|---|---|---|
-| The compile scheduler, `task_scheduler` | `src/dxmt/dxmt_tasks.hpp`, deleted in my fork | `src/dxmt/dxmt_compile_service.hpp`; upstream's file as it was is `tests/gw2/fixtures/legacy_task_scheduler.hpp` | #65 |
+| The compile scheduler, `task_scheduler` | `src/dxmt/dxmt_tasks.hpp`, deleted in my fork | `src/dxmt/dxmt_compile_service.hpp`; upstream's file as it was: `git show 02532d0:src/dxmt/dxmt_tasks.hpp` | #65, #198 |
 | The fence part of fusing two render passes | `checkEncoderRelation` in `src/dxmt/dxmt_context.cpp` | `fuseRenderPassFences` in `src/dxmt/dxmt_deptrack.hpp` | #132 |
 | The bridge's two dispatch tables | `src/winemetal/unix/winemetal_unix.c` | `src/winemetal/winemetal_calls.h` (the section above) | #67 |
 | airconv's call numbers, `enum airconv_unixcalls` | `src/winemetal/airconv_thunks.h` | the manifest's `WMTCall_SM50…` names in `src/winemetal/winemetal_call_numbers.h` | #76 |
