@@ -282,6 +282,8 @@ private:
   // any chunk; destroyed after the threads stopped (Metal 4's waits for the GPU first).
   std::unique_ptr<ChunkSubmission> submission_;
   bool metal4_ = false; // gw2 (#32): the queue's chunks go to Metal 4
+  // gw2 (#312): the constructor's fork part, defined in dxmt_gw2_queue_setup.cpp
+  void gw2AttachSubmission(WMT::Device device);
 
   obj_handle_t shared_event_listener;
   dxmt::thread event_listener_thread;
