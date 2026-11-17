@@ -15,6 +15,8 @@
 //
 // The declared cases wait for the exact set of jobs they expect at the gate, then 8 ms more, and
 // compare (#303). No check passes or fails on whether a worker reaches the gate within some time.
+// A case that has failed lets its jobs through before it waits on a demand or stops the service, so
+// a broken service fails the test instead of hanging it (#335).
 //
 // Also: the job records' states with STATS off (no timestamps), and demands classified by the job's
 // state when they begin.
@@ -290,6 +292,25 @@ static bool
 waitGated(Gate &gate, size_t n) {
   std::unique_lock<std::mutex> l(gate.m);
   return gate.cv.wait_for(l, std::chrono::seconds(10), [&] { return gate.gated.size() >= n; });
+}
+
+// Releases `id` at the gate and waits for what it returns ("timeout" after 10 s).
+static std::string
+releaseJob(Gate &gate, int id) {
+  size_t before;
+  {
+    std::lock_guard<std::mutex> l(gate.m);
+    before = gate.outcomes.size();
+    gate.released.insert(id);
+    gate.cv.notify_all();
+  }
+  auto end = Clock::now() + std::chrono::seconds(10);
+  while (Clock::now() < end) {
+    std::lock_guard<std::mutex> l(gate.m);
+    if (gate.outcomes.size() > before)
+      return gate.outcomes[before];
+  }
+  return "timeout";
 }
 
 // The lowest-numbered job at the gate (-1: none).
@@ -583,6 +604,7 @@ growth(Scenario &sc) {
 static void
 recordsAndDemands() {
   g_timing = false;
+  int failed_before = failures;
   Scenario sc;
   sc.add();
   sc.add({0});
@@ -597,18 +619,7 @@ recordsAndDemands() {
     sched.submit(v);
     auto quiet = [&](const std::set<int> &at_gate) { gatedAs(gate, at_gate); }; // the state the checks read
     auto release = [&](int id) { // and wait for what it returns
-      size_t before;
-      {
-        std::lock_guard<std::mutex> l(gate.m);
-        before = gate.outcomes.size();
-        gate.released.insert(id);
-        gate.cv.notify_all();
-      }
-      while (true) {
-        std::lock_guard<std::mutex> l(gate.m);
-        if (gate.outcomes.size() > before)
-          break;
-      }
+      CHECK(releaseJob(gate, id) != "timeout", "job %d returned nothing in 10 s after its release", id);
     };
     auto waits = [] {
       std::lock_guard<std::mutex> l(g_waits_mutex);
@@ -632,6 +643,14 @@ recordsAndDemands() {
     release(v->id); // done: the pipeline is a continuation
     quiet({1});
     release(p->id);
+    // a failed case may have lost a job, or left one at the gate, and its demand would wait forever:
+    // let every job through and complete what isn't done, as the service's stop does (#335)
+    if (failures > failed_before) {
+      gate.openAll();
+      for (auto *j : {v, p})
+        if (!j->GetIsDone())
+          j->SetIsDone(true);
+    }
     demand_v.join();
     demand_p.join();
     quiet({});
@@ -679,25 +698,6 @@ declared(unsigned workers, unsigned max) {
   o.max_workers = max;
   o.policy = compile::Policy::Declared;
   return o;
-}
-
-// Releases `id` at the gate and waits for what it returns.
-static std::string
-releaseJob(Gate &gate, int id) {
-  size_t before;
-  {
-    std::lock_guard<std::mutex> l(gate.m);
-    before = gate.outcomes.size();
-    gate.released.insert(id);
-    gate.cv.notify_all();
-  }
-  auto end = Clock::now() + std::chrono::seconds(10);
-  while (Clock::now() < end) {
-    std::lock_guard<std::mutex> l(gate.m);
-    if (gate.outcomes.size() > before)
-      return gate.outcomes[before];
-  }
-  return "timeout";
 }
 
 static std::string
@@ -1126,6 +1126,19 @@ declaredSpeculativeJobs() {
     j->gate = &gate;
   {
     compile::Service<FakeJob *> sched(speculative(3));
+    std::thread demander, demander5;
+    // once a check has failed, the case ends: every job passes the gate, so the demands return and the
+    // service's stop joins no worker held there; the rest would only wait out its time limits (#335)
+    auto ended = [&, before = failures] {
+      if (failures == before)
+        return false;
+      gate.openAll();
+      for (auto *t : {&demander, &demander5})
+        if (t->joinable())
+          t->join();
+      g_tick = 1;
+      return true;
+    };
     CHECK(currentWorkers() == 4, "N=3: a worker more than the speculative jobs (%zu)", currentWorkers());
     for (int i = 0; i < 6; i++)
       sched.submit(sc.jobs[i].get(), compile::Lane::Speculative);
@@ -1140,7 +1153,7 @@ declaredSpeculativeJobs() {
     CHECK(g == std::set<int>({1, 2, 3, 6}), "N=3: the fourth worker takes a normal job (gated %s)", str(g).c_str());
     // a demand pending (on the running normal job): a freed slot stays free
     uint64_t promoted = gw2::g_promoted_count.load();
-    std::thread demander([&] { compile::demand(n6->record, n6->ready); });
+    demander = std::thread([&] { compile::demand(n6->record, n6->ready); });
     while (gw2::g_promoted_count.load() == promoted)
       std::this_thread::yield();
     releaseJob(gate, 1);
@@ -1149,14 +1162,18 @@ declaredSpeculativeJobs() {
           str(g).c_str());
     // a demand on the last queued speculative job: it goes ahead of the one queued before it
     auto *s5 = sc.jobs[5].get();
-    std::thread demander5([&] { compile::demand(s5->record, s5->ready); });
+    demander5 = std::thread([&] { compile::demand(s5->record, s5->ready); });
     g = gatedAs(gate, {2, 3, 5, 6});
     CHECK(g == std::set<int>({2, 3, 5, 6}), "N=3: the demanded speculative job runs before job 4 (gated %s)",
           str(g).c_str());
+    if (ended())
+      return;
     releaseJob(gate, 5);
     demander5.join();
     g = gatedAs(gate, {2, 3, 6});
     CHECK(g == std::set<int>({2, 3, 6}), "N=3: still none while the first demand waits (gated %s)", str(g).c_str());
+    if (ended())
+      return;
     releaseJob(gate, 6);
     demander.join();
     g = gatedAs(gate, {2, 3, 4});
@@ -1164,6 +1181,8 @@ declaredSpeculativeJobs() {
           str(g).c_str());
     for (int i : {2, 3, 4})
       releaseJob(gate, i);
+    if (ended())
+      return;
   }
   g_tick = 1;
   bool once = std::all_of(sc.jobs.begin(), sc.jobs.end(), [](auto &j) { return j->done_count.load() == 1; });
