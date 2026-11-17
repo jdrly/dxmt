@@ -1118,10 +1118,11 @@ with Xcode 27.2, the one I build with. The toolchains are cached under their ver
 so only the first run after a version change builds LLVM (about 25 minutes per architecture).
 
 - **Build x86_64, Build i386**: the build `scripts/build-dxmt.zsh` (GW2 on Mac) makes. Release,
-  stripped, NVEXT off, Homebrew's mingw-w64 (GCC 16), meson 1.12.1, LLVM 15.0.7 built for macOS 26.0 as
-  airconv needs it. Wine's import libraries, `winebuild`, `winemac.so` and `ntdll.so` come from 3Shain's
-  Wine 8.16, as in upstream's CI. My CrossOver engine isn't downloadable. The job checks that
-  `winemetal.so` still loads both through `@rpath`, so it finds the engine's copies. A compiler warning
+  stripped, NVEXT off, Homebrew's mingw-w64 (GCC 16.2, which the job checks: `MINGW_GCC_VERSION`),
+  meson 1.12.1, LLVM 15.0.7 built for macOS 26.0 as airconv needs it. Wine's import libraries,
+  `winebuild`, `winemac.so` and `ntdll.so` come from 3Shain's Wine 8.16, as in upstream's CI. My
+  CrossOver engine isn't downloadable. The job checks that `winemetal.so` still loads both through
+  `@rpath`, so it finds the engine's copies. A compiler warning
   fails the job unless `.github/gw2/warnings-<arch>.txt` lists it. The list keys a warning on its file
   and message without the line, so moved code keeps its warnings, and a second warning of the same kind
   in the same file gets through. The job prints the build's whole list. When a change removes a warning,
@@ -1235,6 +1236,53 @@ so only the first run after a version change builds LLVM (about 25 minutes per a
   publishes nothing. Native tests may be skipped on a push, and only when a
   green pull request run tested the same tree. GW2 on Mac's dev build (jdrly/gw2-on-mac) takes its DXMT from this asset. Builds
   from before #215 stay in the pre-release `mach9-builds`, which this workflow no longer touches.
+
+### Moving to a new Mach9
+
+The arm64 build is held to the engine it goes into, so a new Mach9 release moves these values
+together, in this fork and outside it. Line numbers drift, so search for the names. My Wine fork
+keeps the same list for its side: [`.github/gw2/MOVING.md`](https://github.com/jdrly/wine/blob/gw2-on-mac/.github/gw2/MOVING.md)
+on its `gw2-on-mac`. Its step 1 finds the Wine commit the new engine was built from, which two
+items here need.
+
+- `MACH9_VERSION` and `MACH9_SHA256` in `.github/workflows/gw2.yml`: the new tag, and the sha256 of
+  its `wine-<tag>-macos-arm64.tar.xz`, computed from the download.
+- `LLVM_MINGW_VERSION` and `LLVM_MINGW_SHA256` in the same `env:` block: Mach9's `pins/redist.env`
+  at the new tag, and the sha256 of llvm-mingw's `ucrt-macos-universal` tarball of that version.
+- `WINE_ARM64EC_VERSION` and `WINE_ARM64EC_SHA256`, only if winebuild's `--builtin` marker changed
+  in the new engine's Wine. The job takes nothing else from it.
+- `pair_ceiling` in `.github/gw2/check-mach9.zsh`, the exclusive-pair ceilings, and the comment
+  above it, which names both versions. They move when llvm-mingw's static libraries or Mach9's
+  winecrt0 do. I take the new counts from the first run's printed numbers and say in the pull
+  request why they moved.
+- The link-order comment at the top of `src/winemetal/meson.build`. It names Wine 11.21, whose
+  winebuild generates the CHPE metadata that decided the order. If the new Wine's winebuild or
+  winecrt0 changed there, the link may fail on a symbol defined twice again.
+- `-march=armv8.4-a` in `build-arm64ec.txt`, and whether the new llvm-mingw's clang takes
+  `-mcpu=apple-m1` without the SEH unwind error.
+- The `macdrv_functions` table and the window data that `winemetal_unix.c` declares. The check sees
+  only the name, so I read the new Wine commit's `dlls/winemac.drv/window.c` by hand and move the
+  commit named in "Build arm64" above (athei/wine `53def892`).
+- The broken-copy step's old build (`UNFLAGGED`, the published 2483559 build in `mach9-builds`).
+  It stays valid as long as that release exists. The step requires exactly nine failures, so if the
+  new engine's exports make the old `dxgi.dll` fail another check too, the count moves.
+- The text of "Build arm64" above: Mach9 0.3.1, llvm-mingw 20261104 (twice), the four ceilings and
+  the Wine commit.
+- Outside this fork, in the same evening: the same Mach9 and llvm-mingw pins in my Wine fork's and
+  my FEX fork's workflows (both in that list), and the engine pin in my app on its `arm64` branch:
+  the `ENGINE_*` block and `MACOS_MIN` in `src/gw2om.sh`, the `engine:` lines of
+  `.github/workflows/checks.yml`, the engine in `scripts/test-sandbox.sh`, and `README.md`. The app
+  moves in one dev build with all three forks' archives.
+
+Two things need no edit. The footprint step reads `origin/main`, upstream's mirror, so Mach9 doesn't
+touch it. ccache's key holds the llvm-mingw pin and each cross compiler's resolved path and version
+line, read on the runner: a new llvm-mingw pin starts new caches for all three builds, and a new
+Homebrew GCC for the two GCC builds, by themselves. The Mach9 version isn't in the key.
+
+The macOS floors differ: 26.0 here, one value for all three builds, where `check-mach9.zsh` only
+requires `winemetal.so` to need no newer macOS than the engine's own, and 26.4 in my Wine fork,
+which is Mach9's `MACOS_FLOOR` because its files replace the engine's. A move is the time to decide
+whether the arm64 build should take the engine's floor too.
 
 ## Native tests
 

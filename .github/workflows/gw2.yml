@@ -56,6 +56,9 @@ env:
   MACOSX_DEPLOYMENT_TARGET: "26.0"
   MESON_VERSION: 1.12.1
   NINJA_VERSION: 1.13.0
+  # Homebrew's mingw-w64 can't be pinned. The x86_64 and i386 builds (0.1.x) stop when its GCC
+  # isn't this one, so a new GCC arrives in a pull request of its own, with new warnings lists.
+  MINGW_GCC_VERSION: "16.2"
   LLVM_VERSION: 15.0.7
   LLVM_SHA256: 8b5fcb24b4128cf04df1b0b9410ce8b1a729cb3c544e6da885d234280dedeac6
   # Raise it when toolchain.zsh builds LLVM differently, so the cache doesn't keep the old build
@@ -170,6 +173,14 @@ jobs:
             echo "meson $(meson --version), ninja $(ninja --version)"
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: The mingw GCC is the one the warnings lists are for
+        run: |
+          v=$(x86_64-w64-mingw32-gcc -dumpfullversion)
+          if [[ $v != "$MINGW_GCC_VERSION".* ]]; then
+            echo "::error::Homebrew's mingw-w64 has GCC $v, and this workflow expects $MINGW_GCC_VERSION.x. Move MINGW_GCC_VERSION and .github/gw2/warnings-x86_64.txt and warnings-i386.txt in a pull request of their own."
+            exit 1
+          fi
+          echo "mingw GCC $v"
 
       # ccache (#305). A pull request reads the newest cache of its toolchain. A push never reads
       # one, so what Publish uploads is compiled in its own run: the day's first push compiles
