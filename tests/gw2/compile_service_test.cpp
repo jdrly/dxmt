@@ -4,24 +4,20 @@
 // gw2 (C1, architecture council §1): native test of the compile service (src/dxmt/dxmt_compile_service.hpp)
 // with fake jobs and std:: threads (shim/thread.hpp). No Metal, no Wine.
 //
-// The legacy parity fixture runs scripted job graphs against the service and against the scheduler it
-// replaces (tests/gw2/fixtures/legacy_task_scheduler.hpp, 02532d0's dxmt_tasks.hpp unchanged) and
-// requires the same trace from both. A gate holds every job a worker runs. At each step the test waits
-// until the system is quiescent (every worker gated or idle) and records:
-// - the set of gated jobs (which jobs the queues hand out, continuations first);
-// - the worker count (the growth trigger);
-// - then it releases the lowest-numbered gated job and records what it returned (done, failed, or
-//   parked on a dependency, including the spurious-dependency rerun).
-// Wakeups show as the released jobs in the following steps' gated sets. The scenarios include
-// GW2-shaped bursts: pipelines that share shader variants, arriving faster than the workers.
+// Scripted job graphs run through the service. A gate holds every job a worker runs. At each step the
+// test waits until the system is quiescent (every worker gated or idle), then releases the
+// lowest-numbered gated job and records what it returned (done, failed, or parked on a dependency,
+// including the spurious-dependency rerun). No scenario may get stuck, every job must complete exactly
+// once, and the compile queue's +1/-1 count must return to zero. The scenarios include GW2-shaped
+// bursts: pipelines that share shader variants, arriving faster than the workers. Until #198 the same
+// graphs also ran through upstream's old scheduler and the traces had to match.
 //
-// Also: exactly one completion per job, the compile queue's +1/-1 balance, the job records' states
-// with STATS off (no timestamps), and demands classified by the job's state when they begin.
+// Also: the job records' states with STATS off (no timestamps), and demands classified by the job's
+// state when they begin.
 //
 // Run: tests/gw2/run.zsh pure, or the command above with $OUT set.
 
 #include "dxmt_compile_service.hpp"
-#include "fixtures/legacy_task_scheduler.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -219,14 +215,8 @@ FakeJob::run() {
   return this;
 }
 
-// the legacy scheduler's trait and the service's
+// the service's trait
 namespace dxmt {
-template <> struct task_trait<FakeJob *> {
-  FakeJob *run_task(FakeJob *job) { return job->run(); }
-  bool get_done(FakeJob *job) { return job->GetIsDone(); }
-  void set_done(FakeJob *job) { job->SetIsDone(true); }
-  void on_submit(FakeJob *) {}
-};
 template <> struct compile::JobTraits<FakeJob *> {
   FakeJob *run(FakeJob *job) { return job->run(); }
   bool done(FakeJob *job) { return job->GetIsDone(); }
@@ -314,7 +304,6 @@ runScenario(const ScenarioFn &build) {
     for (int step = 0; step < 10000; step++) {
       // one submit at a time, each settled: the growth trigger reads the running count, which a
       // worker raises after it pops, so submits racing the pops would make growth timing-dependent
-      // (in both schedulers alike)
       if (auto it = sc.submit_at.find(step); it != sc.submit_at.end())
         for (int id : it->second) {
           sched.submit(sc.jobs[id].get());
@@ -383,31 +372,16 @@ runScenario(const ScenarioFn &build) {
   return t;
 }
 
+// One scripted job graph through the service. Until #198 it also ran through the scheduler the
+// service replaced and compared the two traces; that guarded the refactor, which shipped.
+// What stays doesn't depend on how fast a worker reaches the gate.
 static void
-parity(const std::string &name, const ScenarioFn &build) {
-  auto legacy = runScenario<task_scheduler<FakeJob *>>(build);
+scenario(const std::string &name, const ScenarioFn &build) {
   auto service = runScenario<compile::Service<FakeJob *>>(build);
-  CHECK(!legacy.stuck, "%s: the legacy run got stuck", name.c_str());
-  CHECK(!service.stuck, "%s: the service run got stuck", name.c_str());
-  CHECK(legacy.exactly_once && service.exactly_once, "%s: every job completes exactly once", name.c_str());
-  CHECK(legacy.queue_balance == 0 && service.queue_balance == 0, "%s: queue balance %lld/%lld", name.c_str(),
-        (long long)legacy.queue_balance, (long long)service.queue_balance);
-  CHECK(legacy.threads == service.threads, "%s: worker growth differs (%zu vs %zu changes)", name.c_str(),
-        legacy.threads.size(), service.threads.size());
-  bool same = legacy.steps == service.steps;
-  CHECK(same, "%s: traces differ", name.c_str());
-  if (!same) {
-    size_t n = std::max(legacy.steps.size(), service.steps.size());
-    for (size_t i = 0; i < n; i++) {
-      auto a = i < legacy.steps.size() ? legacy.steps[i] : "-";
-      auto b = i < service.steps.size() ? service.steps[i] : "-";
-      if (a != b) {
-        std::printf("  step %zu\n    legacy:  %s\n    service: %s\n", i, a.c_str(), b.c_str());
-        break;
-      }
-    }
-  }
-  std::printf("%s %s: %zu steps, workers %llu\n", same && !legacy.stuck ? "ok  " : "FAIL", name.c_str(),
+  CHECK(!service.stuck, "%s: the run got stuck", name.c_str());
+  CHECK(service.exactly_once, "%s: every job completes exactly once", name.c_str());
+  CHECK(service.queue_balance == 0, "%s: queue balance %lld", name.c_str(), (long long)service.queue_balance);
+  std::printf("%s %s: %zu steps, workers %llu\n", !service.stuck ? "ok  " : "FAIL", name.c_str(),
               service.steps.size(), (unsigned long long)(service.threads.empty() ? 0 : service.threads.back()));
 }
 
@@ -1062,7 +1036,7 @@ waitGated(Gate &gate, size_t n) {
 
 // gw2 (#159): Options::speculative_jobs (DXMT_WARM_JOBS). Slowness comes from the fake clock, whose
 // tick (g_tick) each case sets, so no real time decides admission. FakeJob is the base's: the
-// parity cases run exactly the job they always ran.
+// scenarios run exactly the job they always ran.
 static void
 declaredSpeculativeJobs() {
   constexpr int64_t kSlow = 5 * compile::kSpeculativeSlowNs;
@@ -1213,18 +1187,18 @@ workerPriority() {
 
 int
 main() {
-  parity("chain", chain);
-  parity("shared variants", sharedVariants);
-  parity("continuations first", continuationsFirst);
-  parity("parked before FIFO", parkedBeforeFifo);
-  parity("failures", failures_);
-  parity("spurious dependency", spurious);
-  parity("late submits", lateSubmits);
-  parity("GW2 burst", burst);
-  parity("wide", wide);
-  parity("growth to the limit", growth);
+  scenario("chain", chain);
+  scenario("shared variants", sharedVariants);
+  scenario("continuations first", continuationsFirst);
+  scenario("parked before FIFO", parkedBeforeFifo);
+  scenario("failures", failures_);
+  scenario("spurious dependency", spurious);
+  scenario("late submits", lateSubmits);
+  scenario("GW2 burst", burst);
+  scenario("wide", wide);
+  scenario("growth to the limit", growth);
   g_timing = true;
-  parity("GW2 burst, STATS on", burst);
+  scenario("GW2 burst, STATS on", burst);
   g_timing = false;
   recordsAndDemands();
   declaredNoPark();
