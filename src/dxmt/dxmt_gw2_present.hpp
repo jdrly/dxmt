@@ -17,6 +17,13 @@ namespace dxmt::gw2 {
 // records that have finished since the last call.
 void presentTrack(uint64_t drawable, uint64_t frame);
 
+// gw2 (#324): encode thread, when the layer gave no drawable (nextDrawable returned nil: its timeout,
+// or a zero drawable size). Counts it for PRESENT's nodrawable and warns once per process. True when
+// DXMT_PRESENT_SKIP_NIL=1 says the present is skipped.
+bool presentNoDrawable();
+// gw2 (#324): DXMT_PRESENT_SKIP_NIL, =1 only, read once per process
+bool presentSkipNil();
+
 // Finish thread: a command buffer of `frame` ended on the GPU at gpu_end_ns (GPUEndTime, ns).
 void presentGpuEnd(uint64_t frame, uint64_t gpu_end_ns);
 
