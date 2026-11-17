@@ -28,7 +28,8 @@ bool metalfxSpatialSwapchain();
 bool mtl4TimestampReuse();
 
 // gw2 (#227): DXMT_MTL4_PRESENT=mtl3 (exactly), read once per process: a queue on Metal 4 presents
-// through a Metal 3 command buffer (gw2::Mtl4Queue::enableMetal3Present). A test switch for #223, off.
+// through a Metal 3 command buffer (gw2::Mtl4Queue::enableMetal3Present). Off in my fork and on 0.1.x;
+// the app sets it for 0.2's arm64 engine (#223, ADR 0008).
 bool mtl4PresentMetal3();
 
 // gw2 (#271): DXMT_MTL4_SHOWN_WAIT=write with DXMT_MTL4_PRESENT=mtl3, read once per process: the

@@ -995,8 +995,9 @@ branches off), on Metal 4 into a `gw2::Mtl4Encoding` with the same encoder and e
   pacing and the background throttle are unchanged (they live in the swapchain and on the
   drawable).
 - With it the path is complete: `DXMT_METAL4=1` takes it on a device that has Metal 4.
-- `DXMT_MTL4_PRESENT=mtl3` (#227, a test switch for #223) replaces this sequence with Metal 3's on the
-  same device: see the switch table.
+- This sequence is `DXMT_MTL4_PRESENT=mtl4`, my fork's default and what 0.1.x runs. The GW2 on Mac
+  app sets `mtl3` (#227) for the arm64 engine, where a moving pointer made this order lose a refresh
+  (#223, ADR 0008): it replaces the sequence with Metal 3's on the same device. See the switch table.
 
 `tests/gw2/mtl4_bridge_test.m` also checks that an `MTLFence` orders two separately committed
 command buffers (the present split and queue-level events depend on it) and runs the present
