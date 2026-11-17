@@ -1131,7 +1131,7 @@ so only the first run after a version change builds LLVM (about 25 minutes per a
   x86_64 also runs the meson `gw2` suite, `bridge-native-smoke` included, on the runner's Metal 3
   device. `.github/gw2/unix-call.py` preprocesses `winemetal_thunks.c` with the build's own command
   and requires `NSObject_retain`'s call to go through `__wine_unix_call_dispatcher` (#205).
-- **Build arm64** (#182, #215): the build for GW2 on Mac 0.2's engine, Mach9 0.3.1, made the way
+- **Build arm64** (#182, #215): the build for GW2 on Mac 0.2's engine, Mach9 0.4.0, made the way
   Mach9's `bin/build-dxmt.sh` makes its own DXMT. One meson tree with `build-arm64ec.txt` builds the
   ARM64X DLLs and the arm64 `winemetal.so`, a second with `build-win32.txt` the i386 DLLs, both with
   llvm-mingw 20261104 (Mach9's pin). `build-arm64ec.txt` compiles for `-march=armv8.4-a` (#200). An M1
@@ -1175,7 +1175,7 @@ so only the first run after a version change builds LLVM (about 25 minutes per a
   the image's CHPE code map puts it in an ARM64EC range (a native function of the same name would sit
   in an ARM64 one), and the routine ends in winecrt0's `br x16`. The
   i386 tree keeps `__wine_unix_call_dispatcher`. The engine's table has the 10 entries in the order `winemetal_unix.c` declares,
-  and its window data the same first four fields (athei/wine `53def892`,
+  and its window data the same first four fields (athei/wine `501796b0ed`,
   `dlls/winemac.drv/window.c`, which asserts both). No warnings list for this job yet: llvm-mingw's clang
   warns differently from GCC.
 - **Native tests**: `zsh -n` on the zsh scripts and a self-check of `.github/gw2/warnings.zsh`, then
@@ -1267,11 +1267,11 @@ items here need.
   `-mcpu=apple-m1` without the SEH unwind error.
 - The `macdrv_functions` table and the window data that `winemetal_unix.c` declares. The check sees
   only the name, so I read the new Wine commit's `dlls/winemac.drv/window.c` by hand and move the
-  commit named in "Build arm64" above (athei/wine `53def892`).
+  commit named in "Build arm64" above (athei/wine `501796b0ed`).
 - The broken-copy step's old build (`UNFLAGGED`, the published 2483559 build in `mach9-builds`).
   It stays valid as long as that release exists. The step requires exactly nine failures, so if the
   new engine's exports make the old `dxgi.dll` fail another check too, the count moves.
-- The text of "Build arm64" above: Mach9 0.3.1, llvm-mingw 20261104 (twice), the four ceilings and
+- The text of "Build arm64" above: Mach9 0.4.0, llvm-mingw 20261104 (twice), the four ceilings and
   the Wine commit.
 - Outside this fork, in the same evening: the same Mach9 and llvm-mingw pins in my Wine fork's and
   my FEX fork's workflows (both in that list), and the engine pin in my app on its `arm64` branch:

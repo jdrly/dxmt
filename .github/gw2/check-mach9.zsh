@@ -38,7 +38,7 @@ integer failed=0
 # swp...), never a load-exclusive/store-exclusive loop. The loops left come from the static libraries
 # built for ARMv8.0, which I don't rebuild: libc++ and libc++abi (locale, exceptions, future, atomic
 # wait), the mingw-w64 CRT (_CRT_INIT, gdtoa) and Mach9's winecrt0 (unix_call_init). Their count per
-# DLL, ARM64 and ARM64EC code together, with llvm-mingw 20261104 and Mach9 v0.3.1, is the ceiling.
+# DLL, ARM64 and ARM64EC code together, with llvm-mingw 20261104 and Mach9 v0.4.0, is the ceiling.
 # The build without the flag had 6,308 in d3d11.dll and 1,914 in dxgi.dll; d3d10core.dll and
 # winemetal.dll have none of their own, so theirs don't move.
 typeset -A pair_ceiling=(d3d11 1842 dxgi 1822 d3d10core 1774 winemetal 30)
