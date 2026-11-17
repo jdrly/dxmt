@@ -72,9 +72,10 @@ public:
   // (DXMT_UNRETAINED=1), or the lifetime check that assumes they aren't retained, need every
   // committed chunk retired first. The immediate context goes first (in the members' own order), so
   // nothing commits another chunk after the wait.
+  // gw2 (#316): also with DXMT_UNRETAINED=0, where the command buffers retain what they use:
+  // the encode thread may still be in GetPipeline, waiting on a compile job, and the pipeline
+  // cache's stop would wake it into a compile service and a pipeline that are about to go.
   ~MTLD3D11DeviceImpl() {
-    if (!gw2::lifetime::keepUntilRetired())
-      return;
     d3d10_.reset();
     context_.reset();
     device_.queue().WaitCommittedRetired();
