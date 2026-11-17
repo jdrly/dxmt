@@ -176,6 +176,17 @@ public:
     return slot.splits;
   }
 
+  // gw2 (#316): teardown, after the finish thread stopped and before drain(): every split-off command
+  // buffer still held in a ring slot (of chunks committed and not retired), ring slot by ring slot,
+  // each slot's in commit order. Not the refused ones, which a logged error kept aside (gw2 #113).
+  template <class F>
+  void
+  forEachHeldSplit(F &&f) {
+    for (auto &slot : slots_)
+      for (auto &cmdbuf : slot.splits)
+        f(cmdbuf);
+  }
+
   // Finish thread: `chunk` (the token of the submission's wait for it) completed and every completion
   // consumer is done. Releases its holds: split command buffers, objects, presenters, spatial scalers,
   // temporal scalers. False: refused (gw2 #91: an empty token or another issuer's; not the next

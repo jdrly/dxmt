@@ -40,6 +40,10 @@ sw::Switch<bool> kRetireRecovery{"DXMT_RETIRE_RECOVERY", true, sw::legacy::notZe
 // Read here at each queue's creation.
 sw::Switch<bool> kReleasePool{"DXMT_RELEASE_POOL", true, sw::legacy::notZero};
 
+// gw2 (#316): DXMT_DRAIN_SPLITS, =1 only: Metal 3's teardown drain also waits for the split-off
+// command buffers the ledger still holds. Read at each queue's creation.
+sw::Switch<bool> kDrainSplits{"DXMT_DRAIN_SPLITS", false, sw::legacy::exactlyOne};
+
 uint32_t
 ChunkCountFromEnv() {
   auto v = kChunks.requested();
@@ -231,6 +235,13 @@ CommandQueue::gw2AttachSubmission(WMT::Device device) {
             .before_commit = gw2::residencyBeforeCommit,
             .split_buffers = [this](uint64_t seq) { return ledger_.splits(seq); }, // gw2 (#66)
             .wait_at_drain = [] { return gw2::residencyActive() || gw2::lifetime::keepUntilRetired(); },
+            // gw2 (#316)
+            .held_splits = [this, on = kDrainSplits()] {
+              std::vector<WMT::CommandBuffer> out;
+              if (on)
+                ledger_.forEachHeldSplit([&](auto &cmdbuf) { out.push_back(WMT::CommandBuffer(cmdbuf)); });
+              return out;
+            },
         }
     );
   // gw2 (#69): which holds the chunks need, now that the queue is on Metal 3 or Metal 4 (before its

@@ -21,6 +21,8 @@
 //   tokens the tests pass; testTokens checks that an unbound ledger, another issuer's token (two
 //   queues, the same sequence), an empty (moved-from) token and another issuer's or an empty drained
 //   token are refused and release nothing.
+// - Held splits (#316): forEachHeldSplit lists the unretired chunks' split buffers for teardown's
+//   drain, and none once their chunk retired or the ledger drained.
 //
 // Run: tests/gw2/run.zsh pure, or the command above with $OUT set.
 
@@ -235,6 +237,31 @@ testOrder() {
     CHECK(got[2] == "o1" && got[3] == "o2" && got[4] == "o3");
     CHECK(got[5] == "p" && got[6] == "sp" && got[7] == "t");
   }
+}
+
+// gw2 (#316): teardown's list of the split buffers still held (DXMT_DRAIN_SPLITS), which visits
+// without releasing: the unretired chunks', and none once their chunk retired or the ledger drained
+static void
+testHeldSplits() {
+  Ledger l(32, kAll);
+  auto held = [&] {
+    std::vector<std::string> names;
+    l.forEachHeldSplit([&](CmdBuf &cmdbuf) { names.push_back(cmdbuf.name); });
+    return names;
+  };
+  CHECK(held().empty());
+  CHECK(l.holdSplit(1, CmdBuf("s1a")));
+  CHECK(l.holdSplit(1, CmdBuf("s1b")));
+  CHECK(l.holdSplit(2, CmdBuf("s2")));
+  CHECK(held() == (std::vector<std::string>{"s1a", "s1b", "s2"}));
+  CHECK_RELEASED({});
+  CHECK(l.retire(1));
+  auto got = take(); // both, either order (as testOrder: clear()'s order is the library's)
+  CHECK(got == (std::vector<std::string>{"s1a", "s1b"}) || got == (std::vector<std::string>{"s1b", "s1a"}));
+  CHECK(held() == (std::vector<std::string>{"s2"}));
+  l.drainAll();
+  CHECK_RELEASED({"s2"});
+  CHECK(held().empty());
 }
 
 static void
@@ -846,6 +873,7 @@ int
 main() {
   testNothingBeforeRetire();
   testOrder();
+  testHeldSplits();
   testNullHolds();
   for (uint32_t n : {32u, 64u, 128u})
     testRingWrap(n);
