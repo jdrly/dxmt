@@ -41,6 +41,11 @@
 // - copy, `next`: none skips (0.1.3). Frames that fit in a refresh skip nothing either way.
 // - `write` gives a frame one more refresh, no more: a 35 ms frame still skips.
 //
+// Part 3, gw2 (#316): ShownRepair, the CPU's signal for a failed Metal 3 present (Mtl4Queue::waitMetal3),
+// against a scripted event that can play the GPU's signal of a later present between the CPU's read
+// and its set. No failure makes no call on the event; a failure raises `shown`; a race that lowers it
+// is repaired by the next present, which ends with `shown` at the highest value.
+//
 // Run: tests/gw2/run.zsh pure, or the command above with $OUT set.
 
 #include "dxmt_gw2_shown_wait.hpp"
@@ -49,9 +54,12 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <functional>
 #include <initializer_list>
+#include <utility>
 #include <vector>
 
+using dxmt::gw2::ShownRepair;
 using dxmt::gw2::ShownWait;
 
 static int failures = 0;
@@ -389,10 +397,80 @@ queueArithmetic() {
               fit_next.aftergpu, copy_next.aftergpu);
 }
 
+// gw2 (#316): `shown` as Mtl4Queue sees it through the bridge. after_read, if set, runs once right after
+// a signaledValue() read: the GPU signalling a later present before the CPU's set.
+struct ScriptedEvent {
+  uint64_t value = 0;
+  int calls = 0;
+  std::function<void()> after_read;
+
+  uint64_t
+  signaledValue() {
+    calls++;
+    uint64_t v = value;
+    if (after_read)
+      std::exchange(after_read, nullptr)();
+    return v;
+  }
+  void
+  signalValue(uint64_t v) {
+    calls++;
+    value = v;
+  }
+};
+
+static void
+shownRepair() {
+  {
+    // no failure ever: no call on the event
+    ShownRepair repair;
+    ScriptedEvent event;
+    for (uint64_t n = 1; n <= 100; n++)
+      CHECK(!repair.completed(event, n, false));
+    CHECK(event.calls == 0);
+  }
+  {
+    // a failure with no race: the CPU signals in the present's place
+    ShownRepair repair;
+    ScriptedEvent event;
+    event.value = 3;
+    CHECK(repair.completed(event, 5, true));
+    CHECK(event.value == 5);
+  }
+  {
+    // a failure after the GPU had already signalled further: nothing set, and nothing to repair later
+    ShownRepair repair;
+    ScriptedEvent event;
+    event.value = 7;
+    CHECK(!repair.completed(event, 5, true));
+    CHECK(event.value == 7);
+    int calls = event.calls;
+    CHECK(!repair.completed(event, 8, false));
+    CHECK(event.calls == calls);
+  }
+  {
+    // the race: present 9's GPU signal lands between the read and the set, which lowers `shown` to 5;
+    // present 9 completes next and raises it back
+    ShownRepair repair;
+    ScriptedEvent event;
+    event.value = 3;
+    event.after_read = [&] { event.value = 9; };
+    CHECK(repair.completed(event, 5, true));
+    CHECK(event.value == 5);
+    CHECK(repair.completed(event, 9, false));
+    CHECK(event.value == 9);
+    // present 10 signalled on the GPU: nothing to raise
+    event.value = 10;
+    CHECK(!repair.completed(event, 10, false));
+    CHECK(event.value == 10);
+  }
+}
+
 int
 main() {
   placement();
   queueArithmetic();
+  shownRepair();
   if (failures) {
     std::printf("shown_wait_test: %d failure(s)\n", failures);
     return 1;
