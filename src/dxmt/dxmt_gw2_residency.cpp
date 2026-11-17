@@ -57,7 +57,8 @@ residencySection(double, uint32_t) {
 
 SectionRegistrar s_residency("RESIDENCY", &residencySection);
 
-sw::Switch<bool> kMtl4DeviceResidency{"DXMT_MTL4_DEVICE_RESIDENCY", false, sw::legacy::exactlyOne}; // gw2 (#153)
+// gw2 (#153): on unless exactly "0" (the default since #301)
+sw::Switch<bool> kMtl4DeviceResidency{"DXMT_MTL4_DEVICE_RESIDENCY", true, sw::legacy::notZero};
 
 } // namespace
 
@@ -139,7 +140,7 @@ residencyAttachMtl4Queue(WMT::Device device, WMT::MTL4CommandQueue queue) {
             "and argument buffers enter it, and what it holds stays out of each chunk's set "
             "(DXMT_MTL4_DEVICE_RESIDENCY=1)"
           : "Residency: the residency set is attached to this device's Metal 4 queue too (DXMT_METAL4); every "
-            "allocation a packet names also goes into its chunk's set"
+            "allocation a packet names also goes into its chunk's set (DXMT_MTL4_DEVICE_RESIDENCY=0)"
   );
   return true;
 }

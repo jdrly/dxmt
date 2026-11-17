@@ -3,23 +3,23 @@
 // gw2 (#32): Metal 4 submission for a DXMT command queue (DXMT_METAL4=1, jdrly/dxmt #32 part 2).
 //
 // - One MTL4CommandQueue, with the device's residency set attached (Metal 4 has no useResource).
-// - One MTL4CommandAllocator per chunk slot (the ring's size, DXMT_CHUNKS): a chunk's command buffers
-//   take their memory from their slot's allocator, which the finish thread resets when it retires
-//   the chunk, after the GPU completed every buffer of it. gw2 (#204), with
-//   DXMT_MTL4_ALLOCATOR_POOL=1: a slot has no allocator of its own; the chunk takes one from the
-//   queue's pool at its first begin() and gives it back in retire(), after the reset. The pool makes
-//   an allocator only when it has none idle and keeps at most kIdleAllocators idle (one more is
-//   released).
+// - Command allocators from a pool (gw2 #204, the default): a chunk takes one from the queue's pool
+//   at its first begin(), its command buffers take their memory from it, and the finish thread resets
+//   it when it retires the chunk, after the GPU completed every buffer of it; retire() gives it back.
+//   The pool makes an allocator only when it has none idle and keeps at most kIdleAllocators idle
+//   (one more is released). With DXMT_MTL4_ALLOCATOR_POOL=0 (Mtl4Queue's allocator_pool false), one
+//   MTL4CommandAllocator per chunk slot (the ring's size, DXMT_CHUNKS), made with the queue and reset
+//   the same way.
 // - A chunk commits one command buffer, or several (the present split commits the frame before
 //   nextDrawable and the present pass gets its own, and queue-level events commit as well). Each commit carries its own
 //   MTL4CommitOptions feedback (GPU start and end, error), written into an Mtl4Commit record, and
 //   raises the queue's shared event to the commit's value once written. The finish thread waits on
 //   that event instead of waitUntilCompleted.
 // - Each slot also has a residency set of its own (part 3): the replays put every allocation the
-//   chunk's packets name directly into it (Metal 4 makes nothing resident by itself); each commit
-//   commits it and the command buffer uses it; retire() empties it. gw2 (#153), with
-//   DXMT_MTL4_DEVICE_RESIDENCY=1: what the device's set holds stays out of it, and it is committed,
-//   used and emptied only while it has allocations.
+//   chunk's packets name directly into it (Metal 4 makes nothing resident by itself), except what the
+//   device's set holds (gw2 #153), and it is committed, used and emptied only while it has
+//   allocations. With DXMT_MTL4_DEVICE_RESIDENCY=0 it gets every allocation, each commit commits it,
+//   the command buffer uses it and retire() empties it.
 // - Command buffers and records are recycled (an MTL4CommandBuffer is reusable after completion).
 // - gw2 (#227), DXMT_MTL4_PRESENT=mtl3: the present goes through a Metal 3 command buffer of the
 //   command queue's MTLCommandQueue (Mtl4Encoding::beginMetal3Present). Two shared events order the
