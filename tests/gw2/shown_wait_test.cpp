@@ -9,12 +9,12 @@
 //   access with ResourceAccess::Write (gw2NoteShownWrite, in both ArgumentEncodingContext::access
 //   overloads for textures) flags its encoder when written() says so. A merge passes the flag on.
 // - flush: before a flagged encoder that isn't Null, waitBefore(); after a Metal 3 present, the wait
-//   right away when the switch is off or presented() said so, else flushed(value, false); a present
+//   right away with `next` or when presented() said so, else flushed(value, false); a present
 //   without a Metal 3 command buffer calls waitBefore() too.
 //
 // Part 1, where the wait goes:
-// - `next` (the default, the switch off): right after every present, before any of the next frame.
-// - `write`: a frame that writes only offscreen textures doesn't wait; each kind of write to the
+// - `next`: right after every present, before any of the next frame.
+// - `write` (the default since #332): a frame that writes only offscreen textures doesn't wait; each kind of write to the
 //   presented texture waits right before its encoder, once. The kinds are the encoders whose
 //   destination goes through ArgumentEncodingContext::access with ResourceAccess::Write: a render
 //   target (render pass attachments), a clear (clearColor, clearDepthStencil, the UAV clears), a blit
@@ -174,7 +174,7 @@ twoFrames(Context &ctx) {
 
 static void
 placement() {
-  // the switch off: the wait right after the present, before the next frame's first encoder
+  // `next`: the wait right after the present, before the next frame's first encoder
   {
     Context ctx(false);
     ctx.encoder({OFF});

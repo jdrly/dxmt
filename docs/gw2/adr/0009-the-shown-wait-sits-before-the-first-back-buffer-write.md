@@ -1,7 +1,7 @@
 # With the Metal 3 present, the next frame waits for `shown` only before it writes the back buffer
 
-Decided 2026-11-16. Status: accepted. Off by default in the fork (`DXMT_MTL4_SHOWN_WAIT=write`), on
-in dev builds.
+Decided 2026-11-16. Status: accepted. `DXMT_MTL4_SHOWN_WAIT=write` was off by default in the fork and
+on in dev builds; since 2026-11-17 it is the default (ADR 0017, #332).
 
 With `DXMT_MTL4_PRESENT=mtl3` (ADR 0008) the Metal 4 queue waited for the `shown` event right after
 each present, before any of the next frame's work. `shown` comes after the Metal 3 present pass, and

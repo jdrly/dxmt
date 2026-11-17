@@ -31,16 +31,11 @@ bool mtl4TimestampReuse();
 // through a Metal 3 command buffer (gw2::Mtl4Queue::enableMetal3Present). A test switch for #223, off.
 bool mtl4PresentMetal3();
 
-// gw2 (#271): DXMT_MTL4_SHOWN_WAIT=write (exactly) with DXMT_MTL4_PRESENT=mtl3, read once per process:
-// the Metal 4 queue waits for a Metal 3 present's `shown` only before the next encoder that writes the
-// presented texture, not right after the present (dxmt_gw2_shown_wait.hpp). Off by default.
+// gw2 (#271): DXMT_MTL4_SHOWN_WAIT=write with DXMT_MTL4_PRESENT=mtl3, read once per process: the
+// Metal 4 queue waits for a Metal 3 present's `shown` only before the next encoder that writes the
+// presented texture, not right after the present (dxmt_gw2_shown_wait.hpp). The default since #332
+// (ADR 0017); `next` (exactly) puts the wait right after the present again.
 bool mtl4ShownWaitWrite();
-
-// The grammar: exactly `write`; anything else, unset included, is the fallback, `next`
-inline std::string
-mtl4ShownWaitGrammar(const std::string &raw, const std::string &fallback) {
-  return raw == "write" ? raw : fallback;
-}
 
 // gw2 (#204): DXMT_MTL4_ALLOCATOR_POOL (on unless exactly "0"), read on each call: the command queue
 // reads it once, for its Metal 4 queue (gw2::Mtl4Queue's allocator_pool).

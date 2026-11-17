@@ -1,10 +1,11 @@
 #pragma once
 
-// gw2 (#271): DXMT_MTL4_SHOWN_WAIT=write, with DXMT_MTL4_PRESENT=mtl3 (#227).
+// gw2 (#271): DXMT_MTL4_SHOWN_WAIT=write, with DXMT_MTL4_PRESENT=mtl3 (#227). The default since #332
+// (ADR 0017); `next` is the placement before it.
 //
 // With mtl3 the Metal 4 queue waits for the Metal 3 present buffer's `shown` event, so the next frame
-// can't write the texture the present pass reads while the pass still reads it. Without this switch
-// it waits right after the present, before any of the next frame's work. The Metal 3 buffer waits on
+// can't write the texture the present pass reads while the pass still reads it. With `next` it waits
+// right after the present, before any of the next frame's work. The Metal 3 buffer waits on
 // the GPU for its drawable first, so the next frame's GPU work waits for the drawable too, and each
 // frame's GPU work gets one refresh. On 0.2 the drawables come back a refresh late (PRESENT drawwait
 // 16.3 ms), which made every frame over 16.7 ms on the GPU a skipped refresh.
@@ -21,16 +22,26 @@
 //   waitBefore() gives the value to wait for (0: nothing; the queue already waits for it).
 //
 // One texture at a time. A present that reads another texture than the present before it (a second
-// swap chain, a resize) waits right after it, as without the switch, so a write to the earlier
+// swap chain, a resize) waits right after it, as with `next`, so a write to the earlier
 // texture can never be missed. `shown` only rises, so one wait covers every present before it.
 //
 // gw2 (#316): ShownRepair, below, keeps a CPU signal for a failed present from leaving `shown` lower.
 //
-// Pure C++: tests/gw2/shown_wait_test.cpp builds it natively.
+// Pure C++: tests/gw2/shown_wait_test.cpp builds it natively, and tests/gw2/switches_test.cpp the
+// switch's grammar.
 
 #include <cstdint>
+#include <string>
 
 namespace dxmt::gw2 {
+
+// DXMT_MTL4_SHOWN_WAIT's grammar (dxmt_gw2_metal4.cpp declares the switch): exactly `next`; anything
+// else, unset included, is the fallback, `write`. Until #332 it was exactly `write`, anything else
+// `next`.
+inline std::string
+mtl4ShownWaitGrammar(const std::string &raw, const std::string &fallback) {
+  return raw == "next" ? raw : fallback;
+}
 
 class ShownWait {
 public:
