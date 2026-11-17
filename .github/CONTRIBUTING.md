@@ -91,6 +91,64 @@ If two sources conflict, report the conflict instead of silently choosing one.
   line and no off-switch**.
 - A finding describes one problem with one fix boundary. Findings stay in the PR.
 
+## Code rules
+
+These keep the fork mergeable with upstream. Every line of mine inside one of upstream's files
+is a place where the next sync can conflict, so most of the rules are about where code goes.
+
+1. **New code goes into fork-owned files.** `dxmt_gw2_*` files in `src/dxmt`, new files of the
+   fork elsewhere (`src/winemetal/unix/mtl4.c` is one), `tests/gw2/`, `tools/gw2/` and
+   `.github/gw2/`. Upstream has none of them, so they never conflict.
+2. **An upstream file gets a hook, not the feature.** One call, one include or one member per
+   feature, each marked `// gw2 (#N):` with the issue's number (`/* gw2 (#N): */` in C; a
+   council step names itself too, as in `gw2 (B2, #67)`). `git grep 'gw2 ('` then finds every
+   fork line.
+3. **Never rewrite an upstream line** for a diagnostic, a rename or a switch read. If a counter
+   needs to know why something happened, work it out inside the fork's function, not by
+   changing upstream's call sites or signatures.
+4. **Stay away from the ends.** Upstream appends at the end of its files, its lists (meson
+   sources, includes, tables) and its constructor bodies. Keep at least one untouched upstream
+   line between a fork addition and such an end. For a list, add the fork's entries from
+   outside it, after upstream's closing bracket. For a constructor, let a fork member's own
+   constructor do the work.
+5. **Never change upstream's final newline.** A file that upstream ends without a newline keeps
+   ending that way, with fork lines above its last line.
+6. **Moved upstream code is listed.** A PR that moves upstream code into another file adds a
+   row to "Moved upstream code" in [upstream-sync.md](../docs/agents/upstream-sync.md), so a
+   sync knows where an upstream fix to it has to go.
+7. **A switch is declared by its module.** `sw::Switch` at namespace scope in the file that
+   reads it, with its grammar, never a new `env::getEnvVar("DXMT_…")`
+   ([ADR 0004](../docs/gw2/adr/0004-switches-declared-by-their-module.md)). The bridge's unix
+   side is C and reads with `getenv`; its README row says so.
+8. **No `thread_local` on a per-call path.** The x86_64 and i386 DLLs are built with mingw-GCC,
+   whose `thread_local` is emulated TLS: several function calls per access, about 0.1 µs under
+   Rosetta. At 21,000 timing scopes a frame that cost the render thread 2.3 ms (#28, #37). Keep
+   per-thread state in an object the thread already holds, as `ApiThreadCache` does
+   (`src/dxmt/dxmt_gw2_stats.hpp`), or pass it in.
+9. **arm64-clean.** No x86 intrinsics and no inline assembly. The same source builds the ARM64X
+   DLLs for the arm64 engine.
+
+The `GW2` workflow prints the fork's footprint in upstream's files for every pull request: the
+files it changes, the lines it adds there, and the upstream lines it rewrites or deletes. A PR
+that raises the removed lines says why in its description.
+
+The decisions these rules rest on, and the ones a change must stay consistent with:
+
+- [ADR 0001](../docs/gw2/adr/0001-one-compile-job-per-key.md): one compile job per key; warming
+  and demand share it.
+- [ADR 0002](../docs/gw2/adr/0002-shared-submission-and-completion-semantics.md): Metal 3 and
+  Metal 4 share submission and completion semantics; encoding stays specific to each.
+- [ADR 0003](../docs/gw2/adr/0003-gpu-completion-authorizes-retirement.md): GPU completion
+  authorizes retirement.
+- [ADR 0004](../docs/gw2/adr/0004-switches-declared-by-their-module.md): switches are declared
+  by the module that reads them.
+- [ADR 0005](../docs/gw2/adr/0005-bridge-call-numbers-in-one-manifest.md): bridge call numbers
+  are explicit in one manifest.
+- [ADR 0015](../docs/gw2/adr/0015-compile-service-tests-without-the-old-scheduler.md): the
+  compile service is tested on its own, without the old scheduler.
+- [ADR 0016](../docs/gw2/adr/0016-ccache-for-pull-request-builds.md): pull requests compile
+  through a ccache that only pushes save, and pushes don't read it.
+
 ## Definition of Done
 
 - [ ] **Clean build.** The `GW2` workflow (`.github/workflows/gw2.yml`) is green on the pull
@@ -100,7 +158,8 @@ If two sources conflict, report the conflict instead of silently choosing one.
       ([CI](../docs/gw2/README.md#ci)).
 - [ ] **Logged and switchable.** The change writes a log line when it acts (once, or on each
       state change, never per draw), and a behaviour change has a `DXMT_*` off-switch that
-      restores the base behaviour. Both are in [docs/gw2/README.md](../docs/gw2/README.md).
+      restores the base behaviour, declared with `sw::Switch` in its module
+      ([Code rules](#code-rules)). Both are in [docs/gw2/README.md](../docs/gw2/README.md).
 - [ ] **Measured in GW2.** STATS lines before and after, in the same place with the same
       settings (a quiet spot and Lion's Arch for anything on the frame path), alternating base
       and branch where the difference is small. Also the off-switch run. Never measure while

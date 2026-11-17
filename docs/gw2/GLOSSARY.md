@@ -134,6 +134,40 @@ _Avoid_: call table (the generated `__wine_unix_call_funcs` and `__wine_unix_cal
 An encoded graphics command that the unix side interprets (the Metal 3 and Metal 4 encoders'
 `encodeCommands`). Many packets travel in one bridge call; a packet is not a bridge call.
 
+### The arm64 build
+
+**Mach9**:
+athei's arm64 Wine, the engine of GW2 on Mac 0.2. Its unix side is arm64 and its 64-bit PE side
+is ARM64X. The `Build arm64` job builds my DXMT the way Mach9 builds its own, links it against
+the engine's files, and `.github/gw2/check-mach9.zsh` compares the result with the engine's DXMT.
+
+**FEX**:
+The x86_64 emulator of the arm64 engine. Only the game's own x86_64 code runs through it; my
+DLLs' code runs natively.
+
+**ARM64X DLL**:
+A DLL of the arm64 build that holds ARM64 code and ARM64EC code in one file. One meson tree
+with `build-arm64ec.txt` builds them. The i386 DLLs are a second tree.
+
+**ARM64EC**:
+The arm64 code of an ARM64X DLL that x86_64 code calls and that calls x86_64 code. The game is
+x86_64, so this is the half of my DLLs it runs.
+
+**Patchable entry**:
+The x64 entry of a `DXMT_HOTPATCHABLE` function or of an export in an ARM64X DLL: the address a
+hook such as the Steam overlay's patches. On ARM64EC a call to a patchable function enters its
+x64 entry even from inside the module, so one entry that calls another runs a hook on both.
+`DXMT_HOTPATCHABLE_SHARED` (`src/util/util_hotpatch.h`) gives such a pair a shared body, and
+`.github/gw2/patchable-calls.py` fails the build when an entry's ARM64EC code reaches another
+entry.
+
+**Exclusive pair**:
+A load-exclusive and store-exclusive loop (`ldxr`/`ldaxr` with `stxr`/`stlxr`) in an ARM64X
+DLL's ARM64 or ARM64EC code. Built for `armv8.4-a`, my code's atomics are LSE instructions
+instead, so the pairs left come from the static libraries built for ARMv8.0 (libc++, libc++abi,
+the mingw-w64 CRT, Mach9's winecrt0). `.github/gw2/exclusive-pairs.py` counts them, and
+`check-mach9.zsh` fails above a fixed ceiling per DLL.
+
 ### Submission
 
 **Commit**:

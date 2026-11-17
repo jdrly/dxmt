@@ -7,6 +7,7 @@
 #   list fails it. Wine's import libraries, winebuild and winemac.so come from 3Shain's Wine
 #   $WINE_VERSION, as in upstream's CI, since the CrossOver engine I build against locally isn't
 #   downloadable. .github/gw2/unix-call.py shows what a bridge thunk calls (#205).
+#   .github/gw2/footprint.zsh prints the fork's footprint in upstream's files into the summary.
 # arm64 (#182): the build for GW2 on Mac 0.2's engine, Mach9 $MACH9_VERSION, the way Mach9 builds its
 #   DXMT: one ARM64X tree (build-arm64ec.txt, so the arm64 winemetal.so too; the DLLs for armv8.4-a
 #   since #200) and one i386 tree, with llvm-mingw $LLVM_MINGW_VERSION (Mach9's pin), linked against the engine's own Wine files from its
@@ -97,6 +98,14 @@ jobs:
           fetch-depth: 0
           submodules: true
           persist-credentials: false
+      # gw2 (#318): what this commit adds to and rewrites in upstream's files, for the review
+      # (CONTRIBUTING, Code rules). A number, never a failure. Once, not per arch.
+      - name: Fork footprint in upstream's files
+        if: matrix.arch == 'x86_64'
+        continue-on-error: true
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: .github/gw2/footprint.zsh origin/main HEAD "${BASE_REF:+origin/$BASE_REF}" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Select Xcode
         run: sudo xcode-select -s "/Applications/Xcode_$XCODE_VERSION.app"
       # Some runners of the image have Xcode without its Metal Toolchain component, and the shader
