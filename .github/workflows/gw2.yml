@@ -19,6 +19,10 @@
 # tests: zsh -n for the zsh scripts, the self-checks of warnings.zsh and tools/gw2/upstream-bridge-calls.py, then tests/gw2/run.zsh pure,
 #   and metal on the runner's Metal device. The display tests only build here (#225). A push skips
 #   this job when a green pull request run tested the same tree (the tested job, #273).
+# ccache (#305): the three builds compile through ccache (.github/gw2/ccache.zsh). A pull request
+#   reads the newest cache of its toolchain, saved by a push to gw2-on-mac. A push never reads
+#   one: the day's first push compiles through an empty ccache and saves it, later ones compile
+#   without ccache, so what Publish uploads is always compiled in its own run.
 # lint: actionlint for the workflows.
 # artifact: the installable build of the commit (as build-dxmt.zsh stages it: x86_64-windows,
 #   i386-windows, x86_64-unix, VERSION), kept 7 days, for scripts/dxmt-use.zsh save.
@@ -64,6 +68,9 @@ env:
   LLVM_MINGW_SHA256: 66cbd5178c4a71b0d473e68ede172f8eb7d15d023e67f39201d0a69e21f6bf3c
   MACH9_VERSION: v0.3.1
   MACH9_SHA256: 90aff9a897ed0ff9aac44d0e06f0aecd3ee985afb38037f3f915451e51fa974e
+  # ccache's own macOS release (a universal binary), for the three builds
+  CCACHE_VERSION: 4.14.3
+  CCACHE_SHA256: 764dd2a8100ff83e6bbd7b9a1e2016cc401be34bee8a70ea99698186622c34d5
 
 defaults:
   run:
@@ -144,14 +151,51 @@ jobs:
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
+      # ccache (#305). A pull request reads the newest cache of its toolchain. A push never reads
+      # one, so what Publish uploads is compiled in its own run: the day's first push compiles
+      # through an empty ccache and saves it, the later ones compile without ccache.
+      - name: Fetch ccache
+        run: .github/gw2/toolchain.zsh fetch "https://github.com/ccache/ccache/releases/download/v$CCACHE_VERSION/ccache-$CCACHE_VERSION-darwin.tar.gz" "$CCACHE_SHA256" toolchains/ccache --strip-components 1 "ccache-$CCACHE_VERSION-darwin/ccache"
+      - name: Compiler cache settings
+        id: ccache
+        run: .github/gw2/ccache.zsh setup ${{ matrix.arch }} ${{ matrix.cross }}
+      - name: Restore the compiler cache
+        if: github.event_name == 'pull_request'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: ${{ steps.ccache.outputs.key }}
+          restore-keys: ${{ steps.ccache.outputs.prefix }}
+          path: ${{ runner.temp }}/ccache
+      - name: Look for today's compiler cache
+        if: github.event_name == 'push'
+        id: ccache-today
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: ${{ steps.ccache.outputs.key }}
+          path: ${{ runner.temp }}/ccache
+          lookup-only: true
+      - name: Compile without ccache
+        if: github.event_name == 'push' && steps.ccache-today.outputs.cache-hit == 'true'
+        run: echo "CCACHE_DISABLE=1" >>"$GITHUB_ENV"
+
       - name: Build
         run: |
           llvm=()
           # relative: meson refuses an absolute include path inside the source tree
           [[ ${{ matrix.arch }} == x86_64 ]] && llvm=(-Dnative_llvm_path=toolchains/llvm)
+          export PATH="$CCACHE_LINKS:$PATH"
           meson setup build --cross-file ${{ matrix.cross }} --buildtype release --strip \
             --prefix "$PWD/install" -Dwine_install_path="$PWD/toolchains/wine" -Ddxmt_debug=false "${llvm[@]}"
           meson compile -C build 2>&1 | tee build.log
+      - name: Compiler cache statistics
+        run: |
+          { echo '```'; .github/gw2/ccache.zsh stats; echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Save the compiler cache
+        if: github.event_name == 'push' && github.ref == 'refs/heads/gw2-on-mac' && steps.ccache-today.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: ${{ steps.ccache.outputs.key }}
+          path: ${{ runner.temp }}/ccache
       - name: What a bridge thunk calls
         run: |
           { echo '```'; python3 -I .github/gw2/unix-call.py build __wine_unix_call_dispatcher; echo '```'; } |
@@ -284,11 +328,38 @@ jobs:
           key: llvm-${{ env.LLVM_VERSION }}-arm64-macos${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ env.LLVM_BUILD }}
           path: toolchains/llvm
 
+      # ccache (#305). A pull request reads the newest cache of its toolchain. A push never reads
+      # one, so what Publish uploads is compiled in its own run: the day's first push compiles
+      # through an empty ccache and saves it, the later ones compile without ccache.
+      - name: Fetch ccache
+        run: .github/gw2/toolchain.zsh fetch "https://github.com/ccache/ccache/releases/download/v$CCACHE_VERSION/ccache-$CCACHE_VERSION-darwin.tar.gz" "$CCACHE_SHA256" toolchains/ccache --strip-components 1 "ccache-$CCACHE_VERSION-darwin/ccache"
+      - name: Compiler cache settings
+        id: ccache
+        run: PATH="$PATH:$PWD/toolchains/llvm-mingw/bin" .github/gw2/ccache.zsh setup arm64 build-arm64ec.txt build-win32.txt
+      - name: Restore the compiler cache
+        if: github.event_name == 'pull_request'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: ${{ steps.ccache.outputs.key }}
+          restore-keys: ${{ steps.ccache.outputs.prefix }}
+          path: ${{ runner.temp }}/ccache
+      - name: Look for today's compiler cache
+        if: github.event_name == 'push'
+        id: ccache-today
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: ${{ steps.ccache.outputs.key }}
+          path: ${{ runner.temp }}/ccache
+          lookup-only: true
+      - name: Compile without ccache
+        if: github.event_name == 'push' && steps.ccache-today.outputs.cache-hit == 'true'
+        run: echo "CCACHE_DISABLE=1" >>"$GITHUB_ENV"
+
       - name: Build
         run: |
           # appended, as Mach9 does: llvm-mingw's unprefixed clang mustn't replace Apple's, which
           # builds winemetal.so and airconv
-          export PATH="$PATH:$PWD/toolchains/llvm-mingw/bin"
+          export PATH="$CCACHE_LINKS:$PATH:$PWD/toolchains/llvm-mingw/bin"
           # meson takes <wine_install_path>/bin/winebuild; the engine's own is never run
           mkdir -p toolchains/mach9/bin
           ln -sf "$PWD/toolchains/wine/bin/winebuild" toolchains/mach9/bin/winebuild
@@ -301,6 +372,15 @@ jobs:
             -Dwine_install_path=toolchains/mach9
           meson compile -C build-i386
           meson install -C build-i386 --quiet
+      - name: Compiler cache statistics
+        run: |
+          { echo '```'; .github/gw2/ccache.zsh stats; echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Save the compiler cache
+        if: github.event_name == 'push' && github.ref == 'refs/heads/gw2-on-mac' && steps.ccache-today.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: ${{ steps.ccache.outputs.key }}
+          path: ${{ runner.temp }}/ccache
       - name: What a bridge thunk calls
         run: |
           export PATH="$PATH:$PWD/toolchains/llvm-mingw/bin"
