@@ -1210,6 +1210,10 @@ so only the first run after a version change builds LLVM (about 25 minutes per a
   never reads a cache: the day's first push compiles through an empty ccache and saves it, the later
   ones compile without ccache, so a published archive is always its commit's own compile. Each build
   job prints ccache's statistics for its own run and the runner's core count into its summary.
+  `Build arm64` prints one block per tree (#307). Its ARM64X tree, `build-arm64`, compiles in ccache's
+  depend mode (`CCACHE_DEPEND=1`): clang refuses `-marm64x` together with `-E`, so ccache couldn't
+  preprocess the tree's 106 cross compiles and cached none of them. Depend mode reads the headers
+  from the `-MD` file the compile writes instead. That file holds the ARM64EC half's headers only.
 - **Lint**: actionlint on the workflow (`.github/actionlint.yaml` names the `xcode-27` label it doesn't
   know yet).
 - **Artifact** `dxmt-<commit>`: the build as `build-dxmt.zsh` stages it (`x86_64-windows`,

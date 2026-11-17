@@ -51,6 +51,19 @@ pull request runs with sane statistics before I trust that.
   call, or its compilers run without ccache. Nothing fails. The statistics show it.
 - Each build job prints ccache's statistics for its own run (`CCACHE_STATSLOG`, since a restored cache
   carries the counters of the push that saved it) and the runner's core count into its summary.
+- 2026-11-17 (#307): the ARM64X tree (`build-arm64`) compiles in ccache's depend mode. Its cross
+  compiles pass `-marm64x`, and clang refuses that option together with `-E` ("unsupported option
+  '-marm64x' for target 'arm64ec-w64-mingw32'"). So ccache couldn't run the preprocessor on them,
+  counted all 106 as "Preprocessing failed" and cached none, while the i386 tree and the native
+  compiles in the same job cached fine. Depend mode never preprocesses. It hashes the headers the
+  compile's `-MD` file names. With `-marm64x` clang compiles the source twice, AArch64 then ARM64EC,
+  and both write the same `-MD` file, so it lists the ARM64EC half's headers only. A header included
+  only under `__aarch64__` would go unhashed, and a change to it could hit a stale native half. The
+  architecture checks in `src` guard macros and declarations, never an `#include`, and for the four
+  sources I compared (`d3d11_device.cpp`, `dxmt_texture.cpp`, `d3d12_descriptor_heap.cpp`,
+  `util_md5.cpp`) the AArch64 list is a subset of the ARM64EC list. Since a push never reads a cache,
+  such an object could only reach a pull request's artifact. The variable covers the whole tree, so
+  its native compiles run in depend mode too. Those still hit the objects saved without it.
 - Letting pushes read the cache is three edits: drop the `if:` of "Restore the compiler cache", delete
   "Look for today's compiler cache" and "Compile without ccache", and save when the restore had no
   exact hit. That would replace this ADR's third paragraph.

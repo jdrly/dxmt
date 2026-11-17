@@ -406,10 +406,18 @@ jobs:
           mkdir -p toolchains/mach9/bin
           ln -sf "$PWD/toolchains/wine/bin/winebuild" toolchains/mach9/bin/winebuild
           arm64ec-w64-mingw32-gcc --version | head -1
+          # ccache (#307): each tree logs its own statistics. clang refuses -marm64x together with -E
+          # ("unsupported option '-marm64x' for target 'arm64ec-w64-mingw32'"), so ccache can't
+          # preprocess the ARM64X tree's cross compiles and counts each as "Preprocessing failed".
+          # Depend mode takes the headers from the -MD file the compile writes and never preprocesses.
+          stats=${CCACHE_STATSLOG%.log}
+          export CCACHE_STATSLOG=$stats-build-arm64.log CCACHE_DEPEND=1
           meson setup build-arm64 --cross-file build-arm64ec.txt --buildtype release --strip --prefix "$PWD/install" \
             -Dwine_install_path=toolchains/mach9 -Dnative_llvm_path=toolchains/llvm
           meson compile -C build-arm64
           meson install -C build-arm64 --quiet
+          unset CCACHE_DEPEND
+          export CCACHE_STATSLOG=$stats-build-i386.log
           meson setup build-i386 --cross-file build-win32.txt --buildtype release --strip --prefix "$PWD/install" \
             -Dwine_install_path=toolchains/mach9
           meson compile -C build-i386
