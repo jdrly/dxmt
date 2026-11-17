@@ -1971,7 +1971,21 @@ private:
       // gw2 (#7): NaN already meant one refresh (it is neither 0 nor > 0); as -1 it also compares
       // equal to itself, so PresentDeadlineMs doesn't log it as a change on every Present
       double ms = std::stod(v);
-      return std::isnan(ms) ? -1.0 : ms;
+      if (std::isnan(ms) || ms < 0)
+        return -1.0; // as before: one refresh
+      // gw2 (#314): a deadline that isn't finite or is over the control file's limit never
+      // comes; it means one refresh, with one warning
+      if (!gw2::presentDeadlineInRange(ms)) {
+        static std::atomic<bool> warned{false};
+        if (!warned.exchange(true))
+          Logger::warn(std::format(
+              "Present deadline: DXMT_PRESENT_DEADLINE={} isn't 0 or a number of ms up to {:.0f}; one "
+              "refresh is used",
+              v, gw2::kMaxPresentDeadlineMs
+          ));
+        return -1.0;
+      }
+      return ms;
     } catch (...) {
       return -1.0;
     }

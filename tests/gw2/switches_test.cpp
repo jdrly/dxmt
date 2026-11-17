@@ -15,8 +15,11 @@
 //     src/dxmt/dxmt_gw2_switches.cpp -o /tmp/switches_test && /tmp/switches_test
 
 #include "dxmt_gw2_switches.hpp"
+#include "dxmt_gw2_control.hpp"
 #include "dxmt_gw2_present.hpp"
 #include <climits>
+#include <cmath>
+#include <limits>
 #include <cstdio>
 #include <format>
 #include <map>
@@ -655,8 +658,19 @@ testMtl4DefaultsOn() {
   }
 }
 
+// gw2 (#314): the present deadline's range, which the control file's present_deadline and
+// DXMT_PRESENT_DEADLINE share (dxmt_gw2_control.hpp): 0 (off) or a finite number of ms up to 1000.
+static void
+testPresentDeadlineRange() {
+  for (double ms : {0.0, 8.0, 1000.0})
+    CHECK(gw2::presentDeadlineInRange(ms));
+  for (double ms : {-1.0, 1000.5, std::numeric_limits<double>::infinity(), std::nan("")})
+    CHECK(!gw2::presentDeadlineInRange(ms));
+}
+
 int
 main() {
+  testPresentDeadlineRange();
   testMtl4Present();
   testMtl4DefaultsOn();
   testMigratedGrammars();
