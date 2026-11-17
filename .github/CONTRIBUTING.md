@@ -144,6 +144,26 @@ The decisions these rules rest on, and the ones a change must stay consistent wi
   by the module that reads them.
 - [ADR 0005](../docs/gw2/adr/0005-bridge-call-numbers-in-one-manifest.md): bridge call numbers
   are explicit in one manifest.
+- [ADR 0006](../docs/gw2/adr/0006-nothing-goes-upstream.md): nothing from this fork goes
+  upstream, not a pull request, an issue, a comment or a finding.
+- [ADR 0007](../docs/gw2/adr/0007-metal-4-changes-merge-with-their-switch-off.md): Metal 4,
+  bridge and chunk-submission changes merge with their switch off; a default flips after the
+  Metal tests ran on a Mac.
+- [ADR 0008](../docs/gw2/adr/0008-0.2-presents-metal-4-frames-through-a-metal-3-command-buffer.md):
+  0.2 presents Metal 4 frames through a Metal 3 command buffer, and 0.1.x keeps the Metal 4
+  present.
+- [ADR 0009](../docs/gw2/adr/0009-the-shown-wait-sits-before-the-first-back-buffer-write.md):
+  with the Metal 3 present, the next frame waits for `shown` only before it writes the back
+  buffer.
+- [ADR 0010](../docs/gw2/adr/0010-a-tested-switch-is-deleted-or-becomes-the-default.md): a
+  switch whose test is over is deleted or becomes the default.
+- [ADR 0011](../docs/gw2/adr/0011-the-pso-archive-is-deleted.md): the PSO archive is deleted.
+- [ADR 0012](../docs/gw2/adr/0012-fork-code-stays-out-of-upstream-files-and-off-their-ends.md):
+  fork code stays out of upstream's files, and off the ends upstream appends to.
+- [ADR 0013](../docs/gw2/adr/0013-a-push-run-skips-tests-a-green-pull-request-ran.md): a push
+  run skips the native tests a green pull request ran on the same tree.
+- [ADR 0014](../docs/gw2/adr/0014-the-project-rules-that-bind-this-fork.md): the project's
+  rules that bind this fork, each pointing to the workspace ADR that holds it.
 - [ADR 0015](../docs/gw2/adr/0015-compile-service-tests-without-the-old-scheduler.md): the
   compile service is tested on its own, without the old scheduler.
 - [ADR 0016](../docs/gw2/adr/0016-ccache-for-pull-request-builds.md): pull requests compile
