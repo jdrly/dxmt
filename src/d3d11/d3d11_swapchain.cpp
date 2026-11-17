@@ -58,6 +58,9 @@ namespace {
 // gw2 (#9, #60): DXMT_RENDER_THREAD_PRIORITY, strtoul's value (unset: 0); RaiseRenderThreadPriority
 // acts on 1-3 and logs anything above
 sw::Switch<uint32_t> kRenderThreadPriority{"DXMT_RENDER_THREAD_PRIORITY", 0, sw::legacy::strtoul32};
+// gw2 (#314): DXMT_REFRESH_REQUERY, =1 only: the refresh rate is read again after exclusive
+// fullscreen (RestoreDisplayMode) and for a 0 Hz mode (ChangeDisplayMode)
+sw::Switch<bool> kRefreshRequery{"DXMT_REFRESH_REQUERY", false, sw::legacy::exactlyOne};
 } // namespace
 
 WMTPixelFormat ConvertSwapChainFormat(DXGI_FORMAT format) {
@@ -583,6 +586,8 @@ public:
 
     *pDisplayMode = selected_mode;
     init_refresh_rate_ = double(selected_mode.RefreshRate.Numerator) / double(selected_mode.RefreshRate.Denominator);
+    if (refresh_requery_ && !selected_mode.RefreshRate.Numerator) // gw2 (#314): a 0 Hz mode
+      init_refresh_rate_ = QueryRefreshRate(output_desc.Monitor);
     return S_OK;
   }
 
@@ -595,6 +600,14 @@ public:
       return DXGI_ERROR_NOT_CURRENTLY_AVAILABLE;
 
     init_refresh_rate_ = DBL_MAX;
+    if (refresh_requery_) { // gw2 (#314): a swap chain that started windowed knows its rate too
+      init_refresh_rate_ = QueryRefreshRate(hMonitor);
+      Logger::info(str::format(
+          "Present: refresh rate after leaving fullscreen: ",
+          init_refresh_rate_ != DBL_MAX ? std::to_string(init_refresh_rate_) : std::string("unknown, 60 assumed"),
+          " (DXMT_REFRESH_REQUERY)"
+      ));
+    }
     return S_OK;
   }
 
@@ -1191,6 +1204,16 @@ public:
       return "user-interactive";
     }
     return "other";
+  }
+
+  // gw2 (#314): the monitor's refresh rate now, read as the constructor reads it; DBL_MAX when
+  // the query fails or reports 0
+  double QueryRefreshRate(HMONITOR monitor) {
+    wsi::WsiMode mode;
+    if (wsi::getCurrentDisplayMode(monitor, &mode) && mode.refreshRate.denominator != 0 &&
+        mode.refreshRate.numerator != 0)
+      return (double)mode.refreshRate.numerator / (double)mode.refreshRate.denominator;
+    return DBL_MAX;
   }
 
   // gw2: how a present is paced. With display sync (CAMetalLayer's vsync, as d9mt fd76b39) a
@@ -1911,6 +1934,7 @@ private:
   double init_refresh_rate_ = DBL_MAX;
   int preferred_max_frame_rate = 0;
   bool display_sync_vsync_ = env::getEnvVar("DXMT_DISPLAY_SYNC") != "0";
+  const bool refresh_requery_ = kRefreshRequery(); // gw2 (#314)
   // -1: one refresh; 0: off; > 0: that many ms
   double present_deadline_ms_ = [] {
     auto v = env::getEnvVar("DXMT_PRESENT_DEADLINE");
