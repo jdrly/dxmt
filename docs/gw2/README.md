@@ -1513,7 +1513,10 @@ window late, a lost record and a dropped frame. It also feeds 200 windows of mad
 losses, late or missing GPU ends, the vsync grid, the frame limiter, no grid) to the section and to a
 copy of it from `215e15a`: everything before ` drawwait=` must be the same, so `presented`,
 `aftergpu`, `nogpu`, `missed` and `starved` keep their values. It also checks the skip count the
-section uses (`skippedRefreshes`, `skipWasQueued`) on known values.
+section uses (`skippedRefreshes`, `skipWasQueued`) on known values. Since #324 it checks
+`nodrawable`: 0 in a window where every present had a drawable, the count of `presentNoDrawable`
+calls in the next line (none skipped with `DXMT_PRESENT_SKIP_NIL` unset), kept while no line prints,
+and 0 again in the line after.
 
 `present_choice_test.cpp` (pure, #283) checks the kind of present the Metal 4 branch of the context's
 present case picks once (`dxmt_gw2_present_choice.hpp`): a minimum duration over a deadline over a
@@ -1526,4 +1529,7 @@ plain present, and that each choice calls exactly one of a Metal 3 command buffe
 `presenter_layer_set_test.mm` (metal, #184, #185, #224) runs DXMT's presenter on a real Metal 4
 queue. Since #224 it ends with 8
 tracked presents on each path, Metal 4, Metal 4 with `DXMT_MTL4_PRESENT=mtl3` and plain Metal 3, and
-prints each one's PRESENT line.
+prints each one's PRESENT line. Since #324 a run with `DXMT_PRESENT_SKIP_NIL=1` (arm64) resizes a
+swap chain to 0 x 0 and presents twice on Metal 4 and twice with `mtl3`, each skipped as the context
+skips it, without a command buffer error or a hang. Its `RESULT nil-drawable` lines say how many
+were skipped, or that the layer still gave a drawable at that size.
