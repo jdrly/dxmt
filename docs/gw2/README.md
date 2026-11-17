@@ -1174,6 +1174,20 @@ so only the first run after a version change builds LLVM (about 25 minutes per a
   with the test's reason. It never counts as a pass. The Metal 4 paths are still tested only on my Mac.
   The display tests (`present_cursor_test`) only build here, with `tests/gw2/run.zsh display --build-only`.
   A push skips this job when a green pull request run tested the same tree (the `tested` job, #273).
+- **ccache** (#305, [ADR 0016](adr/0016-ccache-for-pull-request-builds.md)): the three builds compile
+  through ccache 4.14.3, ccache's own macOS release pinned by sha256, set up by `.github/gw2/ccache.zsh`.
+  The cross files name their compilers, so a directory of links named like them, ahead of `PATH` in the
+  `Build` step, puts ccache in front. meson adds it to Apple's `cc` and `c++` by itself, since it finds
+  ccache on `PATH`. There is one cache per job, toolchain and UTC day. Only a push to `gw2-on-mac` saves
+  one, and only a pull request reads one, the newest of its toolchain. The toolchain text (the runner
+  image, Xcode and its clang, the macOS floor, the llvm-mingw pin, each cross compiler's resolved path
+  and version line) is in the cache key and, as `CCACHE_COMPILERCHECK`, in every object's hash.
+  ccache's own check looks at the file it runs, which is a wrapper for llvm-mingw, a link for Homebrew's
+  GCC and a shim for Apple's clang, so it wouldn't see a compiler change. llvm-mingw's path holds no
+  version, so its pin is in every job's text, and a new pin starts new caches for all three. A push
+  never reads a cache: the day's first push compiles through an empty ccache and saves it, the later
+  ones compile without ccache, so a published archive is always its commit's own compile. Each build
+  job prints ccache's statistics for its own run and the runner's core count into its summary.
 - **Lint**: actionlint on the workflow (`.github/actionlint.yaml` names the `xcode-27` label it doesn't
   know yet).
 - **Artifact** `dxmt-<commit>`: the build as `build-dxmt.zsh` stages it (`x86_64-windows`,
