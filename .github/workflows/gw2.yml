@@ -99,6 +99,15 @@ jobs:
           persist-credentials: false
       - name: Select Xcode
         run: sudo xcode-select -s "/Applications/Xcode_$XCODE_VERSION.app"
+      # Some runners of the image have Xcode without its Metal Toolchain component, and the shader
+      # compile then fails (run 44025579828). Such a runner downloads it instead.
+      - name: Metal Toolchain
+        run: |
+          if ! xcrun -sdk macosx metal --version >/dev/null 2>&1; then
+            echo "::warning::this runner's Xcode can't run metal, so the job downloads its Metal Toolchain"
+            xcodebuild -downloadComponent MetalToolchain
+          fi
+          xcrun -sdk macosx metal --version
 
       - name: Restore Wine
         id: wine
@@ -250,6 +259,15 @@ jobs:
           persist-credentials: false
       - name: Select Xcode
         run: sudo xcode-select -s "/Applications/Xcode_$XCODE_VERSION.app"
+      # Some runners of the image have Xcode without its Metal Toolchain component, and the shader
+      # compile then fails (run 44025579828). Such a runner downloads it instead.
+      - name: Metal Toolchain
+        run: |
+          if ! xcrun -sdk macosx metal --version >/dev/null 2>&1; then
+            echo "::warning::this runner's Xcode can't run metal, so the job downloads its Metal Toolchain"
+            xcodebuild -downloadComponent MetalToolchain
+          fi
+          xcrun -sdk macosx metal --version
 
       # What the build links against and what the checks compare with: the engine's winemac.so and
       # ntdll.so, its ntdll.dll and import libraries for both arches and its own DXMT (the tree and
