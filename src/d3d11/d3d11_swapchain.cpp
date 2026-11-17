@@ -1,4 +1,5 @@
 #include "d3d11_swapchain.hpp"
+#include "dxmt_gw2_cadence.hpp"
 #include "com/com_guid.hpp"
 #include "config/config.hpp"
 #include "d3d11_private.h"
@@ -61,6 +62,9 @@ sw::Switch<uint32_t> kRenderThreadPriority{"DXMT_RENDER_THREAD_PRIORITY", 0, sw:
 // gw2 (#314): DXMT_REFRESH_REQUERY, =1 only: the refresh rate is read again after exclusive
 // fullscreen (RestoreDisplayMode) and for a 0 Hz mode (ChangeDisplayMode)
 sw::Switch<bool> kRefreshRequery{"DXMT_REFRESH_REQUERY", false, sw::legacy::exactlyOne};
+// gw2 (#314): DXMT_STEADY_SLEEP, =1 only: LimitFrameRate and ThrottleBackground keep their
+// deadlines on QueryPerformanceCounter (dxmt_gw2_cadence.hpp) instead of the wall clock
+sw::Switch<bool> kSteadySleep{"DXMT_STEADY_SLEEP", false, sw::legacy::exactlyOne};
 } // namespace
 
 WMTPixelFormat ConvertSwapChainFormat(DXGI_FORMAT format) {
@@ -296,6 +300,12 @@ public:
       hud(WMT::DeveloperHUDProperties::instance()) {
 
     gw2::controlStart(); // gw2 (#7): DXMT_CONTROL's poll thread, once per process
+    if (steady_sleep_) { // gw2 (#314)
+      static std::atomic<bool> logged{false};
+      if (!logged.exchange(true))
+        Logger::info("Present: frame limiter and background throttle sleep on QueryPerformanceCounter "
+                     "(DXMT_STEADY_SLEEP=1)");
+    }
 
     native_view_ = WMT::CreateMetalViewFromHWND((intptr_t)hWnd, pDevice->GetMTLDevice(), layer_weak_);
 
@@ -1271,9 +1281,17 @@ public:
   // gw2 (#7): the frame limiter of ComputePacing. Fixed cadence from the previous deadline, so an
   // oversleep comes back on the next frame; a frame that overran restarts it.
   clock::time_point cap_deadline_{};
+  const bool steady_sleep_ = kSteadySleep(); // gw2 (#314)
+  gw2::Cadence cap_cadence_, bg_cadence_;    // gw2 (#314): DXMT_STEADY_SLEEP's deadlines
   bool cap_limiter_ = env::getEnvVar("DXMT_CAP_LIMITER") != "0";
 
   void LimitFrameRate(double interval) {
+    if (steady_sleep_) { // gw2 (#314)
+      int64_t sleep_ns = cap_cadence_.step(gw2::nowNs(), interval > 0 ? int64_t(interval * 1e9) : 0);
+      if (sleep_ns > 0)
+        std::this_thread::sleep_for(std::chrono::nanoseconds(sleep_ns));
+      return;
+    }
     auto now = clock::now();
     if (interval <= 0 || cap_deadline_ == clock::time_point{}) {
       cap_deadline_ = interval > 0 ? now : clock::time_point{};
@@ -1417,6 +1435,7 @@ public:
     if (!fps)
       code = BgReason::None;
     auto now = clock::now();
+    const int64_t now_ns = steady_sleep_ ? gw2::nowNs() : 0; // gw2 (#314)
     if (fps != bg_fps_ || reason != bg_reason_) {
       if (fps)
         Logger::info(str::format("Present: ", reason, ", throttling to ", fps, " fps (", BgDetails(code), ")"));
@@ -1425,6 +1444,8 @@ public:
       bg_fps_ = fps;
       bg_reason_ = reason;
       bg_deadline_ = now;
+      if (steady_sleep_)
+        bg_cadence_.restart(now_ns);
     }
 
     bool stats = gw2::statsEnabled();
@@ -1441,7 +1462,13 @@ public:
     }
 
     bool slept = false;
-    if (fps) {
+    if (fps && steady_sleep_) { // gw2 (#314)
+      int64_t sleep_ns = bg_cadence_.step(now_ns, 1000000000ll / fps);
+      if (sleep_ns > 0) {
+        std::this_thread::sleep_for(std::chrono::nanoseconds(sleep_ns));
+        slept = true;
+      }
+    } else if (fps) {
       bg_deadline_ += std::chrono::duration_cast<clock::duration>(std::chrono::nanoseconds(1000000000ull / fps));
       if (bg_deadline_ <= now) {
         bg_deadline_ = now;
