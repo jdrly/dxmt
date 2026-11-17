@@ -328,20 +328,30 @@ runScenario(const ScenarioFn &build) {
     // first catches a worker that took a job but isn't at the gate yet, the second one that returned
     // but hasn't counted itself out. "Parked" is the harness's own record: the job's last run returned
     // a dependency that isn't done. No quiet period decides it, so a late worker only delays a step.
+    // (runnable, done): read job by job, so it is counted again after the gate and the running count,
+    // and a step whose jobs completed meanwhile isn't settled
+    auto tally = [&] {
+      std::pair<size_t, size_t> r{0, 0};
+      for (auto *j : submitted) {
+        auto *dep = j->returned_dep.load();
+        if (j->GetIsDone())
+          r.second++;
+        else if (!(dep && !dep->GetIsDone()))
+          r.first++;
+      }
+      return r;
+    };
     auto settled = [&] {
       auto end = Clock::now() + std::chrono::seconds(10);
       while (Clock::now() < end) {
-        size_t runnable = 0;
-        for (auto *j : submitted) {
-          auto *dep = j->returned_dep.load();
-          runnable += !j->GetIsDone() && !(dep && !dep->GetIsDone());
-        }
+        auto before = tally();
         size_t gated;
         {
           std::lock_guard<std::mutex> l(gate.m);
           gated = gate.gated.size();
         }
-        if (gated == std::min(currentWorkers(), runnable) && sched.runningWorkers() == gated)
+        bool counted = sched.runningWorkers() == gated;
+        if (counted && gated == std::min(currentWorkers(), before.first) && tally() == before)
           return true;
         std::this_thread::sleep_for(std::chrono::microseconds(200));
       }
