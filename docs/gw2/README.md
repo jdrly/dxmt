@@ -1163,8 +1163,8 @@ so only the first run after a version change builds LLVM (about 25 minutes per a
   `dlls/winemac.drv/window.c`, which asserts both). No warnings list for this job yet: llvm-mingw's clang
   warns differently from GCC.
 - **Native tests**: `zsh -n` on the zsh scripts and a self-check of `.github/gw2/warnings.zsh`, then
-  `tests/gw2/run.zsh pure` and `metal`. The zsh checks run here because macOS has zsh, so they install
-  nothing (#174). The runner's GPU is an Apple Paravirtual device
+  `tests/gw2/run.zsh all`, pure and metal in one call. The zsh checks run here because macOS has zsh,
+  so they install nothing (#174). The runner's GPU is an Apple Paravirtual device
   with Metal 3 and no Metal 4. There, `autorelease_count_test`, `commit_record_metal_test` and
   `shared_event_listener_test` pass. `chunk_submission_test` and `mtl4fx_test` run their Metal 3 half and
   skip, while `mtl4_bridge_test`, `mtl4_queue_test`, `mtl4_specialize_test` and `paired_replay_test` skip
@@ -1228,7 +1228,11 @@ a nonzero exit fails the run; exit 77 is *skipped*, never counted as passed; a t
 is listed as unregistered. `--meson <build>/x64` adds the meson tests of the `gw2` suite (B1's
 `bridge-native-smoke`). Native tests take their threads from `tests/gw2/shim/thread.hpp` (X2):
 `dxmt::thread`, `mutex` and `condition_variable` are `std::`'s and priorities are no-ops, so a test
-checks coordination, not Wine's scheduling.
+checks coordination, not Wine's scheduling. I build the selected tests first, `GW2_TEST_JOBS` at a
+time (default: my Mac's CPU count), print `built <n> tests in <s> s`, and then run them one after the
+other in name order, so no test runs beside a compiler. A test whose build lines name a file in `$T`
+itself, not `$OUT` or `${OUT}_<suffix>`, may share that file with another such test, so I build those
+in a chain, one after the other (#308).
 
 `compile_service_test.cpp` (C1) runs scripted job graphs (GW2-shaped bursts of pipelines sharing
 variants, parking, failures, the spurious-dependency rerun, growth to 2 × CPUs) through the compile

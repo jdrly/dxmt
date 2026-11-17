@@ -16,8 +16,8 @@
 #   left in the ARM64X DLLs (#200) and checks that no x64 entry's ARM64EC code reaches another
 #   (#248). Artifact dxmt-arm64-<commit>:
 #   aarch64-windows, i386-windows, aarch64-unix, VERSION, kept 7 days.
-# tests: zsh -n for the zsh scripts, the self-checks of warnings.zsh and tools/gw2/upstream-bridge-calls.py, then tests/gw2/run.zsh pure,
-#   and metal on the runner's Metal device. The display tests only build here (#225). A push skips
+# tests: zsh -n for the zsh scripts, the self-checks of warnings.zsh and tools/gw2/upstream-bridge-calls.py, then tests/gw2/run.zsh all:
+#   pure, and metal on the runner's Metal device. The display tests only build here (#225). A push skips
 #   this job when a green pull request run tested the same tree (the tested job, #273).
 # ccache (#305): the three builds compile through ccache (.github/gw2/ccache.zsh). A pull request
 #   reads the newest cache of its toolchain, saved by a push to gw2-on-mac. A push never reads
@@ -522,20 +522,20 @@ jobs:
         run: python3 -I tools/gw2/upstream-bridge-calls.py --self-test
       - name: Select Xcode
         run: sudo xcode-select -s "/Applications/Xcode_$XCODE_VERSION.app"
-      - name: Pure tests
-        run: tests/gw2/run.zsh pure
       # it runs on the Mac, with the game's recipes and AIR; here it only has to build (#159)
       - name: Cold-cache benchmark builds
         run: clang -x objective-c -fobjc-arc -O1 -Wall -arch x86_64 tests/gw2/stagecache_bench.m -framework Metal -framework Foundation -lsqlite3 -o "$RUNNER_TEMP/stagecache"
       # they need a GUI session, a display and Metal 4; they run on my Mac (#225)
       - name: Display tests build
         run: tests/gw2/run.zsh display --build-only
-      - name: Metal tests
+      # one call (#308): run.zsh builds every program first, several at a time, and then runs them
+      # one after the other
+      - name: Pure and Metal tests
         run: |
           status=0
-          tests/gw2/run.zsh metal | tee "$RUNNER_TEMP/metal.txt" || status=$?
+          tests/gw2/run.zsh all | tee "$RUNNER_TEMP/tests.txt" || status=$?
           # each skipped test's own reason, and the device it saw
-          awk '$1 == "skip" { print $2 }' "$RUNNER_TEMP/metal.txt" | while read -r t; do
+          awk '$1 == "skip" { print $2 }' "$RUNNER_TEMP/tests.txt" | while read -r t; do
             echo "== $t"
             grep -i -E 'skip|device' "$GW2_TEST_DIR/$t.log" | head -4 || true
           done

@@ -22,6 +22,12 @@
 # metal: gw2-metal), e.g. B1's bridge-native-smoke in <build>/x64.
 #
 # The runner's directory is GW2_TEST_DIR, or a new one under $TMPDIR; it's kept for the logs.
+#
+# The selected tests are built first, GW2_TEST_JOBS at a time (default: the Mac's CPU count), then
+# run one after the other in name order, so no test runs beside a compiler. A test whose build
+# lines name a file in $T itself (not $OUT or ${OUT}_<suffix>) may share it with another test, as
+# the tests that link the bridge's unix objects do: those tests build one after the other, in name
+# order, beside the rest.
 
 emulate -L zsh
 setopt pipefail nullglob
@@ -37,7 +43,7 @@ while (( $# )); do
     pure|metal|display|all) KIND=$1 ;;
     --meson) shift; MESON+=("$1") ;;
     --build-only) BUILD_ONLY=1 ;;
-    -h|--help) sed -n '2,25p' "${0:A}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,31p' "${0:A}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) print -u2 "run.zsh: unknown argument $1"; exit 2 ;;
   esac
   shift
@@ -47,7 +53,10 @@ done
 T=${GW2_TEST_DIR:-$(mktemp -d "${${TMPDIR:-/tmp}%/}/gw2-tests.XXXXXX")}
 mkdir -p "$T"
 
-typeset -a passed failed skipped built unregistered
+JOBS=${GW2_TEST_JOBS:-$(sysctl -n hw.ncpu 2>/dev/null || print 2)}
+
+typeset -a passed failed skipped built unregistered names chain pool
+typeset -A kinds runs
 for f in tests/gw2/*_test.*; do
   name=${f:t:r}
   kind=$(sed -n 's|^// gw2-test: *\([a-z]*\).*|\1|p' "$f" | head -1)
@@ -59,9 +68,33 @@ for f in tests/gw2/*_test.*; do
   fi
   [[ $KIND == "$kind" || ( $KIND == all && $kind != display ) ]] || continue
   [[ -n $run ]] || run='"$OUT"'
+  names+=("$name")
+  kinds[$name]=$kind
+  runs[$name]=$run
+  print -r -- "set -e; $build" >"$T/$name.build"
+  rm -f "$T/$name.rc"
+  if [[ $build == *'$T/'* ]]; then chain+=("$name"); else pool+=("$name"); fi
+done
+
+# The builds. xargs starts one job per line: the first line is the chain, which one job builds in
+# order, then one line per other test. Each build writes its exit status to <name>.rc.
+SECONDS=0
+{
+  if (( ${#chain} )); then print -r -- $chain; fi
+  if (( ${#pool} )); then print -rl -- $pool; fi
+} | T=$T xargs -P "$JOBS" -L 1 zsh -c '
+  for n in "$@"; do
+    OUT=$T/$n zsh "$T/$n.build" >"$T/$n.log" 2>&1
+    print $? >"$T/$n.rc"
+  done' build
+print "built ${#names} tests in $SECONDS s, $JOBS at a time (${#chain} of them one after the other)"
+
+for name in $names; do
+  kind=$kinds[$name]
+  run=$runs[$name]
   OUT=$T/$name
   log=$T/$name.log
-  if ! OUT=$OUT T=$T zsh -c "set -e; $build" >"$log" 2>&1; then
+  if [[ $(<"$T/$name.rc") != 0 ]]; then
     failed+=("$name (build)")
     print "FAIL  $name: build failed ($log)"
     tail -n 15 "$log" | sed 's/^/      /'
