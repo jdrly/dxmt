@@ -1173,7 +1173,10 @@ so only the first run after a version change builds LLVM (about 25 minutes per a
   `dlls/winemac.drv/window.c`, which asserts both). No warnings list for this job yet: llvm-mingw's clang
   warns differently from GCC.
 - **Native tests**: `zsh -n` on the zsh scripts and a self-check of `.github/gw2/warnings.zsh`, then
-  `tests/gw2/run.zsh all`, pure and metal in one call. The zsh checks run here because macOS has zsh,
+  `tests/gw2/run.zsh all`, pure and metal in one call. `.github/gw2/switch-table.py` fails the job when
+  the [switch table](#switches) and the `DXMT_*` names `src/` reads differ, when a declared bool or
+  number default differs from the table's Default column, or when a row's Status doesn't start with
+  one of the five words. The zsh checks run here because macOS has zsh,
   so they install nothing (#174). The runner's GPU is an Apple Paravirtual device
   with Metal 3 and no Metal 4. There, `autorelease_count_test`, `commit_record_metal_test` and
   `shared_event_listener_test` pass. `chunk_submission_test` and `mtl4fx_test` run their Metal 3 half and
