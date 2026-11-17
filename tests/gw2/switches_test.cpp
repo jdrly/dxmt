@@ -17,6 +17,7 @@
 #include "dxmt_gw2_switches.hpp"
 #include "dxmt_gw2_control.hpp"
 #include "dxmt_gw2_present.hpp"
+#include "dxmt_gw2_shown_wait.hpp"
 #include <climits>
 #include <cmath>
 #include <limits>
@@ -668,11 +669,35 @@ testPresentDeadlineRange() {
     CHECK(!gw2::presentDeadlineInRange(ms));
 }
 
+// gw2 (#332): DXMT_MTL4_SHOWN_WAIT, declared as dxmt_gw2_metal4.cpp declares it since `write` became
+// the default, with its grammar from dxmt_gw2_shown_wait.hpp: exactly `next`, anything else `write`.
+// The startup line's value here is the parsed one; the module replaces `write` with `unused` without
+// DXMT_MTL4_PRESENT=mtl3 on Metal 4, which this test has no device for.
+static void
+testMtl4ShownWait() {
+  std::vector<std::optional<std::string>> inputs = kInputs;
+  for (const char *text : {"write", "WRITE", "write ", " write", "next", "NEXT", "Next", "next ", " next", "nex",
+                           "next1", "nextwrite", "next,write"})
+    inputs.push_back(text);
+  for (auto &input : inputs) {
+    Env env;
+    if (input)
+      env.vars["DXMT_MTL4_SHOWN_WAIT"] = *input;
+    sw::Registry registry(env.source());
+    sw::Switch<std::string> shown{"DXMT_MTL4_SHOWN_WAIT", "write", gw2::mtl4ShownWaitGrammar, sw::Line::Listed,
+                                  registry};
+    const std::string want = input && *input == "next" ? "next" : "write";
+    CHECK_EQ(shown(), want, show(input));
+    CHECK_EQ(sw::startupLine(registry, {}), "DXMT_MTL4_SHOWN_WAIT=" + want, "startup line, " + show(input));
+  }
+}
+
 int
 main() {
   testPresentDeadlineRange();
   testMtl4Present();
   testMtl4DefaultsOn();
+  testMtl4ShownWait();
   testMigratedGrammars();
   testReadSequences();
   testRequestedVsEffective();

@@ -1458,7 +1458,8 @@ ArgumentEncodingContext::flushCommandsImpl(CommandBuffer &cmdbuf, uint64_t seqId
         // stays on the Metal 4 queue; the pass, the present call and the wait for the drawable are Metal
         // 3's, in a command buffer of the command queue's MTLCommandQueue. Two shared events order the
         // queues (Mtl4Encoding::beginMetal3Present): the buffer runs after every commit before it, and
-        // the Metal 4 queue's later commits run after the buffer. They replace the pass's fences, which
+        // the Metal 4 queue's commits from the first one that writes the presented texture run after it
+        // (#271; with DXMT_MTL4_SHOWN_WAIT=next, every later commit). They replace the pass's fences, which
         // belong to the Metal 4 queue and aren't encoded. The layer's residency set isn't named: Metal 3
         // keeps the drawable resident.
         bool mtl3 = cmdbuf.queue().metal3Present();

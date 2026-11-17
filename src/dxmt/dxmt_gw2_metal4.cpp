@@ -2,6 +2,7 @@
 #include "dxmt_gw2_lifetime.hpp"
 #include "dxmt_gw2_present.hpp"
 #include "dxmt_gw2_residency.hpp"
+#include "dxmt_gw2_shown_wait.hpp"
 #include "dxmt_gw2_switches.hpp"
 #include "log/log.hpp"
 #include "util_env.hpp"
@@ -47,9 +48,9 @@ sw::Switch<bool> kMtl4TimestampReuse{"DXMT_MTL4_TIMESTAMP_REUSE", true, sw::lega
 sw::Switch<std::string> kMtl4Present{"DXMT_MTL4_PRESENT", "mtl4", mtl4PresentGrammar};
 // gw2 (#204): on unless exactly "0" (the default since #301)
 sw::Switch<bool> kMtl4AllocatorPool{"DXMT_MTL4_ALLOCATOR_POOL", true, sw::legacy::notZero};
-// gw2 (#271): `next` (the default) or `write`. The startup line shows `unused` for `write` without
-// DXMT_MTL4_PRESENT=mtl3 on Metal 4
-sw::Switch<std::string> kMtl4ShownWait{"DXMT_MTL4_SHOWN_WAIT", "next", mtl4ShownWaitGrammar};
+// gw2 (#271): `write` (the default since #332, ADR 0017) or `next`. The startup line shows `unused`
+// for `write` without DXMT_MTL4_PRESENT=mtl3 on Metal 4
+sw::Switch<std::string> kMtl4ShownWait{"DXMT_MTL4_SHOWN_WAIT", "write", mtl4ShownWaitGrammar};
 sw::Effective kMtl4ShownWaitLine{"DXMT_MTL4_SHOWN_WAIT", [] {
   if (kMtl4ShownWait() != "write")
     return std::string("next");

@@ -24,7 +24,9 @@
 // - gw2 (#227), DXMT_MTL4_PRESENT=mtl3: the present goes through a Metal 3 command buffer of the
 //   command queue's MTLCommandQueue (Mtl4Encoding::beginMetal3Present). Two shared events order the
 //   queues: this queue signals `frame` after the frame's commits, the Metal 3 buffer waits for it and
-//   signals `shown` after the present pass, and this queue waits for `shown` before its next commit.
+//   signals `shown` after the present pass, and this queue waits for `shown` before its first commit
+//   that writes the presented texture (gw2 #271, the default since #332), or with
+//   DXMT_MTL4_SHOWN_WAIT=next before its next commit.
 //   The Metal 3 buffer belongs to its chunk's slot: wait() waits for it, retire() lets it go.
 //
 // Threads: begin/commit/waitForEvent/signalEvent on the encode thread, for the chunk being encoded;

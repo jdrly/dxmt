@@ -168,6 +168,8 @@ The decisions these rules rest on, and the ones a change must stay consistent wi
   compile service is tested on its own, without the old scheduler.
 - [ADR 0016](../docs/gw2/adr/0016-ccache-for-pull-request-builds.md): pull requests compile
   through a ccache that only pushes save, and pushes don't read it.
+- [ADR 0017](../docs/gw2/adr/0017-the-shown-wait-before-the-first-back-buffer-write-is-the-default.md):
+  the shown wait before the first back-buffer write (ADR 0009) is the default.
 
 ## Definition of Done
 

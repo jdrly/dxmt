@@ -215,10 +215,10 @@ CommandQueue::gw2AttachSubmission(WMT::Device device) {
               : "Metal 4: a chunk with timestamp queries commits an empty command buffer for them after its last one "
                 "(DXMT_MTL4_TIMESTAMP_REUSE=0)"
       );
-      // gw2 (#227): a test switch for #223; unset, no line
+      // gw2 (#227): the app sets it on 0.2 (ADR 0008); unset, no line
       if (gw2::mtl4PresentMetal3())
         Logger::info("Metal 4: present through a Metal 3 command buffer (DXMT_MTL4_PRESENT=mtl3)");
-      // gw2 (#271): off by default; unset, no line
+      // gw2 (#271): on by default with mtl3 (#332); DXMT_MTL4_SHOWN_WAIT=next, no line
       if (gw2::mtl4ShownWaitWrite()) {
         gw2::metal4ShownWaitInUse();
         Logger::info("Metal 4: the next frame waits for a Metal 3 present only before it writes the presented "
