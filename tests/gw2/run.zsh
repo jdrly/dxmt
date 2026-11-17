@@ -25,9 +25,10 @@
 #
 # The selected tests are built first, GW2_TEST_JOBS at a time (default: the Mac's CPU count), then
 # run one after the other in name order, so no test runs beside a compiler. A test whose build
-# lines name a file in $T itself (not $OUT or ${OUT}_<suffix>) may share it with another test, as
-# the tests that link the bridge's unix objects do: those tests build one after the other, in name
-# order, beside the rest.
+# lines name a file in $T itself (not $OUT or ${OUT}_<suffix>) may share it with another test:
+# those tests build one after the other, in name order, beside the rest. The tests that link the
+# bridge's unix side share $T/u_<source>_<arch>.o, $T/thunks_<arch>.o and
+# $T/airconv_absent_<arch>.o that way: build them only when missing. A run deletes them first.
 
 emulate -L zsh
 setopt pipefail nullglob
@@ -43,7 +44,7 @@ while (( $# )); do
     pure|metal|display|all) KIND=$1 ;;
     --meson) shift; MESON+=("$1") ;;
     --build-only) BUILD_ONLY=1 ;;
-    -h|--help) sed -n '2,31p' "${0:A}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,32p' "${0:A}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) print -u2 "run.zsh: unknown argument $1"; exit 2 ;;
   esac
   shift
@@ -54,6 +55,11 @@ T=${GW2_TEST_DIR:-$(mktemp -d "${${TMPDIR:-/tmp}%/}/gw2-tests.XXXXXX")}
 mkdir -p "$T"
 
 JOBS=${GW2_TEST_JOBS:-$(sysctl -n hw.ncpu 2>/dev/null || print 2)}
+
+# The bridge's unix side, its thunks and the airconv stand-in are compiled once per run and
+# shared by the tests that link them (their headers skip an object that is there). A kept
+# directory from an earlier run must not hand over objects of older sources.
+rm -f $T/u_*.o $T/thunks_*.o $T/airconv_absent_*.o
 
 typeset -a passed failed skipped built unregistered names chain pool
 typeset -A kinds runs

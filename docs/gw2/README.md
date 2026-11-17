@@ -1125,8 +1125,9 @@ so only the first run after a version change builds LLVM (about 25 minutes per a
   fails the job unless `.github/gw2/warnings-<arch>.txt` lists it. The list keys a warning on its file
   and message without the line, so moved code keeps its warnings, and a second warning of the same kind
   in the same file gets through. The job prints the build's whole list. When a change removes a warning,
-  or has to keep a new one, that list replaces the file. x86_64 also runs the meson `gw2` suite without
-  `gw2-metal`. `.github/gw2/unix-call.py` preprocesses `winemetal_thunks.c` with the build's own command
+  or has to keep a new one, that list replaces the file.
+  x86_64 also runs the meson `gw2` suite, `bridge-native-smoke` included, on the runner's Metal 3
+  device. `.github/gw2/unix-call.py` preprocesses `winemetal_thunks.c` with the build's own command
   and requires `NSObject_retain`'s call to go through `__wine_unix_call_dispatcher` (#205).
 - **Build arm64** (#182, #215): the build for GW2 on Mac 0.2's engine, Mach9 0.3.1, made the way
   Mach9's `bin/build-dxmt.sh` makes its own DXMT. One meson tree with `build-arm64ec.txt` builds the
@@ -1251,7 +1252,10 @@ checks coordination, not Wine's scheduling. I build the selected tests first, `G
 time (default: my Mac's CPU count), print `built <n> tests in <s> s`, and then run them one after the
 other in name order, so no test runs beside a compiler. A test whose build lines name a file in `$T`
 itself, not `$OUT` or `${OUT}_<suffix>`, may share that file with another such test, so I build those
-in a chain, one after the other (#308).
+in a chain, one after the other (#308). The tests that link the bridge's unix side share its objects
+that way (#326): each skips an object that is already there, and every run deletes them first, so a
+kept `GW2_TEST_DIR` never hands over objects of older sources. `autorelease_count_test.m` compiles
+its own with `-O2`.
 
 `compile_service_test.cpp` (C1) runs scripted job graphs (GW2-shaped bursts of pipelines sharing
 variants, parking, failures, the spurious-dependency rerun, growth to 2 × CPUs) through the compile

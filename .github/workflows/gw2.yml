@@ -222,9 +222,11 @@ jobs:
             tee -a "$GITHUB_STEP_SUMMARY"
       - name: No new warnings
         run: .github/gw2/warnings.zsh build.log .github/gw2/warnings-${{ matrix.arch }}.txt
-      - name: Meson tests (gw2 suite without Metal)
+      # with gw2-metal since #326: bridge-native-smoke runs on the runner's Metal 3 device
+      # and exits 77 (skipped) without one
+      - name: Meson tests (gw2 suite)
         if: matrix.arch == 'x86_64'
-        run: meson test -C build --suite gw2 --no-suite gw2-metal --print-errorlogs
+        run: meson test -C build --suite gw2 --print-errorlogs
 
       - name: Stage
         run: |
