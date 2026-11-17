@@ -34,7 +34,8 @@
 // - waitEvent: a chunk that waits for an event the CPU signals isn't complete before the signal;
 // - Metal 4's wait() returns only once the chunk's completion event fired (an empty chunk that waits
 //   for an event: no commit to wait for, only that event);
-// - drain() with chunks committed and never waited for: every one of them completed afterwards.
+// - drain() with chunks committed and never waited for: every one of them completed afterwards;
+//   gw2 (#316): on Metal 3 their split buffers too (held_splits, as DXMT_DRAIN_SPLITS=1 passes them).
 // - gw2 (#91, L3): the tokens. A retirement ledger (the production template, holding the present
 //   split's buffers as CommandQueue's does) is bound to the adapter and retired with each wait()'s token,
 //   then drained with drain()'s; another issuer's token, for the same chunk, is refused by the ledger
@@ -137,7 +138,9 @@ static const Shape kShapes[] = {
     // Metal 4: no command buffer, so only the completion event says the chunk (its queue wait) is done
     {"empty, event wait", false, 0, true, true, false},
 };
-constexpr uint64_t kChunks = 3 * (sizeof(kShapes) / sizeof(kShapes[0]));
+// gw2 (#316): + 2, so the two teardown chunks after them are "1 split" and "3 splits", and the drain
+// has split buffers to wait for
+constexpr uint64_t kChunks = 3 * (sizeof(kShapes) / sizeof(kShapes[0])) + 2;
 
 static const Shape &
 shapeOf(uint64_t seq) {
@@ -447,11 +450,18 @@ run(const char *backend, Mtl4Queue *mtl4, ChunkSubmission &sub, WMT::CommandQueu
     pending_splits += chunks.ledger.splits(seq).size();
   CHECK(pending_splits == (metal4 ? 0 : size_t(shapeOf(kChunks + 1).splits + shapeOf(kChunks + 2).splits)),
         "%s: a refused drain released split buffers", backend);
+  CHECK(metal4 || pending_splits > 0, "%s: the teardown chunks hold no split buffers for the drain to wait for",
+        backend);
   for (uint64_t seq = kChunks + 1; seq <= kChunks + 2; seq++) {
     auto &shape = shapeOf(seq);
-    if (!metal4)
+    if (!metal4) {
       CHECK(chunks.last[seq % kRing].status() == WMTCommandBufferStatusCompleted,
             "%s: drain() returned before chunk %llu completed", backend, (unsigned long long)seq);
+      // gw2 (#316): and every split buffer of it
+      for (auto &split : chunks.ledger.splits(seq))
+        CHECK(split.status() == WMTCommandBufferStatusCompleted,
+              "%s: drain() returned before a split buffer of chunk %llu completed", backend, (unsigned long long)seq);
+    }
     if (shape.work) {
       auto *bytes = (const uint8_t *)fill.contents + (seq % kRing) * 4;
       CHECK(bytes[shape.splits] == uint8_t(seq), "%s: drain() returned before chunk %llu's work", backend,
@@ -775,6 +785,13 @@ main() {
               .before_commit = gw2::residencyBeforeCommit,
               .split_buffers = [&](uint64_t seq) { return chunks.ledger.splits(seq); },
               .wait_at_drain = [] { return true; },
+              // gw2 (#316): as CommandQueue's with DXMT_DRAIN_SPLITS=1
+              .held_splits =
+                  [&] {
+                    std::vector<WMT::CommandBuffer> out;
+                    chunks.ledger.forEachHeldSplit([&](auto &cmdbuf) { out.push_back(WMT::CommandBuffer(cmdbuf)); });
+                    return out;
+                  },
           }
       );
       run("Metal 3", nullptr, metal3, metal3_queue, chunks, mtl_device, completion);

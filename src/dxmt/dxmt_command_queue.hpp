@@ -346,7 +346,7 @@ public:
   bool Metal4() const { return metal4_; }
 
   // gw2 (#31): blocks until the finish thread has retired every chunk committed so far (device
-  // teardown with DXMT_UNRETAINED=1 or DXMT_LIFETIME_CHECK=1, before the device's caches go)
+  // teardown, before the device's caches go; gw2 #316: whatever DXMT_UNRETAINED and DXMT_LIFETIME_CHECK say)
   void
   WaitCommittedRetired() {
     auto committed = ready_for_encode.load(std::memory_order_acquire) - 1;

@@ -151,6 +151,9 @@ public:
     // finish thread: chunk `seq`'s split buffers (the retirement ledger's), in commit order
     std::function<std::span<WMT::Reference<WMT::CommandBuffer>>(uint64_t seq)> split_buffers;
     bool (*wait_at_drain)();                                // the residency set, DXMT_UNRETAINED, the lifetime check
+    // gw2 (#316): teardown: the split buffers the ledger still holds, for drain() to wait for.
+    // Unset, or an empty answer (DXMT_DRAIN_SPLITS off): drain() waits for the last buffers only
+    std::function<std::vector<WMT::CommandBuffer>()> held_splits;
   };
 
   Metal3Submission(uint32_t ring_slots, Hooks hooks);

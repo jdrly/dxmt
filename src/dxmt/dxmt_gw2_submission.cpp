@@ -100,14 +100,31 @@ Metal3Submission::retireChunk(const CompletedChunk &chunk) {
 // gw2 (#29, #31): with the residency set, a chunk's references are what keep its allocations in the set
 // (and alive: the command buffers no longer retain them through useResource); with DXMT_UNRETAINED=1
 // the command buffers retain nothing, and DXMT_LIFETIME_CHECK=1's stamps assume it. The finish thread
-// stopped without retiring every committed chunk, so wait for their command buffers first; the
-// split-off ones were committed earlier on this queue and complete before their chunk's last.
+// stopped without retiring every committed chunk, so wait for their command buffers first. The
+// split-off ones were committed earlier on this queue; gw2 (#316): Metal runs a queue's buffers in
+// commit order but doesn't promise they complete in it, so with DXMT_DRAIN_SPLITS=1 drain() waits for
+// them too (held_splits), and without it assumes they completed before their chunk's last.
 // Otherwise the command buffers retain what they use, and the chunks hold only the split buffers, which
 // a committed command buffer doesn't need. gw2 (#91): either way the chunks' holds may go (the token);
 // the borrowed handles are forgotten, as each retire() did, before the chunks release their buffers.
 gw2::DrainedQueue
 Metal3Submission::drain() {
   if (hooks_.wait_at_drain()) {
+    // gw2 (#316): the split-off buffers first. They were committed before their chunk's last
+    // buffer, but Metal doesn't promise that they complete before it
+    size_t waited = 0;
+    if (hooks_.held_splits)
+      for (auto cmdbuf : hooks_.held_splits()) {
+        auto status = cmdbuf.status();
+        if (status == WMTCommandBufferStatusCommitted || status == WMTCommandBufferStatusScheduled) {
+          cmdbuf.waitUntilCompleted();
+          waited++;
+        }
+      }
+    if (waited)
+      Logger::info(
+          str::format("CommandQueue: teardown waited for ", waited, " split-off command buffers (DXMT_DRAIN_SPLITS)")
+      );
     for (auto &cmdbuf : last_) {
       if (!cmdbuf)
         continue;
