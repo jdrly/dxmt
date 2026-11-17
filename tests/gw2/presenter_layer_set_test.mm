@@ -11,6 +11,7 @@
 // gw2-build: done
 // gw2-run: for arch in x86_64 arm64; do ${OUT}_$arch; MTL_DEBUG_LAYER=1 ${OUT}_$arch; MTL_SHADER_VALIDATION=1 ${OUT}_$arch; done
 // gw2-run: for arch in x86_64 arm64; do for free in 0 1; do DXMT_LIFETIME_CHECK=1 DXMT_PRESENTER_FREE=$free ${OUT}_check_$arch; done; done
+// gw2-run: DXMT_PRESENT_SKIP_NIL=1 ${OUT}_arm64
 //
 // gw2 (#184): a Metal 4 queue takes at most 32 residency sets. The presenter used to add its layer's
 // set to the device's queue at its first present, to leave it in ~Presenter. But an Rc doesn't delete
@@ -84,6 +85,15 @@
 // with DXMT_MTL4_PRESENT=mtl3 (the pass's span is the Metal 3 buffer's), and through a plain Metal 3
 // queue. The test prints the PRESENT line of each. The layers have no window, so whether Core
 // Animation reports them presented here is open; without a record the test says so.
+//
+// gw2 (#324): with DXMT_PRESENT_SKIP_NIL=1 (its own run line), after the other parts, a swap chain
+// presents once, is resized to 0 x 0 as ResizeBuffers does (changeLayerProperties), and presents twice
+// more on Metal 4 and twice with DXMT_MTL4_PRESENT=mtl3. A layer of zero drawable size gives no drawable,
+// and present() follows the context's rule: no wait, signal, present or tracking; on Metal 4 an empty
+// blit encoder in the pass's place, with mtl3 the Metal 3 buffer still signals `shown`. Each chunk must
+// finish without a command buffer error and without a hang. If the layer still gives a drawable at that
+// size, the part says so and is skipped. A run without the variable leaves the nil to Metal, which is
+// how to see by hand what Metal does with it (not a run line: it may abort the process).
 //
 // What the test provides in place of DXMT: the statistics hooks (off but for #224's part) and clock,
 // the lifetime check
@@ -239,6 +249,7 @@ struct Fixture {
   uint32_t lt_queue = 0;              // the lifetime check's id of the queue (its build only)
   uint64_t seq = 0;
   uint32_t presents = 0;
+  uint32_t skipped = 0; // gw2 (#324): presents skipped for want of a drawable
 };
 
 static SwapChain
@@ -314,21 +325,36 @@ present(Fixture &fx, SwapChain &sc, const char *what, uint32_t index, uint64_t t
             cmdbuf, WMT::Texture{H(sc.backbuffer)}, state.metadata, [](WMT::RenderCommandEncoder) {},
             [](WMT::RenderCommandEncoder) {}
         );
-        if (track_frame)
-          dxmt::gw2::presentTrack(drawable.handle, track_frame);
-        cmdbuf.presentDrawable(drawable);
+        // gw2 (#324): as the context: no drawable and DXMT_PRESENT_SKIP_NIL=1, nothing tracked or presented;
+        // the buffer still signals `shown`
+        if (!drawable.handle && dxmt::gw2::presentNoDrawable()) {
+          fx.skipped++;
+        } else {
+          if (track_frame)
+            dxmt::gw2::presentTrack(drawable.handle, track_frame);
+          cmdbuf.presentDrawable(drawable);
+        }
         encoding.commitMetal3Present(cmdbuf, value);
       } else {
         auto drawable = sc.presenter->encodeCommandsMetal4(
             encoding, WMT::Texture{H(sc.backbuffer)}, state.metadata, [](WMT::MTL4RenderCommandEncoder) {},
             [](WMT::MTL4RenderCommandEncoder) {}
         );
-        if (track_frame) {
-          dxmt::gw2::presentTrack(drawable.handle, track_frame);
-          pass_commit = uint32_t(encoding.segments().size() - 1);
+        // gw2 (#324): as the context: no drawable and DXMT_PRESENT_SKIP_NIL=1, an empty blit encoder in
+        // the pass's place (the context's carries the pass's fences), nothing waited for or presented
+        if (!drawable.handle && dxmt::gw2::presentNoDrawable()) {
+          fx.skipped++;
+          auto encoder = encoding.blitCommandEncoder();
+          encoder.endEncoding();
+          encoding.commitOpen(); // as the submission commits the chunk's open command buffer
+        } else {
+          if (track_frame) {
+            dxmt::gw2::presentTrack(drawable.handle, track_frame);
+            pass_commit = uint32_t(encoding.segments().size() - 1);
+          }
+          encoding.signalDrawable(drawable); // commits the present pass first
+          drawable.present();
         }
-        encoding.signalDrawable(drawable); // commits the present pass first
-        drawable.present();
       }
       sc.presenter->gw2LifetimeUse(fx.lt_queue, seq); // the context's stamp (lifetime-check build)
       held = sc.presenter;
@@ -426,6 +452,36 @@ presentFields(Fixture &fx) {
     releaseSwapChain(fx, sc);
   }
   dxmt::gw2::g_stats = false;
+}
+
+// gw2 (#324): DXMT_PRESENT_SKIP_NIL=1. A swap chain resized to 0 x 0 presents on Metal 4 and with
+// DXMT_MTL4_PRESENT=mtl3; present() checks each chunk for a command buffer error, and its wait returns
+static void
+nilDrawable(Fixture &fx) {
+  for (bool mtl3 : {false, true}) {
+    @autoreleasepool {
+      fx.mtl3_present = mtl3;
+      const char *mode = mtl3 ? "DXMT_MTL4_PRESENT=mtl3" : "Metal 4";
+      SwapChain sc = makeSwapChain(fx);
+      present(fx, sc, "nil drawable, before the resize", 0); // its first present applies the layer's size
+      // as ResizeBuffers to 0 x 0 (the format, colour space and sample count stay: the layer's size is
+      // set right away)
+      sc.presenter->changeLayerProperties(WMTPixelFormatBGRA8Unorm, WMTColorSpaceSRGB, 0, 0, 1);
+      if ([sc.layer nextDrawable]) {
+        std::printf("RESULT nil-drawable (%s): skipped, the layer still gave a drawable\n", mode);
+        releaseSwapChain(fx, sc);
+        continue;
+      }
+      uint32_t before = fx.skipped;
+      for (uint32_t i = 0; i < 2; i++)
+        present(fx, sc, "nil drawable", i);
+      uint32_t skipped = fx.skipped - before;
+      CHECK(skipped == 2, "%s: %u of 2 presents without a drawable skipped", mode, skipped);
+      std::printf("RESULT nil-drawable (%s): %u of 2 presents skipped, no error, no hang\n", mode, skipped);
+      releaseSwapChain(fx, sc);
+    }
+  }
+  fx.mtl3_present = false;
 }
 
 // the replaced and the alive-at-once phases, with DXMT_PRESENTER_FREE as `free`
@@ -761,6 +817,8 @@ main() {
       colours(fx, how, false);
     }
     presentFields(fx); // gw2 (#224)
+    if (dxmt::gw2::presentSkipNil()) // gw2 (#324)
+      nilDrawable(fx);
     queue.waitIdle();
 #ifdef DXMT_GW2_LIFETIME_CHECK
     if (dxmt::gw2::g_lifecheck) {

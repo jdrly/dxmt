@@ -18,6 +18,8 @@
 //   line up to " drawwait=".
 // - presentPassRecord (src/dxmt/dxmt_gw2_commit_record.hpp): the record a chunk notes for its pass.
 // - skipArithmetic: skippedRefreshes and skipWasQueued on known values.
+// - noDrawable (#324): nodrawable counts the presents whose layer gave no drawable since the last line;
+//   with DXMT_PRESENT_SKIP_NIL unset none is skipped.
 //
 // Run it from the checkout's root (or through tests/gw2/run.zsh).
 
@@ -327,6 +329,7 @@ fields() {
   CHECK(field(line, "drawwait") == "3.4/16.0", "drawwait {}", field(line, "drawwait"));
   CHECK(field(line, "early") == "2", "early {} (frames 4 and 8)", field(line, "early"));
   CHECK(field(line, "inuse") == "1", "inuse {}", field(line, "inuse"));
+  CHECK(field(line, "nodrawable") == "0", "nodrawable {} (every present had a drawable)", field(line, "nodrawable"));
 
   // window 2: frame 9's pass times arrive (early: 0.5 ms before frame 7 was presented), and frame 10's
   // GPU end, so 9 is final; frame 10 waits
@@ -374,6 +377,33 @@ fields() {
   std::printf("fields 4: %s\n", line.c_str());
   CHECK(field(line, "early") == "0", "early {} (frame 19 after the gap: its surface seen anew)",
         field(line, "early"));
+}
+
+// gw2 (#324): presents whose layer gave no drawable, counted per window. Runs after fields(), whose
+// frames are all final, so nothing waits for a GPU end: a window without a record prints no line and
+// keeps its count for the next line. The test's environment shim leaves DXMT_PRESENT_SKIP_NIL unset.
+static void
+noDrawable() {
+  const uint64_t base = 1'000'000 * kMs;
+  auto presented = [&](uint64_t f) { return base + f * kRefresh; };
+  auto encoded = [&](uint64_t f) { return presented(f) - 3 * kRefresh + kMs; };
+  CHECK(!dxmt::gw2::presentSkipNil(), "DXMT_PRESENT_SKIP_NIL unset: off");
+  for (int i = 0; i < 3; i++)
+    CHECK(!dxmt::gw2::presentNoDrawable(), "switch off: no drawable, the present not skipped ({})", i);
+  auto line = window("nodrawable, no record");
+  CHECK(line.empty(), "a window without a record prints no line: {}", line);
+
+  for (uint64_t f = 21; f <= 23; f++)
+    gpuEnd(f, presented(f) - 30 * kMs);
+  deliver({rec(21, encoded(21), presented(21), 101)});
+  line = window("nodrawable, window 1");
+  std::printf("nodrawable 1: %s\n", line.c_str());
+  CHECK(field(line, "nodrawable") == "3", "nodrawable {} (the three since the last line)", field(line, "nodrawable"));
+  CHECK(line.ends_with(" nodrawable=3"), "nodrawable is the line's last field: {}", line);
+
+  deliver({rec(22, encoded(22), presented(22), 102)});
+  line = window("nodrawable, window 2");
+  CHECK(field(line, "nodrawable") == "0", "nodrawable {} (drained by the line before)", field(line, "nodrawable"));
 }
 
 // made-up sessions: the new section and the oracle get the same records and GPU ends each window
@@ -460,6 +490,7 @@ main() {
   passRecord();
   skipArithmetic();
   fields();
+  noDrawable(); // gw2 (#324)
   parity();
   if (failures) {
     std::printf("present_section_test: %d of %d checks failed\n", failures, checks);

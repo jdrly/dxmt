@@ -1506,6 +1506,30 @@ ArgumentEncodingContext::flushCommandsImpl(CommandBuffer &cmdbuf, uint64_t seqId
         bool stats = gw2::statsEnabled();
         if (stats)
           currentFrameStatistics().next_drawable_interval += data->presenter->lastNextDrawable();
+        // gw2 (#324): the layer gave no drawable. Counted always; with DXMT_PRESENT_SKIP_NIL=1 the
+        // presenter encoded no pass, and nothing is waited for, signalled or presented
+        if (!drawable.handle && gw2::presentNoDrawable()) {
+          if (mtl3) {
+            // the Metal 3 buffer has no pass and no present, but it still signals `shown` as below: the
+            // Metal 4 queue's `frame` signal and its later waits are paired with it
+            const bool now = !gw2_shown_write_ || data->gw2_shown_now;
+            cmdbuf.commitMetal3Present(mtl3_present, mtl3_value, now);
+            if (gw2_shown_write_) {
+              gw2_shown_.flushed(mtl3_value, now);
+              if (!now)
+                gw2::metal4ShownDeferred();
+            }
+          } else {
+            // the skipped pass's fences still pass, as for the encoders this path can't encode
+            auto encoder = cmdbuf.blitCommandEncoder();
+            data->fence_wait.forEach([&](auto id) { encoder.waitForFence(fence_pool_[id]); });
+            data->fence_update.forEach([&](auto id) { encoder.updateFence(fence_pool_[id]); });
+            encoder.endEncoding();
+          }
+          queue_.Hold(seqId, std::move(data->presenter));
+          data->~PresentData();
+          break;
+        }
         if (stats) {
           gw2::presentTrack(drawable.handle, frame_id_);
           // gw2 (#224): the present pass is in the open command buffer, the chunk's last one begun. With
@@ -1584,6 +1608,16 @@ ArgumentEncodingContext::flushCommandsImpl(CommandBuffer &cmdbuf, uint64_t seqId
         bool stats = gw2::statsEnabled();
         if (stats)
           currentFrameStatistics().next_drawable_interval += data->presenter->lastNextDrawable();
+        // gw2 (#324): as on Metal 4: no pass was encoded, its fences pass, nothing is presented
+        if (!drawable.handle && gw2::presentNoDrawable()) {
+          auto encoder = cmdbuf.blitCommandEncoder();
+          data->fence_wait.forEach([&](auto id) { encoder.waitForFence(fence_pool_[id]); });
+          data->fence_update.forEach([&](auto id) { encoder.updateFence(fence_pool_[id]); });
+          encoder.endEncoding();
+          queue_.Hold(seqId, std::move(data->presenter));
+          data->~PresentData();
+          break;
+        }
         // gw2 (#7): when the drawable reaches the screen, for the PRESENT section. gw2 (#224): the
         // present pass is in the chunk's last command buffer
         if (stats) {

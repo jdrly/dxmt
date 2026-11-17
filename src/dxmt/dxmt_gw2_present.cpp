@@ -44,6 +44,8 @@
 //     unknown and when its surface is seen for the first time. A gap in the frame numbers (a lost
 //     record) starts every surface's history over.
 //   - inuse: drawables whose surface IOSurfaceIsInUse called in use when the present was tracked.
+// - gw2 (#324), last: nodrawable, presents whose layer gave no drawable since the last line
+//   (presentNoDrawable, counted with DXMT_PRESENT_SKIP_NIL on or off).
 
 namespace dxmt::gw2 {
 
@@ -87,6 +89,11 @@ uint64_t g_prev_frame = 0, g_shown_frame = 0, g_shown_surface = 0;
 std::atomic<double> g_refresh_ms = 0;
 std::atomic<uint32_t> g_vsyncs = 0;
 std::atomic<double> g_limiter_ms = 0;
+
+// gw2 (#324): =1 only (exactly "1"), off by default
+sw::Switch<bool> kPresentSkipNil{"DXMT_PRESENT_SKIP_NIL", false, sw::legacy::exactlyOne};
+// gw2 (#324): presents whose layer gave no drawable since the last PRESENT line
+std::atomic<uint64_t> g_no_drawable{0};
 
 // section state across windows: the last frame that was shown, the lateness against the limiter's
 // cadence, and the shown frames whose GPU end wasn't final yet
@@ -272,6 +279,8 @@ section(double, uint32_t) {
   else
     text += " drawwait=-";
   text += std::format(" early={} inuse={}", early, inuse);
+  // gw2 (#324): a window that printed no line (no record) leaves its count to the next line
+  text += std::format(" nodrawable={}", g_no_drawable.exchange(0, std::memory_order_relaxed));
   return text;
 }
 
@@ -292,6 +301,25 @@ presentTrack(uint64_t drawable, uint64_t frame) {
       g_lost++;
   }
   g_lost += lost;
+}
+
+bool
+presentSkipNil() {
+  static const bool on = kPresentSkipNil();
+  return on;
+}
+
+bool
+presentNoDrawable() {
+  g_no_drawable.fetch_add(1, std::memory_order_relaxed);
+  static std::atomic<bool> logged{false};
+  if (!logged.exchange(true, std::memory_order_relaxed))
+    Logger::warn(std::format(
+        "Present: the layer gave no drawable (nextDrawable timed out, or its drawable size is zero); {} "
+        "(DXMT_PRESENT_SKIP_NIL; logged once, PRESENT nodrawable counts them)",
+        presentSkipNil() ? "the present is skipped" : "the nil goes to Metal as before"
+    ));
+  return presentSkipNil();
 }
 
 void
