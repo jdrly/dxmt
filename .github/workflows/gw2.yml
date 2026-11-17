@@ -18,7 +18,8 @@
 #   aarch64-windows, i386-windows, aarch64-unix, VERSION, kept 7 days.
 # tests: zsh -n for the zsh scripts, the self-checks of warnings.zsh and tools/gw2/upstream-bridge-calls.py, then tests/gw2/run.zsh all:
 #   pure, and metal on the runner's Metal device. The display tests only build here (#225). A push skips
-#   this job when a green pull request run tested the same tree (the tested job, #273).
+#   this job when a green pull request run tested the same tree and the push's parent is in that
+#   pull request's head (the tested job, #273, #310).
 # ccache (#305): the three builds compile through ccache (.github/gw2/ccache.zsh). A pull request
 #   reads the newest cache of its toolchain, saved by a push to gw2-on-mac. A push never reads
 #   one: the day's first push compiles through an empty ccache and saves it, later ones compile
@@ -98,6 +99,15 @@ jobs:
           persist-credentials: false
       - name: Select Xcode
         run: sudo xcode-select -s "/Applications/Xcode_$XCODE_VERSION.app"
+      # Some runners of the image have Xcode without its Metal Toolchain component, and the shader
+      # compile then fails (run 44025579828). Such a runner downloads it instead.
+      - name: Metal Toolchain
+        run: |
+          if ! xcrun -sdk macosx metal --version >/dev/null 2>&1; then
+            echo "::warning::this runner's Xcode can't run metal, so the job downloads its Metal Toolchain"
+            xcodebuild -downloadComponent MetalToolchain
+          fi
+          xcrun -sdk macosx metal --version
 
       - name: Restore Wine
         id: wine
@@ -249,6 +259,15 @@ jobs:
           persist-credentials: false
       - name: Select Xcode
         run: sudo xcode-select -s "/Applications/Xcode_$XCODE_VERSION.app"
+      # Some runners of the image have Xcode without its Metal Toolchain component, and the shader
+      # compile then fails (run 44025579828). Such a runner downloads it instead.
+      - name: Metal Toolchain
+        run: |
+          if ! xcrun -sdk macosx metal --version >/dev/null 2>&1; then
+            echo "::warning::this runner's Xcode can't run metal, so the job downloads its Metal Toolchain"
+            xcodebuild -downloadComponent MetalToolchain
+          fi
+          xcrun -sdk macosx metal --version
 
       # What the build links against and what the checks compare with: the engine's winemac.so and
       # ntdll.so, its ntdll.dll and import libraries for both arches and its own DXMT (the tree and
@@ -450,8 +469,11 @@ jobs:
           if-no-files-found: error
 
   # gw2 (#273): whether a green pull request run tested this push's tree. Then the push skips
-  # Native tests, which that run ran on the same files. A lookup that fails counts as "not
-  # tested", so the tests run.
+  # Native tests, which that run ran on the same files: every job checks out the pull request's
+  # head, not GitHub's merge. The job also asks that gw2-on-mac before the push (the commit's
+  # parent) is an ancestor of that head (#310). A pull request's run takes its workflow from the
+  # merge into gw2-on-mac, so only then were the run's steps the head's own. Any other push, and a
+  # lookup that fails, run the tests.
   tested:
     name: Tested tree
     runs-on: ubuntu-24.04
@@ -472,9 +494,11 @@ jobs:
           green=0
           if [[ $GITHUB_EVENT_NAME == push ]]; then
             tree=$(gh api "repos/$GH_REPO/commits/$COMMIT" -q .commit.tree.sha) || tree=""
+            parent=$(gh api "repos/$GH_REPO/commits/$COMMIT" -q '.parents[0].sha // empty') || parent=""
             while read -r pr head; do
-              [[ -n $pr && -n $tree ]] || continue
+              [[ -n $pr && -n $tree && -n $parent ]] || continue
               [[ $(gh api "repos/$GH_REPO/commits/$head" -q .commit.tree.sha) == "$tree" ]] || continue
+              [[ $(gh api "repos/$GH_REPO/compare/$parent...$head" -q .status) == ahead ]] || continue
               run=$(gh api "repos/$GH_REPO/actions/workflows/gw2.yml/runs?event=pull_request&status=success&head_sha=$head" \
                 -q '.workflow_runs[0].html_url // empty') || run=""
               if [[ -n $run ]]; then

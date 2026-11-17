@@ -1174,6 +1174,9 @@ so only the first run after a version change builds LLVM (about 25 minutes per a
   with the test's reason. It never counts as a pass. The Metal 4 paths are still tested only on my Mac.
   The display tests (`present_cursor_test`) only build here, with `tests/gw2/run.zsh display --build-only`.
   A push skips this job when a green pull request run tested the same tree (the `tested` job, #273).
+  The push's parent also has to be an ancestor of that pull request's head (#310). Every job checks out
+  the head, but a pull request's run takes its workflow from GitHub's merge into `gw2-on-mac`, so only
+  then did it run the head's own steps.
 - **ccache** (#305, [ADR 0016](adr/0016-ccache-for-pull-request-builds.md)): the three builds compile
   through ccache 4.14.3, ccache's own macOS release pinned by sha256, set up by `.github/gw2/ccache.zsh`.
   The cross files name their compilers, so a directory of links named like them, ahead of `PATH` in the
