@@ -16,6 +16,7 @@
 //   (0 < ms <= 1000), off); default = DXMT_PRESENT_DEADLINE's own value.
 
 #include <climits>
+#include <cmath>
 #include <cstdint>
 #include <string>
 
@@ -35,5 +36,13 @@ void controlLogPending();
 // -1 one refresh, 0 off, > 0 that many µs. One relaxed atomic load.
 constexpr int32_t kControlUnset = INT32_MIN;
 int32_t controlPresentDeadlineUs();
+
+// gw2 (#314): the longest present deadline, for the control file's present_deadline and for
+// DXMT_PRESENT_DEADLINE. A deadline is 0 (off) or a finite number of ms up to this.
+constexpr double kMaxPresentDeadlineMs = 1000.0;
+inline bool
+presentDeadlineInRange(double ms) {
+  return std::isfinite(ms) && ms >= 0 && ms <= kMaxPresentDeadlineMs;
+}
 
 } // namespace dxmt::gw2
