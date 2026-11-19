@@ -71,6 +71,45 @@ If two sources conflict, report the conflict instead of silently choosing one.
   once that verdict has no open `Blocker` or `High`. An upstream sync is the exception: it merges
   with a merge commit, so upstream's commits stay ancestors. I don't review code by hand.
 
+## The Mac run
+
+GitHub's runner has no Metal 4 and runs its jobs clamped to the utility band. Eight tests show
+something only on a Mac with Metal 4: `mtl4_bridge_test`, `mtl4_queue_test`,
+`mtl4_specialize_test`, `paired_replay_test`, `presenter_layer_set_test`, the Metal 4 halves of
+`chunk_submission_test` and `mtl4fx_test`, and `thread_priority_test`. The Mac run is
+`tests/gw2/run.zsh metal` on such a Mac. It runs those eight and the three Metal tests the runner
+passes too. The pure tests print on a Mac what they print on the runner, so the Mac run leaves them
+out.
+
+A pull request owes the Mac run only when it touches one of these paths:
+
+- `src/winemetal/`, but not `src/winemetal/unix/cache.c` or `src/winemetal/unix/visibility_slots.h`
+- `src/dxmt/dxmt_gw2_mtl4_*`
+- `src/dxmt/dxmt_gw2_submission.*`
+- `src/dxmt/dxmt_presenter.*`
+- `src/dxmt/dxmt_gw2_present.*`
+- `src/dxmt/dxmt_command.metal` and `src/dxmt/dxmt_command_constants.hpp`
+- `src/dxmt/dxmt_gw2_lifetime.*`
+- `src/dxmt/dxmt_gw2_residency.*`
+- the eight tests' own files in `tests/gw2/`
+- `tests/gw2/run.zsh`
+
+The present paths are there because of `presenter_layer_set_test`. It compiles the present
+shaders from `dxmt_command.metal` and its constants and checks the pixels they write, and it runs
+`DXMT_PRESENT_SKIP_NIL=1` on real Metal, where `dxmt_gw2_present.*` decides the skips. Pure tests
+compile `dxmt_gw2_present.*` too, but only with the switch unset. The two files left out of
+`src/winemetal/` are covered by pure tests the runner runs (`cache_dir_test`,
+`cache_enumerate_test`, `visibility_slots_test`).
+
+A pull request that owes the run starts with "Needs the Mac run: `tests/gw2/run.zsh metal`" and
+claims no result of it. It merges before the run, as
+[ADR 0007](../docs/gw2/adr/0007-metal-4-changes-merge-with-their-switch-off.md) says. Any other
+pull request owes no Mac run, whatever its issue says.
+
+A Mac run can't show anything about the PE-only code: `src/dxmt/dxmt_context.*`,
+`src/dxmt/dxmt_command_queue.*` and `src/d3d11/d3d11_*`. No native test compiles it. A change
+there owes a session in the game.
+
 ## Code review
 
 - Read the issue and its UAT before the diff.
@@ -148,7 +187,7 @@ The decisions these rules rest on, and the ones a change must stay consistent wi
   upstream, not a pull request, an issue, a comment or a finding.
 - [ADR 0007](../docs/gw2/adr/0007-metal-4-changes-merge-with-their-switch-off.md): Metal 4,
   bridge and chunk-submission changes merge with their switch off; a default flips after the
-  Metal tests ran on a Mac.
+  Metal tests ran on a Mac ([The Mac run](#the-mac-run)).
 - [ADR 0008](../docs/gw2/adr/0008-0.2-presents-metal-4-frames-through-a-metal-3-command-buffer.md):
   0.2 presents Metal 4 frames through a Metal 3 command buffer, and 0.1.x keeps the Metal 4
   present.

@@ -7,8 +7,9 @@
 #
 # A test registers in its own header. Every tests/gw2/*_test.* with these lines is one test:
 #
-#   // gw2-test: pure          (no Metal device needed) or: metal, or: display (a window on a display in
-#                              a GUI session; only by name, never in all)
+#   // gw2-test: pure          (no Metal device needed) or: metal (a Metal device, or a real Mac; the
+#                              Mac run), or: display (a window on a display in a GUI session; only
+#                              by name, never in all)
 #   // gw2-build: <command>    zsh, run from the checkout's root; several lines run as one script.
 #                              $OUT is the test's output path (a file in the runner's directory; a
 #                              test may write $OUT_<suffix> files too), $T that directory

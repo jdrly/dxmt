@@ -1293,8 +1293,9 @@ whether the arm64 build should take the engine's floor too.
 
 `tests/gw2/run.zsh [pure|metal|display|all] [--build-only] [--meson <build dir>]` (X1) builds and runs
 every registered test under `tests/gw2/`, on the Mac, with no Wine and no game. The CI runs it too
-([CI](#ci)). A test registers in its header: `// gw2-test: pure` (no Metal device), `metal`, or
-`display` (a full-screen window in a GUI session; run only by name, never by `all`). `--build-only`
+([CI](#ci)). A test registers in its header: `// gw2-test: pure` (no Metal device), `metal` (a Metal
+device, or a real Mac as `thread_priority_test` needs; `run.zsh metal` is the Mac run in
+[CONTRIBUTING](../../.github/CONTRIBUTING.md#the-mac-run)), or `display` (a full-screen window in a GUI session; run only by name, never by `all`). `--build-only`
 builds the selected tests and runs none. Then come one or more `// gw2-build:` lines (zsh, from the
 checkout's root, writing `$OUT`) and optional `// gw2-run:` lines (default `"$OUT"`). A failed build or
 a nonzero exit fails the run; exit 77 is *skipped*, never counted as passed; a test without the lines
@@ -1487,7 +1488,7 @@ walk counts nothing, because nothing is listed.
 one's skips, and the switch off, `exact` or an unknown chunk flush as before. A loop of polls without
 `DONOTFLUSH` on a query of the current chunk flushes once and then skips.
 
-`thread_priority_test.c` (#151, pure, arm64 and x86_64) calls `WMTSetThreadBasePrioritySelf(20)`
+`thread_priority_test.c` (#151, metal since #348 for the Mac run, arm64 and x86_64) calls `WMTSetThreadBasePrioritySelf(20)`
 through the PE thunk and the production table, linked with the whole unix side as the Metal 4 tests
 are. Each call runs on a thread first put into the state the wineserver leaves a Wine thread in for
 `THREAD_PRIORITY_NORMAL`, `HIGHEST` or `TIME_CRITICAL` (extended and precedence policies), and the
