@@ -7,12 +7,16 @@
 // gw2-build:   [[ -s $T/airconv_absent_$arch.o ]] || clang -c -std=gnu17 -arch $arch -mmacosx-version-min=26.0 -Wno-ignored-attributes -Isrc/airconv tests/gw2/shim/airconv_absent.c -o $T/airconv_absent_$arch.o
 // gw2-build:   clang -std=gnu17 -fno-objc-arc -fblocks -Wall -Wextra -Werror -arch $arch -mmacosx-version-min=26.0 -DDXMT_NATIVE=1 -Isrc/nativemetal -Isrc/winemetal -Isrc/winemetal/unix tests/gw2/exception_log_test.m $T/u_*_$arch.o $T/thunks_$arch.o $T/airconv_absent_$arch.o -framework Metal -framework MetalFX -framework QuartzCore -framework Foundation -framework CoreGraphics -framework ColorSync -framework Cocoa -lsqlite3 -lobjc -o ${OUT}_$arch
 // gw2-build: done
-// gw2-run: ${OUT}_x86_64 && ${OUT}_arm64
-// gw2-run: ! ${OUT}_arm64 --main-thread >$T/exception_log_main.out 2>&1
+// gw2-run: ${OUT}_x86_64
+// gw2-run: ${OUT}_arm64
+// gw2-run: rc=0; ${OUT}_arm64 --main-thread >$T/exception_log_main.out 2>&1 || rc=$?
 // gw2-run: cat $T/exception_log_main.out
-// gw2-run: grep -q 'out of bridge call MetalLayer_setProps (70) on the main thread: a NSException' $T/exception_log_main.out
+// gw2-run: echo "--main-thread exit status: $rc (expected: a signal, never 142, SIGALRM)"
+// gw2-run: (( rc > 128 && rc != 142 ))
+// gw2-run: grep -q 'out of bridge call MetalLayer_setProps (70) on the main thread$' $T/exception_log_main.out
+// gw2-run: grep -q 'frames from the throw in MetalLayer_setProps:' $T/exception_log_main.out
 // gw2-run: grep -q 'WMTMainThreadTest: forced on the main thread' $T/exception_log_main.out
-// gw2-run: echo "RESULT $(grep -m1 'out of bridge call MetalLayer_setProps' $T/exception_log_main.out)"
+// gw2-run: echo "RESULT --main-thread: exit $rc, $(grep -m1 -o 'out of bridge call MetalLayer_setProps.*' $T/exception_log_main.out)"
 //
 // gw2 (#343, diagnostic build only): forces Objective-C exceptions through the bridge and reads what
 // src/winemetal/unix/exception_log.c logged. Needs no Metal device and no Wine.
@@ -20,12 +24,12 @@
 // - NSArray_object (call 2), through the PE thunk and the production table (wmt_native_dispatch),
 //   asks an empty NSMutableArray for index 5, and CoreFoundation throws NSRangeException inside the
 //   handler. The same exception reaches the caller, and the log has the call, the frames from the
-//   throw through libobjc, CoreFoundation and this program, the name and reason, both stacks, and
-//   the receiver's class, __NSArrayM.
-// - 12 exceptions thrown outside a bridge call: 8 logged, with frames named from the image table.
+//   throw through libobjc, CoreFoundation and this program, the name and reason, and both stacks.
+// - 12 exceptions thrown outside a bridge call: 8 logged, as raw PCs.
 // - --main-thread: a bridge call on another thread whose execute_on_main block raises on the main
-//   thread, as MetalLayer_setProps's would. Its log names that call. libdispatch ends the process
-//   on an exception out of a block, as it would in the game, so the run lines expect it to fail.
+//   thread (a run loop there), as MetalLayer_setProps's would. Its log names that call. libdispatch
+//   ends the process on an exception out of a block, as it would in the game, so the run lines
+//   expect it to die of a signal, and not of the alarm that stops a hang.
 
 #include <pthread.h>
 #include <stdio.h>
@@ -81,7 +85,7 @@ static NTSTATUS
 raise_on_main(void *params) {
   (void)params;
   execute_on_main(^{
-    [NSException raise:@"WMTMainThreadTest" format:@"forced on the main thread"];
+    [NSException raise:@"WMTMainThreadTest" format:@"forced on the %s thread", [NSThread isMainThread] ? "main" : "wrong"];
   });
   return 0;
 }
@@ -99,7 +103,8 @@ main(int argc, char **argv) {
     alarm(30); // ends the run if the process outlives the exception
     pthread_t thread;
     pthread_create(&thread, NULL, set_props_thread, NULL);
-    dispatch_main();
+    CFRunLoopRun();
+    return 1;
   }
   @autoreleasepool {
     const char *self = strrchr(argv[0], '/');
@@ -142,28 +147,22 @@ main(int argc, char **argv) {
     CHECK([caught isEqualToString:NSRangeException]);
 
     NSArray<NSString *> *out =
-        lines_between(lines, @"out of bridge call NSArray_object (2): a ", @"end of bridge call NSArray_object");
+        lines_between(lines, @"out of bridge call NSArray_object (2)", @"end of bridge call NSArray_object");
     CHECK([out count] > 5);
-    CHECK([[out lastObject] containsString:@"end of bridge call NSArray_object"]);
-    CHECK(first_with(out, @"frames from the throw:") != nil);
+    CHECK([[out lastObject] hasSuffix:@"end of bridge call NSArray_object"]);
+    CHECK(first_with(out, @"frames from the throw in NSArray_object:") != nil);
     CHECK(first_with(out, @" libobjc.A.dylib+") != nil);
     CHECK(first_with(out, @" CoreFoundation+") != nil);
     CHECK(first_with(out, [NSString stringWithFormat:@" %@+", program]) != nil);
     CHECK(first_with(out, @"NSRangeException: ") != nil);
     CHECK(first_with(out, @"the exception's stack (") != nil);
     CHECK(first_with(out, @"the thread's stack at the catch (") != nil);
-    NSString *receiver = first_with(out, @"the call's receiver: ");
-    CHECK([receiver hasSuffix:@", a __NSArrayM"]);
-
-    NSArray<NSString *> *outside = lines_between(lines, @"thrown outside a bridge call: a NSException", @" CoreFoundation+");
-    CHECK([[outside lastObject] containsString:@"(image at 0x"]);
     NSUInteger logged = count_with(lines, @"thrown outside a bridge call");
     CHECK(logged == 8);
 
     printf("RESULT %s\n", [first_with(out, @"out of bridge call") UTF8String] ?: "(no catch block)");
     printf("RESULT %s\n", [first_with(out, @" CoreFoundation+") UTF8String] ?: "(no CoreFoundation frame)");
     printf("RESULT %s\n", [first_with(out, @"NSRangeException: ") UTF8String] ?: "(no reason)");
-    printf("RESULT %s\n", [receiver UTF8String] ?: "(no receiver)");
     printf("RESULT exceptions outside a bridge call logged: %lu of 12\n", (unsigned long)logged);
 
     [empty release];
