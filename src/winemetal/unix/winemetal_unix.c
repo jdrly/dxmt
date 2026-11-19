@@ -89,6 +89,7 @@ static NTSTATUS
 _MTLCopyAllDevices(void *obj) {
   struct unixcall_generic_obj_ret *params = obj;
   params->ret = (obj_handle_t)MTLCopyAllDevices();
+  wmt_add_sparse_buffer_tiers((id)params->ret); /* gw2 (#341) */
   return STATUS_SUCCESS;
 }
 
