@@ -7,6 +7,7 @@ winemetal_unix_src = files(
   'mtl4.c', # gw2 (#32)
   'mtl4fx.c', # gw2 (#56)
   'winemetal_gw2.c', # gw2 (#291)
+  'exception_log.c', # gw2 (#343, diagnostic build only)
 )
 # ... and the frameworks and libraries it links, for the same targets
 winemetal_unix_link_args = [

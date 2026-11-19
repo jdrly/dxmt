@@ -3461,11 +3461,31 @@ NTSTATUS _CacheEnumerate(void *obj); /* gw2 (W2/W3) */
 NTSTATUS _WMTSetMetalShaderCachePath(void *obj);
 NTSTATUS _WMTGetMetalShaderCachePath(void *obj); /* gw2 (#46) */
 
+/* gw2 (#343, diagnostic build only): each table entry is a stub that runs the call's handler
+   through wmt_bridge_guarded (exception_log.c), which logs an Objective-C exception leaving the
+   handler and throws it on. */
+NTSTATUS wmt_bridge_guarded(unsigned number, const char *name, const void *handler, void *params);
+
+static const void *const wmt_handlers[] = {
+#define WMT_CALL(number, name, handler) &handler,
+#define WMT_CALL_WOW64(number, name, handler, wow64_handler) &handler,
+#define WMT_RESERVED(number, reserved_by) NULL,
+#include "../winemetal_calls.h"
+};
+
+#define WMT_CALL(number, name, handler)                                                            \
+  static NTSTATUS wmt_guarded_##name(void *params) {                                               \
+    return wmt_bridge_guarded(number, #name, wmt_handlers[number], params);                        \
+  }
+#define WMT_CALL_WOW64(number, name, handler, wow64_handler) WMT_CALL(number, name, handler)
+#define WMT_RESERVED(number, reserved_by)
+#include "../winemetal_calls.h"
+
 /* gw2 (B2, #67): both tables are generated from the call manifest, winemetal_calls.h; a call's
    number is its line there. */
 const void *__wine_unix_call_funcs[] = {
-#define WMT_CALL(number, name, handler) &handler,
-#define WMT_CALL_WOW64(number, name, handler, wow64_handler) &handler,
+#define WMT_CALL(number, name, handler) &wmt_guarded_##name,
+#define WMT_CALL_WOW64(number, name, handler, wow64_handler) &wmt_guarded_##name,
 #define WMT_RESERVED(number, reserved_by) NULL,
 #include "../winemetal_calls.h"
 };
@@ -3489,9 +3509,26 @@ wmt_native_dispatch(enum WMTCall call, void *params) {
 #endif
 
 #ifndef DXMT_NATIVE
-const void *__wine_unix_call_wow64_funcs[] = {
-#define WMT_CALL(number, name, handler) &handler,
+/* gw2 (#343): the wow64 table's stubs, as above; a call without a wow64 handler of its own shares
+   the stub of __wine_unix_call_funcs */
+static const void *const wmt_wow64_handlers[] = {
+#define WMT_CALL(number, name, handler) NULL,
 #define WMT_CALL_WOW64(number, name, handler, wow64_handler) &wow64_handler,
+#define WMT_RESERVED(number, reserved_by) NULL,
+#include "../winemetal_calls.h"
+};
+
+#define WMT_CALL(number, name, handler)
+#define WMT_CALL_WOW64(number, name, handler, wow64_handler)                                       \
+  static NTSTATUS wmt_guarded_wow64_##name(void *params) {                                         \
+    return wmt_bridge_guarded(number, #name " (wow64)", wmt_wow64_handlers[number], params);       \
+  }
+#define WMT_RESERVED(number, reserved_by)
+#include "../winemetal_calls.h"
+
+const void *__wine_unix_call_wow64_funcs[] = {
+#define WMT_CALL(number, name, handler) &wmt_guarded_##name,
+#define WMT_CALL_WOW64(number, name, handler, wow64_handler) &wmt_guarded_wow64_##name,
 #define WMT_RESERVED(number, reserved_by) NULL,
 #include "../winemetal_calls.h"
 };
