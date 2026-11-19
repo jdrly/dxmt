@@ -213,8 +213,9 @@ The decisions these rules rest on, and the ones a change must stay consistent wi
 ## Definition of Done
 
 - [ ] **Clean build.** The `GW2` workflow (`.github/workflows/gw2.yml`) is green on the pull
-      request. It builds x86_64 and i386 the way `scripts/build-dxmt.zsh` (GW2 on Mac) does,
-      without new warnings, builds arm64 for Mach9's engine and runs the native tests. That run is the build gate.
+      request. It builds x86_64 the way `scripts/build-dxmt.zsh` (GW2 on Mac) does (i386 too, on
+      the push after the merge), without new warnings, builds arm64 for Mach9's engine and runs
+      the native tests. That run is the build gate.
       A local build is only for installing and playing, and the run's artifact can replace it
       ([CI](../docs/gw2/README.md#ci)).
 - [ ] **Logged and switchable.** The change writes a log line when it acts (once, or on each
