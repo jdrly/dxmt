@@ -87,13 +87,19 @@ A pull request owes the Mac run only when it touches one of these paths:
 - `src/dxmt/dxmt_gw2_mtl4_*`
 - `src/dxmt/dxmt_gw2_submission.*`
 - `src/dxmt/dxmt_presenter.*`
+- `src/dxmt/dxmt_gw2_present.*`
+- `src/dxmt/dxmt_command.metal` and `src/dxmt/dxmt_command_constants.hpp`
 - `src/dxmt/dxmt_gw2_lifetime.*`
 - `src/dxmt/dxmt_gw2_residency.*`
 - the eight tests' own files in `tests/gw2/`
 - `tests/gw2/run.zsh`
 
-The two files left out of `src/winemetal/` are covered by pure tests the runner runs
-(`cache_dir_test`, `cache_enumerate_test`, `visibility_slots_test`).
+The present paths are there because of `presenter_layer_set_test`. It compiles the present
+shaders from `dxmt_command.metal` and its constants and checks the pixels they write, and it runs
+`DXMT_PRESENT_SKIP_NIL=1` on real Metal, where `dxmt_gw2_present.*` decides the skips. Pure tests
+compile `dxmt_gw2_present.*` too, but only with the switch unset. The two files left out of
+`src/winemetal/` are covered by pure tests the runner runs (`cache_dir_test`,
+`cache_enumerate_test`, `visibility_slots_test`).
 
 A pull request that owes the run starts with "Needs the Mac run: `tests/gw2/run.zsh metal`" and
 claims no result of it. It merges before the run, as

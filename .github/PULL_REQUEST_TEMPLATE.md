@@ -5,6 +5,8 @@ result of it. CONTRIBUTING's "The Mac run" names the eight tests. Any other PR d
 - `src/dxmt/dxmt_gw2_mtl4_*`
 - `src/dxmt/dxmt_gw2_submission.*`
 - `src/dxmt/dxmt_presenter.*`
+- `src/dxmt/dxmt_gw2_present.*`
+- `src/dxmt/dxmt_command.metal` and `src/dxmt/dxmt_command_constants.hpp`
 - `src/dxmt/dxmt_gw2_lifetime.*`
 - `src/dxmt/dxmt_gw2_residency.*`
 - the eight tests' own files in `tests/gw2/`

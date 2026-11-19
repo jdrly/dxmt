@@ -15,15 +15,16 @@ rented on 2026-11-12, whose first use was these tests.
 
 - A pull request that argues for "on" has its default changed to off first. #154 was the first
   (`DXMT_MTL4_TIMESTAMP_REUSE`, PR #189).
-- The top of such a pull request says "Needs the Mac run" with the exact commands, and claims none
-  of them.
 - Since 2026-11-19 (#348) the Mac run is `tests/gw2/run.zsh metal`, and only a pull request that
-  touches one of these paths owes it, whatever its issue says:
+  touches one of these paths owes it, whatever its issue says. Its top says "Needs the Mac run"
+  with that command, and claims no result of it.
 
   - `src/winemetal/`, but not `src/winemetal/unix/cache.c` or `src/winemetal/unix/visibility_slots.h`
   - `src/dxmt/dxmt_gw2_mtl4_*`
   - `src/dxmt/dxmt_gw2_submission.*`
   - `src/dxmt/dxmt_presenter.*`
+  - `src/dxmt/dxmt_gw2_present.*`
+  - `src/dxmt/dxmt_command.metal` and `src/dxmt/dxmt_command_constants.hpp`
   - `src/dxmt/dxmt_gw2_lifetime.*`
   - `src/dxmt/dxmt_gw2_residency.*`
   - the eight tests' own files in `tests/gw2/`
@@ -40,7 +41,8 @@ rented on 2026-11-12, whose first use was these tests.
   `src/dxmt/dxmt_command_queue.*` and `src/d3d11/d3d11_*`, because no native test compiles it. A
   change there owes a session in the game.
 - The change ships in the next 0.2 dev build, which turns every switch on (the app's ADR on dev
-  builds). I play a session with it. Its issue stays open for the Metal run and that session.
+  builds). I play a session with it. Its issue stays open for that session, and for the Mac run when
+  the pull request owes one.
 - A change that can fault the GPU or change lifetimes always ships switch-off.
 - A default flips after both: #153, #154 and #204 became on by default with #301 (PR #302,
   `5a185fb`, 2026-11-17) after a 2.6-hour session with all three on and the Metal run on the rented
