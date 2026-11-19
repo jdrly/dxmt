@@ -1,81 +1,93 @@
 /*
  * gw2 (#343, diagnostic build only, never merged into gw2-on-mac): logs the Objective-C exceptions
  * that pass through the bridge, for #341's sparseBufferTier crash, where wine.log had an empty
- * "First throw call stack".
+ * "First throw call stack". Every line goes to stderr (the game's wine.log) with one write(2),
+ * starts with "winemetal: exception: [<thread id>]" and is cut at 512 bytes. No stdio, no lock.
  *
- * Two logs, both to stderr (the game's wine.log), each line starting with "winemetal: exception:":
- *
- * - At the throw: an exception preprocessor, chained to the one CoreFoundation installed, names the
- *   bridge call running on the thread (or says there is none) and walks the frame pointers from the
- *   throw. It reads every frame through vm_read_overwrite, so a broken chain ends the walk and can't
- *   fault, and it doesn't depend on the pthread stack bounds that Apple's walker keeps to. Thrown
- *   inside a bridge call: the first 32 per process. Outside one (Metal's own threads, blocks on the
- *   main queue): the first 8.
- * - At the bridge: wmt_bridge_guarded runs each call's handler in @try. An exception that leaves the
- *   handler is logged (call, name, reason, the exception's and the thread's stacks, the params
- *   words with the class of each word that is an Objective-C object) and thrown on with @throw, so
- *   what happens next is what happened without this file.
+ * - At the throw, an exception preprocessor chained to CoreFoundation's walks the frame pointers
+ *   from the throw. It reads each frame through vm_read_overwrite, so a broken chain ends the walk
+ *   and can't fault, and it doesn't keep to the pthread stack bounds that Apple's walker keeps to.
+ *   It sends no message, takes no lock and calls no dladdr.
+ *   - Inside a bridge call it only keeps the PCs in a buffer of the thread's, for the catch below.
+ *   - Outside one (an exception thrown and caught on Metal's own threads), it logs the PCs against
+ *     the images captured at load and after each MTLCopyAllDevices, at most 8 per process.
+ * - At the bridge, wmt_bridge_guarded runs each call's handler in @try. When an exception leaves the
+ *   handler, it logs the call, the PCs from the throw named with dladdr, and then, in a @try of its
+ *   own, the exception's name and reason, its stack, the thread's stack, and the class of the
+ *   call's receiver. Then @throw passes the exception on unchanged.
+ * - execute_on_main runs its block on the main thread under the same guard, named for the bridge
+ *   call that asked for it (MetalLayer_setProps, MetalLayer_setColorSpace).
  */
 #include <dlfcn.h>
-#include <malloc/malloc.h>
+#include <mach-o/dyld.h>
+#include <mach-o/loader.h>
 #include <mach/mach.h>
-#include <os/lock.h>
 #include <pthread.h>
+#include <stdarg.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #import <Foundation/Foundation.h>
 #include <objc/objc-exception.h>
 #include <objc/runtime.h>
+#include "exception_log.h"
 
-typedef int NTSTATUS;
-
-#define TAG "winemetal: exception:"
-#define THROWN_IN_CALL_MAX 32
-#define THROWN_OUTSIDE_MAX 8
 #define FRAMES_MAX 64
-#define PARAMS_WORDS 8
+#define THROWN_OUTSIDE_MAX 8
+#define IMAGES_MAX 4096
+#define MTL_COPY_ALL_DEVICES 4 /* winemetal_calls.h */
 
 static __thread const char *current_call;
 static __thread unsigned current_number;
-static __thread int in_log; /* an exception thrown while logging one isn't logged */
-static os_unfair_lock log_lock = OS_UNFAIR_LOCK_INIT;
+static __thread int in_log; /* an exception raised while logging one isn't recorded */
+/* the PCs of the last exception thrown on this thread inside a bridge call */
+static __thread struct {
+  id exception;
+  unsigned count;
+  uintptr_t pcs[FRAMES_MAX];
+} thrown;
+
 static objc_exception_preprocessor previous_preprocessor;
-static _Atomic unsigned thrown_in_call, thrown_outside;
+static _Atomic unsigned thrown_outside;
+
+/* the loaded images: start and end of __TEXT, and dyld's path */
+static struct {
+  uintptr_t start, end;
+  const char *path;
+} images[IMAGES_MAX];
+static _Atomic unsigned image_count;
+static atomic_flag capturing = ATOMIC_FLAG_INIT;
+
+static void __attribute__((format(printf, 1, 2)))
+out(const char *format, ...) {
+  char line[512];
+  uint64_t tid = 0;
+  pthread_threadid_np(NULL, &tid);
+  int n = snprintf(line, sizeof(line) - 1, "winemetal: exception: [%llu] ", (unsigned long long)tid);
+  va_list args;
+  va_start(args, format);
+  int m = vsnprintf(line + n, sizeof(line) - 1 - n, format, args);
+  va_end(args);
+  n = m < 0 ? n : (n + m > (int)sizeof(line) - 2 ? (int)sizeof(line) - 2 : n + m);
+  line[n++] = '\n';
+  (void)!write(2, line, n);
+}
 
 /* one word at addr, or false where it isn't readable */
 static bool
-read_word(uintptr_t addr, uintptr_t *out) {
+read_word(uintptr_t addr, uintptr_t *word) {
   vm_size_t got = 0;
-  return vm_read_overwrite(mach_task_self(), (vm_address_t)addr, sizeof(*out), (vm_address_t)out, &got) ==
+  return vm_read_overwrite(mach_task_self(), (vm_address_t)addr, sizeof(*word), (vm_address_t)word, &got) ==
              KERN_SUCCESS &&
-         got == sizeof(*out);
+         got == sizeof(*word);
 }
 
-static void
-print_address(unsigned index, uintptr_t pc) {
-  Dl_info info;
-  if (dladdr((const void *)pc, &info) && info.dli_fname) {
-    const char *image = strrchr(info.dli_fname, '/');
-    image = image ? image + 1 : info.dli_fname;
-    if (info.dli_sname)
-      fprintf(stderr, TAG "     %2u 0x%016lx %s+0x%lx %s+0x%lx\n", index, (unsigned long)pc, image,
-              (unsigned long)(pc - (uintptr_t)info.dli_fbase), info.dli_sname,
-              (unsigned long)(pc - (uintptr_t)info.dli_saddr));
-    else
-      fprintf(stderr, TAG "     %2u 0x%016lx %s+0x%lx\n", index, (unsigned long)pc, image,
-              (unsigned long)(pc - (uintptr_t)info.dli_fbase));
-  } else {
-    fprintf(stderr, TAG "     %2u 0x%016lx ?\n", index, (unsigned long)pc);
-  }
-}
-
-/* the frame pointer chain from the caller's frame: [fp] is the caller's fp, [fp + 8] the return
-   address. Apple's arm64e code signs return addresses; the pointer is the low 47 bits. */
-static void
-walk_frames(uintptr_t fp) {
+/* the frame pointer chain from fp: [fp] is the caller's fp, [fp + 8] the return address. Apple's
+   arm64e code signs return addresses; the address is the low 47 bits. */
+static unsigned
+walk_frames(uintptr_t fp, uintptr_t *pcs) {
   unsigned n = 0;
   while (fp && !(fp & 7) && n < FRAMES_MAX) {
     uintptr_t next, lr;
@@ -84,30 +96,73 @@ walk_frames(uintptr_t fp) {
 #ifdef __aarch64__
     lr &= 0x00007fffffffffffULL;
 #endif
-    print_address(n++, lr);
+    pcs[n++] = lr;
     if (next <= fp)
       break;
     fp = next;
   }
-  fprintf(stderr, TAG "   %u frames walked\n", n);
+  return n;
 }
 
 static void
-print_exception(id e) {
-  if ([e isKindOfClass:[NSException class]]) {
-    NSException *ex = e;
-    fprintf(stderr, TAG "   %s: %s\n", [[ex name] UTF8String] ?: "(no name)",
-            [[ex reason] UTF8String] ?: "(no reason)");
-  } else {
-    fprintf(stderr, TAG "   a thrown %s, not an NSException\n", object_getClassName(e));
+capture_images(void) {
+  if (atomic_flag_test_and_set(&capturing))
+    return;
+  uint32_t count = _dyld_image_count();
+  unsigned n = 0;
+  for (uint32_t i = 0; i < count && n < IMAGES_MAX; i++) {
+    const struct mach_header_64 *mh = (const struct mach_header_64 *)_dyld_get_image_header(i);
+    const char *path = _dyld_get_image_name(i);
+    if (!mh || !path || mh->magic != MH_MAGIC_64)
+      continue;
+    const struct load_command *lc = (const struct load_command *)(mh + 1);
+    for (uint32_t c = 0; c < mh->ncmds; c++) {
+      if (lc->cmd == LC_SEGMENT_64 && !strncmp(((const struct segment_command_64 *)lc)->segname, "__TEXT", 16)) {
+        images[n].start = (uintptr_t)mh;
+        images[n].end = (uintptr_t)mh + ((const struct segment_command_64 *)lc)->vmsize;
+        images[n].path = path;
+        n++;
+        break;
+      }
+      lc = (const struct load_command *)((const char *)lc + lc->cmdsize);
+    }
   }
+  atomic_store_explicit(&image_count, n, memory_order_release);
+  atomic_flag_clear(&capturing);
 }
 
-static uint64_t
-thread_id(void) {
-  uint64_t tid = 0;
-  pthread_threadid_np(NULL, &tid);
-  return tid;
+static const char *
+base_name(const char *path) {
+  const char *slash = strrchr(path, '/');
+  return slash ? slash + 1 : path;
+}
+
+/* outside a bridge call: the image table only */
+static void
+out_pc_raw(unsigned index, uintptr_t pc) {
+  unsigned count = atomic_load_explicit(&image_count, memory_order_acquire);
+  for (unsigned i = 0; i < count; i++) {
+    if (pc >= images[i].start && pc < images[i].end) {
+      out("     %2u 0x%016lx %s+0x%lx (image at 0x%lx)", index, (unsigned long)pc, base_name(images[i].path),
+          (unsigned long)(pc - images[i].start), (unsigned long)images[i].start);
+      return;
+    }
+  }
+  out("     %2u 0x%016lx ?", index, (unsigned long)pc);
+}
+
+/* in the catch: dladdr */
+static void
+out_pc(unsigned index, uintptr_t pc) {
+  Dl_info info;
+  if (!dladdr((const void *)pc, &info) || !info.dli_fname)
+    out("     %2u 0x%016lx ?", index, (unsigned long)pc);
+  else if (info.dli_sname)
+    out("     %2u 0x%016lx %s+0x%lx %s+0x%lx", index, (unsigned long)pc, base_name(info.dli_fname),
+        (unsigned long)(pc - (uintptr_t)info.dli_fbase), info.dli_sname, (unsigned long)(pc - (uintptr_t)info.dli_saddr));
+  else
+    out("     %2u 0x%016lx %s+0x%lx", index, (unsigned long)pc, base_name(info.dli_fname),
+        (unsigned long)(pc - (uintptr_t)info.dli_fbase));
 }
 
 static id
@@ -116,67 +171,89 @@ preprocess(id e) {
     e = previous_preprocessor(e);
   if (in_log)
     return e;
-  const char *call = current_call;
-  if (call ? atomic_fetch_add(&thrown_in_call, 1) >= THROWN_IN_CALL_MAX
-           : atomic_fetch_add(&thrown_outside, 1) >= THROWN_OUTSIDE_MAX)
+  if (current_call) {
+    thrown.exception = e;
+    thrown.count = walk_frames((uintptr_t)__builtin_frame_address(0), thrown.pcs);
     return e;
-  in_log = 1;
-  os_unfair_lock_lock(&log_lock);
-  if (call)
-    fprintf(stderr, TAG " thrown on thread %llu in bridge call %s (%u)\n", (unsigned long long)thread_id(), call,
-            current_number);
-  else
-    fprintf(stderr, TAG " thrown on thread %llu outside a bridge call\n", (unsigned long long)thread_id());
-  print_exception(e);
-  fprintf(stderr, TAG "   frames from the throw:\n");
-  walk_frames((uintptr_t)__builtin_frame_address(0));
-  fflush(stderr);
-  os_unfair_lock_unlock(&log_lock);
-  in_log = 0;
+  }
+  if (atomic_fetch_add(&thrown_outside, 1) >= THROWN_OUTSIDE_MAX)
+    return e;
+  uintptr_t pcs[FRAMES_MAX];
+  unsigned n = walk_frames((uintptr_t)__builtin_frame_address(0), pcs);
+  out(" thrown outside a bridge call: a %s, %u frames from the throw:", object_getClassName(e), n);
+  for (unsigned i = 0; i < n; i++)
+    out_pc_raw(i, pcs[i]);
   return e;
 }
 
 __attribute__((constructor)) static void
 install_preprocessor(void) {
+  capture_images();
   previous_preprocessor = objc_setExceptionPreprocessor(preprocess);
 }
 
 static void
-print_symbols(const char *what, NSArray<NSString *> *symbols) {
-  fprintf(stderr, TAG "   %s (%lu frames):\n", what, (unsigned long)[symbols count]);
+out_symbols(const char *what, NSArray<NSString *> *symbols) {
+  out("   %s (%lu frames):", what, (unsigned long)[symbols count]);
   for (NSString *s in symbols)
-    fprintf(stderr, TAG "     %s\n", [s UTF8String]);
+    out("     %s", [s UTF8String]);
 }
 
-/* the params words, and the class of each that is an Objective-C object: a malloc block whose isa
-   is a class the runtime lists. Nothing here dereferences a word that isn't one. */
+/* calls named Class_method pass their receiver, an Objective-C object, as the first word of params
+   (winemetal_thunks.h); these few pass an output there instead */
+static bool
+receiver_first(const char *name) {
+  static const char *const outputs[] = {
+      "MTLCaptureManager_sharedCaptureManager",
+      "NSAutoreleasePool_alloc_init",
+      "NSString_string",
+      "NSString_alloc_init",
+  };
+  if (strncmp(name, "MTL", 3) && strncmp(name, "NS", 2) && strncmp(name, "MetalLayer_", 11) &&
+      strncmp(name, "MetalDrawable_", 14))
+    return false;
+  if (!strchr(name, '_') || strchr(name, ' '))
+    return false;
+  for (size_t i = 0; i < sizeof(outputs) / sizeof(outputs[0]); i++)
+    if (!strcmp(name, outputs[i]))
+      return false;
+  return true;
+}
+
 static void
-print_params(const void *params) {
-  int count = objc_getClassList(NULL, 0);
-  Class *classes = count > 0 ? malloc(sizeof(Class) * count) : NULL;
-  if (classes)
-    count = objc_getClassList(classes, count);
-  for (unsigned i = 0; i < PARAMS_WORDS; i++) {
-    uintptr_t word;
-    if (!read_word((uintptr_t)params + i * sizeof(word), &word)) {
-      fprintf(stderr, TAG "   params word %u: unreadable\n", i);
-      break;
-    }
-    const char *kind = "";
-    size_t size = word ? malloc_size((const void *)word) : 0;
-    if (size >= sizeof(uintptr_t)) {
-      Class cls = object_getClass((id)word);
-      kind = "a malloc block, not an object";
-      for (int c = 0; classes && c < count; c++) {
-        if (classes[c] == cls) {
-          kind = class_getName(cls);
-          break;
-        }
-      }
-    }
-    fprintf(stderr, TAG "   params word %u: 0x%016lx %s\n", i, (unsigned long)word, kind);
+log_escape(unsigned number, const char *name, const char *where, id e, const void *params) {
+  if (in_log)
+    return;
+  in_log = 1;
+  out(" out of bridge call %s (%u)%s: a %s", name, number, where, object_getClassName(e));
+  if (thrown.exception == e && thrown.count) {
+    out("   %u frames from the throw:", thrown.count);
+    for (unsigned i = 0; i < thrown.count; i++)
+      out_pc(i, thrown.pcs[i]);
+  } else {
+    out("   no frames kept at the throw for this exception");
   }
-  free(classes);
+  thrown.exception = nil;
+  thrown.count = 0;
+  NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+  @try {
+    if ([e isKindOfClass:[NSException class]]) {
+      NSException *ex = e;
+      out("   %s: %s", [[ex name] UTF8String] ?: "(no name)", [[ex reason] UTF8String] ?: "(no reason)");
+      out_symbols("the exception's stack", [ex callStackSymbols]);
+    }
+    out_symbols("the thread's stack at the catch", [NSThread callStackSymbols]);
+    if (params && receiver_first(name)) {
+      uint64_t receiver = *(const uint64_t *)params;
+      out("   the call's receiver: 0x%llx, a %s", (unsigned long long)receiver,
+          receiver ? object_getClassName((id)receiver) : "nil");
+    }
+  } @catch (id inner) {
+    out("   logging stopped: a %s raised while logging", object_getClassName(inner));
+  }
+  [pool drain];
+  out(" end of bridge call %s", name);
+  in_log = 0;
 }
 
 NTSTATUS
@@ -189,28 +266,41 @@ wmt_bridge_guarded(unsigned number, const char *name, const void *handler, void 
     NTSTATUS status = ((NTSTATUS(*)(void *))handler)(params);
     current_call = outer_call;
     current_number = outer_number;
+    if (number == MTL_COPY_ALL_DEVICES)
+      capture_images(); /* the GPU's driver bundle is loaded now */
     return status;
   } @catch (id e) {
     current_call = outer_call;
     current_number = outer_number;
-    if (!in_log) {
-      in_log = 1;
-      os_unfair_lock_lock(&log_lock);
-      @autoreleasepool {
-        fprintf(stderr, TAG " out of bridge call %s (%u) on thread %llu\n", name, number,
-                (unsigned long long)thread_id());
-        print_exception(e);
-        if ([e isKindOfClass:[NSException class]])
-          print_symbols("the exception's stack", [(NSException *)e callStackSymbols]);
-        print_symbols("the thread's stack at the catch", [NSThread callStackSymbols]);
-        fflush(stderr);
-        print_params(params);
-        fprintf(stderr, TAG " end of bridge call %s\n", name);
-        fflush(stderr);
-      }
-      os_unfair_lock_unlock(&log_lock);
-      in_log = 0;
-    }
+    log_escape(number, name, "", e, params);
+    @throw;
+  }
+}
+
+const char *
+wmt_bridge_call(unsigned *number) {
+  *number = current_number;
+  return current_call;
+}
+
+void
+wmt_main_block_guarded(unsigned number, const char *name, dispatch_block_t block) {
+  if (!name) {
+    block();
+    return;
+  }
+  const char *outer_call = current_call;
+  unsigned outer_number = current_number;
+  current_call = name;
+  current_number = number;
+  @try {
+    block();
+    current_call = outer_call;
+    current_number = outer_number;
+  } @catch (id e) {
+    current_call = outer_call;
+    current_number = outer_number;
+    log_escape(number, name, " on the main thread", e, NULL);
     @throw;
   }
 }

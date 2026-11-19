@@ -19,6 +19,7 @@
 #include "mtl4.h"
 #include "mtl4fx.h" // gw2 (#56)
 #include "winemetal_gw2_unix.h"
+#include "exception_log.h" /* gw2 (#343, diagnostic build only) */
 
 typedef int NTSTATUS;
 #define STATUS_SUCCESS 0
@@ -29,7 +30,13 @@ execute_on_main(dispatch_block_t block) {
   if ([NSThread isMainThread]) {
     block();
   } else {
-    dispatch_sync(dispatch_get_main_queue(), block);
+    /* gw2 (#343, diagnostic build only): on the main thread, under the guard of the bridge call
+       that asked */
+    unsigned number;
+    const char *call = wmt_bridge_call(&number);
+    dispatch_sync(dispatch_get_main_queue(), ^{
+      wmt_main_block_guarded(number, call, block);
+    });
   }
 }
 
@@ -3462,10 +3469,8 @@ NTSTATUS _WMTSetMetalShaderCachePath(void *obj);
 NTSTATUS _WMTGetMetalShaderCachePath(void *obj); /* gw2 (#46) */
 
 /* gw2 (#343, diagnostic build only): each table entry is a stub that runs the call's handler
-   through wmt_bridge_guarded (exception_log.c), which logs an Objective-C exception leaving the
+   through wmt_bridge_guarded (exception_log.h), which logs an Objective-C exception leaving the
    handler and throws it on. */
-NTSTATUS wmt_bridge_guarded(unsigned number, const char *name, const void *handler, void *params);
-
 static const void *const wmt_handlers[] = {
 #define WMT_CALL(number, name, handler) &handler,
 #define WMT_CALL_WOW64(number, name, handler, wow64_handler) &handler,
