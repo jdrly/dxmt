@@ -1,10 +1,10 @@
 # gw2 (#162): my fork's checks, on GitHub's runners instead of my Mac. Upstream's ci.yml stays as it
 # is (it runs for main only), so an upstream sync doesn't conflict with this file.
 #
-# build (x86_64, i386): the build scripts/build-dxmt.zsh (GW2 on Mac) makes, release, NVEXT off,
-#   with Homebrew's mingw-w64, meson $MESON_VERSION and LLVM $LLVM_VERSION for macOS
-#   $MACOSX_DEPLOYMENT_TARGET. A compiler warning that .github/gw2/warnings-<arch>.txt doesn't
-#   list fails it. Wine's import libraries, winebuild and winemac.so come from 3Shain's Wine
+# build (x86_64, and i386 for a push only since #347): the build scripts/build-dxmt.zsh (GW2 on
+#   Mac) makes, release, NVEXT off, with Homebrew's mingw-w64, meson $MESON_VERSION and LLVM
+#   $LLVM_VERSION for macOS $MACOSX_DEPLOYMENT_TARGET. A compiler warning that
+#   .github/gw2/warnings-<arch>.txt doesn't list fails it. Wine's import libraries, winebuild and winemac.so come from 3Shain's Wine
 #   $WINE_VERSION, as in upstream's CI, since the CrossOver engine I build against locally isn't
 #   downloadable. .github/gw2/unix-call.py shows what a bridge thunk calls (#205).
 #   .github/gw2/footprint.zsh prints the fork's footprint in upstream's files into the summary.
@@ -28,7 +28,8 @@
 #   without ccache, so what Publish uploads is always compiled in its own run.
 # lint: actionlint for the workflows.
 # artifact: the installable build of the commit (as build-dxmt.zsh stages it: x86_64-windows,
-#   i386-windows, x86_64-unix, VERSION), kept 7 days, for scripts/dxmt-use.zsh save.
+#   i386-windows, x86_64-unix, VERSION), kept 7 days, for scripts/dxmt-use.zsh save. A pull
+#   request's has no i386-windows.
 # publish (#194, #215): after every other job is green, packs dxmt-arm64-<commit> into
 #   dxmt-arm64-<commit>.tar.xz and prints its files and sha256. For a push to gw2-on-mac it adds the
 #   archive to the pre-release arm64-builds, the one release this workflow makes, never marked latest,
@@ -90,11 +91,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - arch: x86_64
-            cross: build-win64.txt
-          - arch: i386
-            cross: build-win32.txt
+        # gw2 (#347): i386 for a push only. A pull request's run has no Build i386 job, so
+        # Artifact and Publish don't wait for one.
+        include: >-
+          ${{ fromJSON(github.event_name == 'push' &&
+          '[{"arch":"x86_64","cross":"build-win64.txt"},{"arch":"i386","cross":"build-win32.txt"}]' ||
+          '[{"arch":"x86_64","cross":"build-win64.txt"}]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

@@ -1118,7 +1118,8 @@ GitHub's runners, so nothing has to build on my Mac. The macOS jobs run on the `
 with Xcode 27.2, the one I build with. The toolchains are cached under their versions,
 so only the first run after a version change builds LLVM (about 25 minutes per architecture).
 
-- **Build x86_64, Build i386**: the build `scripts/build-dxmt.zsh` (GW2 on Mac) makes. Release,
+- **Build x86_64, Build i386**: the build `scripts/build-dxmt.zsh` (GW2 on Mac) makes. Build i386
+  runs for a push only (#347): it builds 0.1.x's i386 DLLs, and 0.2's come from Build arm64. Release,
   stripped, NVEXT off, Homebrew's mingw-w64 (GCC 16.2, which the job checks: `MINGW_GCC_VERSION`),
   meson 1.12.1, LLVM 15.0.7 built for macOS 26.0 as airconv needs it. Wine's import libraries,
   `winebuild`, `winemac.so` and `ntdll.so` come from 3Shain's Wine 8.16, as in upstream's CI. My
@@ -1217,10 +1218,10 @@ so only the first run after a version change builds LLVM (about 25 minutes per a
 - **Lint**: actionlint on the workflow (`.github/actionlint.yaml` names the `xcode-27` label it doesn't
   know yet).
 - **Artifact** `dxmt-<commit>`: the build as `build-dxmt.zsh` stages it (`x86_64-windows`,
-  `i386-windows`, `x86_64-unix`, `VERSION`, the licenses), kept 7 days. On a pull request the commit is
-  the branch's head, not GitHub's merge commit, so `VERSION` and the startup line name it. To play it,
-  unzip it into a directory, then run `scripts/dxmt-use.zsh save <name> <dir>` and
-  `scripts/dxmt-use.zsh <name>`.
+  `i386-windows`, `x86_64-unix`, `VERSION`, the licenses), kept 7 days. A pull request's has no
+  `i386-windows` (#347). On a pull request the commit is the branch's head, not GitHub's merge
+  commit, so `VERSION` and the startup line name it. To play it, unzip it into a directory, then
+  run `scripts/dxmt-use.zsh save <name> <dir>` and `scripts/dxmt-use.zsh <name>`.
 - **Artifact** `dxmt-arm64-<commit>` (#182, #215): the arm64 build in the layout of the engine's
   `lib/wine/dxgi/dxmt` (`aarch64-windows`, `i386-windows`, `aarch64-unix`), the licenses and `VERSION`:
   its first line is the `git describe` that `d3d11.dll` carries, then `commit:`, `engine:` (the tarball,
