@@ -170,6 +170,9 @@ The decisions these rules rest on, and the ones a change must stay consistent wi
   through a ccache that only pushes save, and pushes don't read it.
 - [ADR 0017](../docs/gw2/adr/0017-the-shown-wait-before-the-first-back-buffer-write-is-the-default.md):
   the shown wait before the first back-buffer write (ADR 0009) is the default.
+- [ADR 0018](../docs/gw2/adr/0018-a-buffer-class-without-sparse-buffer-tier-gets-it-from-the-bridge.md):
+  a buffer class without `sparseBufferTier` gets it from the bridge, returning
+  `MTLBufferSparseTierNone`; no fallback, no switch.
 
 ## Definition of Done
 
