@@ -1,6 +1,6 @@
 # Metal 4, bridge and chunk-submission changes merge with their switch off
 
-Decided 2026-11-11, narrowed 2026-11-12. Status: accepted.
+Decided 2026-11-11, narrowed 2026-11-12 and 2026-11-19. Status: accepted.
 
 GitHub's runners have no Metal 4, and by day the agents work on my Linux server, which has no macOS.
 So a change to the Metal 4 path, the bridge (`src/winemetal`) or chunk submission can be built and
@@ -17,6 +17,28 @@ rented on 2026-11-12, whose first use was these tests.
   (`DXMT_MTL4_TIMESTAMP_REUSE`, PR #189).
 - The top of such a pull request says "Needs the Mac run" with the exact commands, and claims none
   of them.
+- Since 2026-11-19 (#348) the Mac run is `tests/gw2/run.zsh metal`, and only a pull request that
+  touches one of these paths owes it, whatever its issue says:
+
+  - `src/winemetal/`, but not `src/winemetal/unix/cache.c` or `src/winemetal/unix/visibility_slots.h`
+  - `src/dxmt/dxmt_gw2_mtl4_*`
+  - `src/dxmt/dxmt_gw2_submission.*`
+  - `src/dxmt/dxmt_presenter.*`
+  - `src/dxmt/dxmt_gw2_lifetime.*`
+  - `src/dxmt/dxmt_gw2_residency.*`
+  - the eight tests' own files in `tests/gw2/`
+  - `tests/gw2/run.zsh`
+
+  The eight tests are the ones that show something only on a Mac with Metal 4, listed in
+  [CONTRIBUTING](../../../.github/CONTRIBUTING.md#the-mac-run). `thread_priority_test` needs a real
+  Mac, not Metal 4, and is registered as `metal` so that run keeps it. At `28e574e` the runner
+  printed passed 38, skipped 8 (run 44603994415) and the rented M1 passed 46, skipped 0: the 34
+  pure tests printed the same on both, so a Mac run of them repeats the runner. Of the 85 pull
+  requests merged between 2026-11-11 and the audit on 2026-11-19, at most 34 touched one of these
+  paths.
+- A Mac run shows nothing about the PE-only code, `src/dxmt/dxmt_context.*`,
+  `src/dxmt/dxmt_command_queue.*` and `src/d3d11/d3d11_*`, because no native test compiles it. A
+  change there owes a session in the game.
 - The change ships in the next 0.2 dev build, which turns every switch on (the app's ADR on dev
   builds). I play a session with it. Its issue stays open for the Metal run and that session.
 - A change that can fault the GPU or change lifetimes always ships switch-off.
@@ -45,3 +67,5 @@ rented on 2026-11-12, whose first use was these tests.
 - #154 (PR #189), #185 (PR #192), #205 (PR #213), #301 (PR #302).
 - GW2 on Mac workspace `docs/research/dxmt-metal-run-2026-11-12.md` (the Metal runs on the rented
   M1).
+- GW2 on Mac workspace `advisor-plans/2026-11-19-ci-audit/AUDIT.md`, recommendation 3 (the Mac
+  run's paths, #348).

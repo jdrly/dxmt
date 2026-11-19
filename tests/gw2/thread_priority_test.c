@@ -1,4 +1,4 @@
-// gw2-test: pure
+// gw2-test: metal
 // gw2-build: U=($(sed -n "/^winemetal_unix_src = files(/,/^)/s/^ *'\([a-z0-9_]*\.c\)'.*/\1/p" src/winemetal/unix/meson.build))
 // gw2-build: (( ${#U} >= 1 ))
 // gw2-build: [[ " ${U[*]} " == *" winemetal_unix.c "* ]]
@@ -22,6 +22,9 @@
 // priority is 20 or less: GitHub's macOS runner runs its jobs clamped to the utility band (task and
 // maximum priority 20, as `taskpolicy -c utility` does), where no thread can go above or below 20.
 // A task that is only niced to 20 keeps maximum priority 63 and runs the test.
+//
+// Registered as metal although it needs no Metal 4 (#348): it needs a real Mac, so it belongs in
+// `run.zsh metal`, the Mac run (.github/CONTRIBUTING.md, "The Mac run").
 
 #include <libproc.h>
 #include <mach/mach.h>
