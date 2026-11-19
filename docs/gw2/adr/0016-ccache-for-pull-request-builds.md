@@ -10,7 +10,8 @@ the same toolchain. I estimated 14 to 20 runner minutes and about 5.5 minutes of
 a run, from the logs' phases and an include graph. The first warm run gives the real numbers.
 
 A stale hit would put an object compiled by another compiler into a DLL. ccache hashes the source,
-the command line and every header it includes, so a code change can't hit an old object. What it
+the command line and the headers it recorded at the compile, so a change to any of them can't hit an
+old object (two cases where that list falls short are below). What it
 gets wrong by default is the compiler. It identifies a compiler by the size and time of the file it
 runs, and here that file is a wrapper for llvm-mingw, a link into the Cellar for Homebrew's GCC and
 the `/usr/bin` shim for Apple's clang. None of them changes when the compiler does. So
@@ -44,11 +45,11 @@ today, changes what a fresh compile reads while the recorded header and the sour
 A published build can't risk either. On 2026-11-17 I estimated that reading the cache would take a
 push run from about 8.3 to about 4.2 minutes.
 
-A pull request's key is its head commit, which no push saves, so its restore takes the newest cache
-of its job and toolchain by prefix. Only pushes save a compiler cache. GitHub scopes a pull
-request's caches to its own ref, which the default branch never reads, and no pull request step
-saves one. A rerun of a push finds its commit's key taken: `actions/cache/save` warns and keeps the
-first.
+A pull request's restore tries its key, its head commit, first. No push saves that key, so the
+restore takes the newest cache of its job and toolchain by prefix. Only pushes save a compiler
+cache. GitHub scopes a pull request's caches to its own ref, which the default branch never reads,
+and no pull request step saves one. A rerun of a push finds its commit's key taken:
+`actions/cache/save` logs that and keeps the first, and the step passes.
 
 ## Consequences
 
