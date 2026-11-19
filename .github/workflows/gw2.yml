@@ -22,9 +22,10 @@
 #   this job when a green pull request run tested the same tree and the push's parent is in that
 #   pull request's head (the tested job, #273, #310).
 #   .github/gw2/switch-table.py holds docs/gw2/README.md's switch table to the switches src/ reads.
-# ccache (#305): the three builds compile through ccache (.github/gw2/ccache.zsh). Every run reads
-#   the newest cache of its toolchain, and every push to gw2-on-mac saves one under its commit
-#   (#346). Only pushes save, so a push reads only what an earlier push compiled.
+# ccache (#305): the three builds compile through ccache (.github/gw2/ccache.zsh). A pull request
+#   reads the newest cache of its toolchain. A push never reads one, so what Publish uploads is
+#   always compiled in its own run: it compiles through an empty ccache and saves it under its
+#   commit (#346), except Build i386's, which no pull request reads.
 # lint: actionlint for the workflows.
 # artifact: the installable build of the commit (as build-dxmt.zsh stages it: x86_64-windows,
 #   i386-windows, x86_64-unix, VERSION), kept 7 days, for scripts/dxmt-use.zsh save. A pull
@@ -183,15 +184,15 @@ jobs:
           fi
           echo "mingw GCC $v"
 
-      # ccache (#305, #346). A run reads the newest cache of its toolchain, and a push saves one
-      # under its commit.
+      # ccache (#305, #346). A pull request reads the newest cache of its toolchain. A push never
+      # reads one: it compiles through an empty ccache and saves it under its commit.
       - name: Fetch ccache
         run: .github/gw2/toolchain.zsh fetch "https://github.com/ccache/ccache/releases/download/v$CCACHE_VERSION/ccache-$CCACHE_VERSION-darwin.tar.gz" "$CCACHE_SHA256" toolchains/ccache --strip-components 1 "ccache-$CCACHE_VERSION-darwin/ccache"
       - name: Compiler cache settings
         id: ccache
         run: .github/gw2/ccache.zsh setup ${{ matrix.arch }} ${{ matrix.cross }}
       - name: Restore the compiler cache
-        id: ccache-restore
+        if: github.event_name == 'pull_request'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           key: ${{ steps.ccache.outputs.key }}
@@ -211,7 +212,7 @@ jobs:
         run: |
           { echo '```'; .github/gw2/ccache.zsh stats; echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Save the compiler cache
-        if: github.event_name == 'push' && github.ref == 'refs/heads/gw2-on-mac' && steps.ccache-restore.outputs.cache-hit != 'true'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/gw2-on-mac' && matrix.arch != 'i386'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           key: ${{ steps.ccache.outputs.key }}
@@ -359,15 +360,15 @@ jobs:
           key: llvm-${{ env.LLVM_VERSION }}-arm64-macos${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ env.LLVM_BUILD }}
           path: toolchains/llvm
 
-      # ccache (#305, #346). A run reads the newest cache of its toolchain, and a push saves one
-      # under its commit.
+      # ccache (#305, #346). A pull request reads the newest cache of its toolchain. A push never
+      # reads one: it compiles through an empty ccache and saves it under its commit.
       - name: Fetch ccache
         run: .github/gw2/toolchain.zsh fetch "https://github.com/ccache/ccache/releases/download/v$CCACHE_VERSION/ccache-$CCACHE_VERSION-darwin.tar.gz" "$CCACHE_SHA256" toolchains/ccache --strip-components 1 "ccache-$CCACHE_VERSION-darwin/ccache"
       - name: Compiler cache settings
         id: ccache
         run: PATH="$PATH:$PWD/toolchains/llvm-mingw/bin" .github/gw2/ccache.zsh setup arm64 build-arm64ec.txt build-win32.txt
       - name: Restore the compiler cache
-        id: ccache-restore
+        if: github.event_name == 'pull_request'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           key: ${{ steps.ccache.outputs.key }}
@@ -403,7 +404,7 @@ jobs:
         run: |
           { echo '```'; .github/gw2/ccache.zsh stats; echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Save the compiler cache
-        if: github.event_name == 'push' && github.ref == 'refs/heads/gw2-on-mac' && steps.ccache-restore.outputs.cache-hit != 'true'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/gw2-on-mac'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           key: ${{ steps.ccache.outputs.key }}

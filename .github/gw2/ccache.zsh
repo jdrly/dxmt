@@ -65,7 +65,7 @@ setup() {
   } >>"$GITHUB_ENV"
   # meson finds ccache on PATH by itself for the build machine's cc and c++ (airconv, winemetal.so)
   print -r -- "${ccache:h}" >>"$GITHUB_PATH"
-  # one cache per commit (#346): every push saves one, and a run restores the newest by prefix
+  # one cache per commit (#346): a push saves one, and a pull request restores the newest by prefix
   {
     print -r -- "prefix=ccache-$name-$id-"
     print -r -- "key=ccache-$name-$id-$COMMIT"

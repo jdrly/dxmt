@@ -1201,16 +1201,18 @@ so only the first run after a version change builds LLVM (about 25 minutes per a
   through ccache 4.14.3, ccache's own macOS release pinned by sha256, set up by `.github/gw2/ccache.zsh`.
   The cross files name their compilers, so a directory of links named like them, ahead of `PATH` in the
   `Build` step, puts ccache in front. meson adds it to Apple's `cc` and `c++` by itself, since it finds
-  ccache on `PATH`. There is one cache per job, toolchain and commit (#346). Every run reads the newest
-  of its job and toolchain, and only a push to `gw2-on-mac` saves one, so a push reads only what an
-  earlier push compiled. The toolchain text (Xcode and its clang, the macOS floor, the llvm-mingw pin,
+  ccache on `PATH`. There is one cache per job, toolchain and commit (#346). Every push to
+  `gw2-on-mac` saves one, `Build i386`'s excepted, and only a pull request reads one, the newest of its
+  job and toolchain. The toolchain text (Xcode and its clang, the macOS floor, the llvm-mingw pin,
   each cross compiler's resolved path and version line, not the runner image's version) is in the
   cache key and, as `CCACHE_COMPILERCHECK`, in every object's hash.
   ccache's own check looks at the file it runs, which is a wrapper for llvm-mingw, a link for Homebrew's
   GCC and a shim for Apple's clang, so it wouldn't see a compiler change. llvm-mingw's path holds no
-  version, so its pin is in every job's text, and a new pin starts new caches for all three. A
-  published archive can hold objects from the cache, compiled by an earlier push. Each build job
-  prints ccache's statistics for its own run and the runner's core count into its summary.
+  version, so its pin is in every job's text, and a new pin starts new caches for all three. A push
+  never reads a cache: it compiles through an empty ccache and saves it, so a published archive is
+  always its commit's own compile. A hit trusts headers recorded at an earlier compile, and ADR 0016
+  says where that can go stale. Each build job prints ccache's statistics for its own run and the
+  runner's core count into its summary.
   `Build arm64` prints one block per tree (#307). Its ARM64X tree, `build-arm64`, compiles in ccache's
   depend mode (`CCACHE_DEPEND=1`): clang refuses `-marm64x` together with `-E`, so ccache couldn't
   preprocess the tree's 106 cross compiles and cached none of them. Depend mode reads the headers
