@@ -13,8 +13,9 @@
 #       and the cache's size. A Build step with two trees gives each its own log, named
 #       <$CCACHE_STATSLOG without .log>-<tree>.log (#307), and each log is printed under its name
 #
-# A cache is valid for one toolchain: the runner image, Xcode's clang, the macOS floor, the
-# llvm-mingw pin and the cross compilers, each by its resolved path and version line. That text is
+# A cache is valid for one toolchain: Xcode and its clang, the macOS floor, the llvm-mingw pin and
+# the cross compilers, each by its resolved path and version line. The runner image's version isn't
+# in it (#346): a new image with the same compilers keeps the cache. That text is
 # in the cache's key and, as CCACHE_COMPILERCHECK, in every object's hash. ccache's own check is the
 # size and time of the file it runs. That is a wrapper script for llvm-mingw, a link into the Cellar
 # for Homebrew's GCC and the /usr/bin shim for Apple's clang, so it would see none of them change.
@@ -43,7 +44,6 @@ setup() {
   done
   "$ccache" --version | head -1
   {
-    print -r -- "image ${ImageOS:-?} ${ImageVersion:-?}"
     xcodebuild -version | tr '\n' ' '
     print
     print -r -- "cc: $(/usr/bin/cc --version | head -1)"
@@ -65,20 +65,17 @@ setup() {
   } >>"$GITHUB_ENV"
   # meson finds ccache on PATH by itself for the build machine's cc and c++ (airconv, winemetal.so)
   print -r -- "${ccache:h}" >>"$GITHUB_PATH"
+  # one cache per commit (#346): a push saves one, and a pull request restores the newest by prefix
   {
     print -r -- "prefix=ccache-$name-$id-"
-    print -r -- "key=ccache-$name-$id-$(date -u +%Y%m%d)"
+    print -r -- "key=ccache-$name-$id-$COMMIT"
   } >>"$GITHUB_OUTPUT"
-  print -r -- "cache key: ccache-$name-$id-$(date -u +%Y%m%d)"
+  print -r -- "cache key: ccache-$name-$id-$COMMIT"
 }
 
 stats() {
   local log
   print -r -- "cores: $(sysctl -n hw.ncpu)"
-  if [[ ${CCACHE_DISABLE:-} == 1 ]]; then
-    print -r -- "ccache was off: this push's day has a cache already"
-    return 0
-  fi
   for log in ${CCACHE_STATSLOG%.log}*.log(N); do
     print -r -- "${log:t}:"
     CCACHE_STATSLOG=$log "$ccache" --show-log-stats --verbose

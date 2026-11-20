@@ -23,9 +23,9 @@
 #   pull request's head (the tested job, #273, #310).
 #   .github/gw2/switch-table.py holds docs/gw2/README.md's switch table to the switches src/ reads.
 # ccache (#305): the three builds compile through ccache (.github/gw2/ccache.zsh). A pull request
-#   reads the newest cache of its toolchain, saved by a push to gw2-on-mac. A push never reads
-#   one: the day's first push compiles through an empty ccache and saves it, later ones compile
-#   without ccache, so what Publish uploads is always compiled in its own run.
+#   reads the newest cache of its toolchain. A push never reads one, so what Publish uploads is
+#   always compiled in its own run: it compiles through an empty ccache and saves it under its
+#   commit (#346), except Build i386's, which no pull request reads.
 # lint: actionlint for the workflows.
 # artifact: the installable build of the commit (as build-dxmt.zsh stages it: x86_64-windows,
 #   i386-windows, x86_64-unix, VERSION), kept 7 days, for scripts/dxmt-use.zsh save. A pull
@@ -184,9 +184,8 @@ jobs:
           fi
           echo "mingw GCC $v"
 
-      # ccache (#305). A pull request reads the newest cache of its toolchain. A push never reads
-      # one, so what Publish uploads is compiled in its own run: the day's first push compiles
-      # through an empty ccache and saves it, the later ones compile without ccache.
+      # ccache (#305, #346). A pull request reads the newest cache of its toolchain. A push never
+      # reads one: it compiles through an empty ccache and saves it under its commit.
       - name: Fetch ccache
         run: .github/gw2/toolchain.zsh fetch "https://github.com/ccache/ccache/releases/download/v$CCACHE_VERSION/ccache-$CCACHE_VERSION-darwin.tar.gz" "$CCACHE_SHA256" toolchains/ccache --strip-components 1 "ccache-$CCACHE_VERSION-darwin/ccache"
       - name: Compiler cache settings
@@ -199,17 +198,6 @@ jobs:
           key: ${{ steps.ccache.outputs.key }}
           restore-keys: ${{ steps.ccache.outputs.prefix }}
           path: ${{ runner.temp }}/ccache
-      - name: Look for today's compiler cache
-        if: github.event_name == 'push'
-        id: ccache-today
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          key: ${{ steps.ccache.outputs.key }}
-          path: ${{ runner.temp }}/ccache
-          lookup-only: true
-      - name: Compile without ccache
-        if: github.event_name == 'push' && steps.ccache-today.outputs.cache-hit == 'true'
-        run: echo "CCACHE_DISABLE=1" >>"$GITHUB_ENV"
 
       - name: Build
         run: |
@@ -224,7 +212,7 @@ jobs:
         run: |
           { echo '```'; .github/gw2/ccache.zsh stats; echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Save the compiler cache
-        if: github.event_name == 'push' && github.ref == 'refs/heads/gw2-on-mac' && steps.ccache-today.outputs.cache-hit != 'true'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/gw2-on-mac' && matrix.arch != 'i386'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           key: ${{ steps.ccache.outputs.key }}
@@ -372,9 +360,8 @@ jobs:
           key: llvm-${{ env.LLVM_VERSION }}-arm64-macos${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ env.LLVM_BUILD }}
           path: toolchains/llvm
 
-      # ccache (#305). A pull request reads the newest cache of its toolchain. A push never reads
-      # one, so what Publish uploads is compiled in its own run: the day's first push compiles
-      # through an empty ccache and saves it, the later ones compile without ccache.
+      # ccache (#305, #346). A pull request reads the newest cache of its toolchain. A push never
+      # reads one: it compiles through an empty ccache and saves it under its commit.
       - name: Fetch ccache
         run: .github/gw2/toolchain.zsh fetch "https://github.com/ccache/ccache/releases/download/v$CCACHE_VERSION/ccache-$CCACHE_VERSION-darwin.tar.gz" "$CCACHE_SHA256" toolchains/ccache --strip-components 1 "ccache-$CCACHE_VERSION-darwin/ccache"
       - name: Compiler cache settings
@@ -387,17 +374,6 @@ jobs:
           key: ${{ steps.ccache.outputs.key }}
           restore-keys: ${{ steps.ccache.outputs.prefix }}
           path: ${{ runner.temp }}/ccache
-      - name: Look for today's compiler cache
-        if: github.event_name == 'push'
-        id: ccache-today
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          key: ${{ steps.ccache.outputs.key }}
-          path: ${{ runner.temp }}/ccache
-          lookup-only: true
-      - name: Compile without ccache
-        if: github.event_name == 'push' && steps.ccache-today.outputs.cache-hit == 'true'
-        run: echo "CCACHE_DISABLE=1" >>"$GITHUB_ENV"
 
       - name: Build
         run: |
@@ -428,7 +404,7 @@ jobs:
         run: |
           { echo '```'; .github/gw2/ccache.zsh stats; echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Save the compiler cache
-        if: github.event_name == 'push' && github.ref == 'refs/heads/gw2-on-mac' && steps.ccache-today.outputs.cache-hit != 'true'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/gw2-on-mac'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           key: ${{ steps.ccache.outputs.key }}
