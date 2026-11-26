@@ -156,9 +156,12 @@ Metal4Submission::commit(uint64_t seq) {
 // (flushCommands' end, Mtl4Encoding::encodeSignalEvent), ordered after every commit and every
 // queue-level wait of the chunk. A chunk with no command buffer, or with queue waits or signals after
 // its last one, is complete only once it fired: wait for it too before anything of the chunk is
-// released. gw2 (#77): then the commits' records (Metal 4 has no command buffer logs).
+// released. gw2 (#77): then the commits' records (Metal 4 has no command buffer logs). gw2 (#227): with
+// DXMT_MTL4_PRESENT=mtl3, the chunk's Metal 3 present buffers follow as its last records, read as
+// Metal 3 reads its buffers (`timing`: their GPU times), so the GPU line and PRESENT's aftergpu read
+// the present pass.
 CompletedChunk
-Metal4Submission::wait(uint64_t seq, uint64_t completion_value, bool) {
+Metal4Submission::wait(uint64_t seq, uint64_t completion_value, bool timing) {
   auto &commits = queue_->wait(seq);
   if (completion_event_.signaledValue() < completion_value) {
     bool warned = false;
@@ -168,9 +171,15 @@ Metal4Submission::wait(uint64_t seq, uint64_t completion_value, bool) {
       warned = true;
     }
   }
-  records_.resize(commits.size());
+  auto &presents = queue_->metal3Presents(seq);
+  records_.resize(commits.size() + presents.size());
   for (size_t i = 0; i < commits.size(); i++)
     gw2::recordMetal4Commit(*commits[i], uint32_t(i), records_[i]);
+  for (size_t i = 0; i < presents.size(); i++) {
+    size_t at = commits.size() + i;
+    Metal3Buffer buffer{presents[i].cmdbuf};
+    gw2::recordMetal3Commit(buffer, uint32_t(at), at + 1 == records_.size(), timing, records_[at]);
+  }
   return issue(seq, records_, gw2::ReportOrder::CommitOrder);
 }
 

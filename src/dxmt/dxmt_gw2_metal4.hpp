@@ -26,6 +26,10 @@ bool metalfxSpatialSwapchain();
 // default) gives them an empty command buffer of their own after it, as before #154.
 bool mtl4TimestampReuse();
 
+// gw2 (#227): DXMT_MTL4_PRESENT=mtl3 (exactly), read once per process: a queue on Metal 4 presents
+// through a Metal 3 command buffer (gw2::Mtl4Queue::enableMetal3Present). A test switch for #223, off.
+bool mtl4PresentMetal3();
+
 // Whether this process's queues take the Metal 4 path (DXMT_METAL4 on, on a device that has it).
 bool metal4Active();
 

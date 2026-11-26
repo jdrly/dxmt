@@ -16,6 +16,7 @@ std::atomic<uint64_t> g_commits{0}, g_max_buffers{0}, g_max_alloc_bytes{0}, g_sl
 // part 3: the replays' counters (WMTMtl4BindingState)
 std::atomic<uint64_t> g_res_adds{0}, g_missed{0}, g_unsupported{0}, g_bytes_overflow{0}, g_blit_barriers{0};
 std::atomic<bool> g_any{false};
+std::atomic<bool> g_present_mtl3{false}; // gw2 (#227): DXMT_MTL4_PRESENT=mtl3 in use
 
 void
 atomicMax(std::atomic<uint64_t> &target, uint64_t value) {
@@ -30,12 +31,13 @@ metal4Section(double, uint32_t) {
     return {};
   return std::format(
       "commits={} buffers={} allocmb={:.2f} slow={} errors={} resadds={} missed={} unsupported={} bytesover={} "
-      "blitbar={}",
+      "blitbar={} present={}",
       g_commits.exchange(0, std::memory_order_relaxed), g_max_buffers.exchange(0, std::memory_order_relaxed),
       g_max_alloc_bytes.exchange(0, std::memory_order_relaxed) / 1e6, g_slow.exchange(0, std::memory_order_relaxed),
       g_errors.exchange(0, std::memory_order_relaxed), g_res_adds.exchange(0, std::memory_order_relaxed),
       g_missed.exchange(0, std::memory_order_relaxed), g_unsupported.exchange(0, std::memory_order_relaxed),
-      g_bytes_overflow.exchange(0, std::memory_order_relaxed), g_blit_barriers.exchange(0, std::memory_order_relaxed)
+      g_bytes_overflow.exchange(0, std::memory_order_relaxed), g_blit_barriers.exchange(0, std::memory_order_relaxed),
+      g_present_mtl3.load(std::memory_order_relaxed) ? "mtl3" : "mtl4"
   );
 }
 
@@ -196,6 +198,43 @@ Mtl4Queue::signalEvent(WMT::Event event, uint64_t value) {
   queue_.signalEvent(event, value);
 }
 
+bool
+Mtl4Queue::enableMetal3Present() {
+  frame_event_ = device_.newSharedEvent();
+  shown_event_ = device_.newSharedEvent();
+  metal3_present_ = frame_event_ && shown_event_;
+  if (metal3_present_)
+    g_present_mtl3.store(true, std::memory_order_relaxed);
+  return metal3_present_;
+}
+
+void
+Mtl4Queue::addMetal3Present(uint64_t seq, WMT::CommandBuffer cmdbuf, uint64_t value) {
+  slot(seq).metal3.push_back(Metal3Present{WMT::Reference<WMT::CommandBuffer>(cmdbuf), value});
+}
+
+// gw2 (#227): a Metal 3 present buffer completed. If it failed, `shown` may never reach its value, and
+// every later commit of this queue waits for it: the buffer is complete, nothing of it runs any more,
+// so the CPU signals `shown` in its place. Its error itself is reported from the chunk's records.
+void
+Mtl4Queue::waitMetal3(const Metal3Present &present) {
+  WMT::CommandBuffer cmdbuf = present.cmdbuf;
+  cmdbuf.waitUntilCompleted();
+  if (cmdbuf.status() != WMTCommandBufferStatusError)
+    return;
+  g_errors.fetch_add(1, std::memory_order_relaxed);
+  if (shown_event_.signaledValue() >= present.value)
+    return;
+  shown_event_.signalValue(present.value);
+  static std::atomic<uint32_t> s_lines{0};
+  if (s_lines.fetch_add(1, std::memory_order_relaxed) < 8)
+    Logger::err(std::format(
+        "Metal 4: the Metal 3 present command buffer {} failed before signalling; signalled it from the CPU so "
+        "the Metal 4 queue goes on (DXMT_MTL4_PRESENT=mtl3; only the first 8 are logged)",
+        present.value
+    ));
+}
+
 void
 Mtl4Queue::waitCommit(Mtl4Commit *commit, uint64_t seq) {
   // a GPU fault or hang shows here instead of as a silent stall; Metal 3's waitUntilCompleted
@@ -223,6 +262,10 @@ Mtl4Queue::waitCommit(Mtl4Commit *commit, uint64_t seq) {
 const std::vector<Mtl4Commit *> &
 Mtl4Queue::wait(uint64_t seq) {
   auto &s = slot(seq);
+  // gw2 (#227): the Metal 3 presents first. Each needs only this queue's commits before it, and the
+  // commits after it wait for its `shown`, which waitMetal3 signals itself after a failure
+  for (auto &present : s.metal3)
+    waitMetal3(present);
   for (auto *commit : s.commits) {
     waitCommit(commit, seq);
     if (commit->feedback.error)
@@ -239,6 +282,7 @@ Mtl4Queue::retire(uint64_t seq) {
   for (auto *commit : s.commits)
     recycle(commit);
   s.commits.clear();
+  s.metal3.clear(); // gw2 (#227): completed in wait(seq)
   // nothing of the chunk runs any more: its allocations may leave (and be freed); gw2 (#153), with
   // DXMT_MTL4_DEVICE_RESIDENCY=1: an empty set stays as it is
   if (!mtl4DeviceResidencyRequested() || s.residency.allocationCount()) {
@@ -255,6 +299,15 @@ void
 Mtl4Queue::waitIdle() {
   if (!event_)
     return;
+  // gw2 (#227): the Metal 3 presents first, in present order (each one's `frame` comes after the
+  // `shown` of the one before), so a failed one can't leave the queue waiting for `shown`
+  std::vector<const Metal3Present *> presents;
+  for (auto &slot : slots_)
+    for (auto &present : slot.metal3)
+      presents.push_back(&present);
+  std::sort(presents.begin(), presents.end(), [](auto *a, auto *b) { return a->value < b->value; });
+  for (auto *present : presents)
+    waitMetal3(*present);
   uint64_t last = committed_value_.load(std::memory_order_acquire);
   if (last)
     event_.waitUntilSignaledValue(last, ~0ull);

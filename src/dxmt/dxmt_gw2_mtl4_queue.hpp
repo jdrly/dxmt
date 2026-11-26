@@ -17,6 +17,11 @@
 //   DXMT_MTL4_DEVICE_RESIDENCY=1: what the device's set holds stays out of it, and it is committed,
 //   used and emptied only while it has allocations.
 // - Command buffers and records are recycled (an MTL4CommandBuffer is reusable after completion).
+// - gw2 (#227), DXMT_MTL4_PRESENT=mtl3: the present goes through a Metal 3 command buffer of the
+//   command queue's MTLCommandQueue (Mtl4Encoding::beginMetal3Present). Two shared events order the
+//   queues: this queue signals `frame` after the frame's commits, the Metal 3 buffer waits for it and
+//   signals `shown` after the present pass, and this queue waits for `shown` before its next commit.
+//   The Metal 3 buffer belongs to its chunk's slot: wait() waits for it, retire() lets it go.
 //
 // Threads: begin/commit/waitForEvent/signalEvent on the encode thread, for the chunk being encoded;
 // wait/retire on the finish thread, for the oldest chunk not retired; waitIdle at teardown, once
@@ -128,10 +133,46 @@ public:
   void waitForEvent(WMT::Event event, uint64_t value);
   void signalEvent(WMT::Event event, uint64_t value);
 
+  // --- gw2 (#227): DXMT_MTL4_PRESENT=mtl3
+
+  // Before the first chunk: makes the `frame` and `shown` events. False if Metal gave none; the
+  // present then stays Metal 4's.
+  bool enableMetal3Present();
+  bool
+  metal3Present() const {
+    return metal3_present_;
+  }
+  // encode thread: the value of the next Metal 3 present (both events reach it once per present)
+  uint64_t
+  nextMetal3PresentValue() {
+    return ++metal3_value_;
+  }
+  WMT::SharedEvent
+  frameEvent() const {
+    return frame_event_;
+  }
+  WMT::SharedEvent
+  shownEvent() const {
+    return shown_event_;
+  }
+  // A committed Metal 3 present command buffer and the value it signals `shown` at
+  struct Metal3Present {
+    WMT::Reference<WMT::CommandBuffer> cmdbuf;
+    uint64_t value = 0;
+  };
+  // encode thread: chunk `seq` committed `cmdbuf`; the slot holds it until retire(seq)
+  void addMetal3Present(uint64_t seq, WMT::CommandBuffer cmdbuf, uint64_t value);
+  // finish thread, after wait(seq): chunk `seq`'s Metal 3 present buffers, completed, in commit order
+  const std::vector<Metal3Present> &
+  metal3Presents(uint64_t seq) {
+    return slot(seq).metal3;
+  }
+
   // --- finish thread
 
   // Blocks until every command buffer chunk `seq` committed has completed and its feedback is
-  // written; returns them in commit order (valid until retire(seq)).
+  // written; returns them in commit order (valid until retire(seq)). gw2 (#227): the chunk's Metal 3
+  // present buffers are waited for first (metal3Presents).
   const std::vector<Mtl4Commit *> &wait(uint64_t seq);
 
   // After wait(seq), once nothing reads the records: releases their errors, resets the slot's
@@ -149,6 +190,7 @@ private:
     WMT::Reference<WMT::ResidencySet> residency;
     std::vector<Mtl4Commit *> commits; // committed, in order
     Mtl4Commit *open = nullptr;        // begun, not committed
+    std::vector<Metal3Present> metal3; // gw2 (#227): committed Metal 3 presents, in order
   };
 
   Slot &
@@ -159,8 +201,13 @@ private:
   Mtl4Commit *acquire();
   void recycle(Mtl4Commit *commit);
   void waitCommit(Mtl4Commit *commit, uint64_t seq);
+  void waitMetal3(const Metal3Present &present);
 
   WMT::Device device_;
+  // gw2 (#227)
+  WMT::Reference<WMT::SharedEvent> frame_event_, shown_event_;
+  bool metal3_present_ = false;
+  uint64_t metal3_value_ = 0; // encode thread
   WMT::Reference<WMT::MTL4CommandQueue> queue_;
   WMT::Reference<WMT::SharedEvent> event_;
   uint64_t next_value_ = 0; // encode thread; the last value committed
