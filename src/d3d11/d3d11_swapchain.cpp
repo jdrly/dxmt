@@ -1510,6 +1510,16 @@ public:
   bool stats_enabled_ = gw2::statsReadNow(); // gw2 (#60): the DXMT_STATS switch, read per swapchain
   std::atomic<double> stats_deadline_ms_ = 0;
   std::atomic<uint32_t> stats_sync_interval_ = 0;
+  uint64_t stats_vblank_ = 0; // gw2 (#250): VBlankCalls() at the window's start
+
+  // gw2 (#250): the process's WaitForVBlank calls so far, counted in dxgi.dll
+  uint64_t VBlankCalls() {
+    Com<IDXGIAdapter> adapter;
+    Com<IMTLDXGIAdapter> mtl_adapter;
+    if (FAILED(dxgi_device_->GetAdapter(&adapter)) || FAILED(adapter->QueryInterface(IID_PPV_ARGS(&mtl_adapter))))
+      return stats_vblank_;
+    return mtl_adapter->GetVBlankCalls();
+  }
 
   void LogStatistics(const FrameStatistics &frame) {
     auto ms = [](clock::duration d) { return std::chrono::duration<double, std::milli>(d).count(); };
@@ -1517,6 +1527,7 @@ public:
     auto &w = stats_;
     if (w.frames == 0 && w.start == clock::time_point{}) {
       w.start = w.last = now;
+      stats_vblank_ = VBlankCalls();
       return;
     }
     w.frame_max = std::max(w.frame_max, ms(now - w.last));
@@ -1552,15 +1563,17 @@ public:
     if (elapsed < 2000)
       return;
     double n = w.frames;
+    uint64_t vblank = VBlankCalls();
     Logger::info(std::format(
         "STATS fps={:.1f} ms={:.1f}/{:.1f} cb={:.1f} rp={:.1f}(+{:.1f} merged) clear={:.1f} split={:.2f} "
         "drawable={:.2f}/{:.1f} commit={:.2f}/{:.1f} sync={:.1f}x {:.2f}/{:.1f} stall={} "
-        "encode={:.2f}+{:.2f}/{:.1f} latency={:.1f}/{:.1f} maxlatency={} interval={} deadline={:.1f}",
+        "encode={:.2f}+{:.2f}/{:.1f} latency={:.1f}/{:.1f} maxlatency={} interval={} deadline={:.1f} vblank={:.1f}",
         n * 1000 / elapsed, elapsed / n, w.frame_max, w.cb / n, (w.rp - w.rp_opt) / n, w.rp_opt / n, w.clear / n,
         w.split / n, w.drawable / n, w.drawable_max, w.commit / n, w.commit_max, w.sync / n, w.sync_ms / n,
         w.sync_max, w.stall, w.prepare / n, w.flush / n, w.flush_max, w.latency / n, w.latency_max, frame.latency,
-        stats_sync_interval_.load(), stats_deadline_ms_.load()
+        stats_sync_interval_.load(), stats_deadline_ms_.load(), (vblank - stats_vblank_) * 1000 / elapsed
     ));
+    stats_vblank_ = vblank;
     Logger::info(std::format(
         "STATS2 nextdrawable={:.2f}/{:.1f} present=plain:{}/deadline:{}/after:{} wait={:.2f}/{:.1f}", w.next_drawable / n,
         w.next_drawable_max, w.br_plain, w.br_deadline, w.br_after, w.wait / n, w.wait_max

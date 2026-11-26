@@ -7,6 +7,7 @@
 #include "thread.hpp"
 #include "util_hash.hpp"
 #include "dxmt_sampler.hpp"
+#include "dxmt_gw2_cmds.hpp"
 
 DEFINE_COM_INTERFACE("03629ed8-bcdd-4582-8997-3817209a34f4",
                      IMTLD3D11RasterizerState)
@@ -14,6 +15,8 @@ DEFINE_COM_INTERFACE("03629ed8-bcdd-4582-8997-3817209a34f4",
   virtual void SetupRasterizerState(wmtcmd_render_setrasterizerstate& cmd) = 0;
   virtual bool IsScissorEnabled() = 0;
   virtual uint32_t UAVOnlySampleCount() = 0;
+  // gw2 (#266): the state's depth bias, decided at creation, for ENCODE's d24bias and d24slope
+  virtual dxmt::gw2::DepthBias Gw2DepthBias() = 0;
 };
 
 DEFINE_COM_INTERFACE("b01aaffa-b4d3-478a-91be-6195f215aaba",

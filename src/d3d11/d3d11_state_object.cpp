@@ -398,7 +398,8 @@ public:
   friend class MTLD3D11DeviceContext;
   MTLD3D11RasterizerState(MTLD3D11Device *device,
                           const D3D11_RASTERIZER_DESC2 *desc)
-      : ManagedDeviceChild<IMTLD3D11RasterizerState>(device), desc_(*desc), d3d10_(this) {}
+      : ManagedDeviceChild<IMTLD3D11RasterizerState>(device), desc_(*desc), d3d10_(this),
+        gw2_depth_bias_(gw2::depthBiasOf(desc->DepthBias, desc->SlopeScaledDepthBias)) {}
   ~MTLD3D11RasterizerState() {};
 
   HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid,
@@ -503,9 +504,12 @@ public:
 
   uint32_t UAVOnlySampleCount() { return std::max(1u, desc_.ForcedSampleCount); }
 
+  gw2::DepthBias Gw2DepthBias() { return gw2_depth_bias_; }
+
 private:
   const D3D11_RASTERIZER_DESC2 desc_;
   MTLD3D10RasterizerState d3d10_;
+  const gw2::DepthBias gw2_depth_bias_;
 };
 
 // DepthStencilState
@@ -701,6 +705,13 @@ HRESULT StateObjectCache<D3D11_RASTERIZER_DESC2, IMTLD3D11RasterizerState>::
 
   cache.emplace(*pRasterizerDesc, std::make_unique<MTLD3D11RasterizerState>(
                                       device, pRasterizerDesc));
+  // gw2 (#266): a RASTER line per distinct state with a depth bias; the cache makes each one once
+  if (gw2::statsEnabled()) {
+    auto line = gw2::rasterLine(pRasterizerDesc->DepthBias, pRasterizerDesc->SlopeScaledDepthBias,
+                                pRasterizerDesc->DepthBiasClamp, pRasterizerDesc->FillMode, pRasterizerDesc->CullMode);
+    if (!line.empty())
+      Logger::info(line);
+  }
   cache.at(*pRasterizerDesc)->QueryInterface(IID_PPV_ARGS(ppRasterizerState));
 
   return S_OK;

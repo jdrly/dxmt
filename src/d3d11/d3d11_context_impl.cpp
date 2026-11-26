@@ -4475,6 +4475,9 @@ public:
   // gw2 (#4): the speculative commit's bookkeeping, for CMDS and DXMT_PROMOTE_FLUSH_MIN. The
   // immediate context publishes gw2_front_ at each commit; a deferred context's never is.
   gw2::FrontCounters gw2_front_;
+  // gw2 (#266): the bias the current render pass's draws get into an emulated D24 target, set in PreDraw
+  // when the rasterizer state is applied; stays None with DXMT_STATS=0
+  gw2::DepthBias gw2_d24_bias_ = gw2::DepthBias::None;
   gw2::CommitWhy promote_why_ = gw2::CommitWhy::Other; // the request behind promote_flush
   uint32_t promote_requests_ = 0;                       // requests since the last commit
   bool promote_nodefer_ = false;                        // one of them is never deferred
@@ -5470,6 +5473,12 @@ public:
         cmd.type = WMTRenderCommandSetRasterizerState;
         state->SetupRasterizerState(cmd);
       });
+      // gw2 (#266): here at each new render pass (SwitchToRenderEncoder dirties the state) and each
+      // RSSetState; the depth target can't change without a new pass
+      if (gw2_front_.on) {
+        auto dsv = state_.OutputMerger.DSV.ptr();
+        gw2_d24_bias_ = gw2::d24PassBias(dsv && dsv->texture_->gw2EmulatedD24, state->Gw2DepthBias());
+      }
     }
     if (dirty_state.any(DirtyState::BlendFactorAndStencilRef)) {
       EmitST([r = state_.OutputMerger.BlendFactor[0], g = state_.OutputMerger.BlendFactor[1],
@@ -5533,6 +5542,7 @@ public:
       });
     }
     dirty_state.clrAll();
+    gw2_front_.d24Draw(gw2_d24_bias_, state_.InputAssembler.Topology); // gw2 (#266)
     if (cmdbuf_state == CommandBufferState::TessellationRenderPipelineReady) {
       UploadShaderStageResourceBinding<PipelineStage::Vertex, PipelineKind::Tessellation>();
       UploadShaderStageResourceBinding<PipelineStage::Pixel, PipelineKind::Tessellation>();

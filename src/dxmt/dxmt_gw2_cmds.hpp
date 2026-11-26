@@ -6,7 +6,8 @@
 //   (close), and what DXMT_PROMOTE_FLUSH_MIN did with speculative commits (promote).
 // - ENCODE (the encode thread): draws, dispatches, pipeline binds, useResource commands, Metal
 //   encoders by type and per chunk, attachment load/store bytes by aspect, and why the encoder
-//   optimizer refused to merge two render passes.
+//   optimizer refused to merge two render passes. Its d24bias and d24slope (#266) are counted by the
+//   immediate context (FrontCounters) and handed over with CMDS's counters.
 //
 // Counting is plain increments on the thread that owns the counters (the immediate context, under
 // the device's call order; the encode thread). Each side hands its totals over once per chunk with
@@ -15,6 +16,7 @@
 
 #include "dxmt_gw2_stats.hpp"
 #include <cstdint>
+#include <string>
 
 namespace dxmt::gw2 {
 
@@ -108,12 +110,50 @@ extern const char *const kGetDataNames[kGetDataKindCount];
 // DXMT_GETDATA_SKIP_FLUSH. Only with DXMT_STATS; any thread (a relaxed atomic add).
 void getDataPoll(GetDataKind kind, bool flushed);
 
+// gw2 (#266): a rasterizer state's depth bias, decided when the state is created. Constant: a nonzero
+// DepthBias (with or without a slope); SlopeOnly: only a SlopeScaledDepthBias.
+enum class DepthBias : uint8_t { None, Constant, SlopeOnly };
+
+constexpr DepthBias
+depthBiasOf(int32_t depth_bias, float slope_scaled_depth_bias) {
+  return depth_bias ? DepthBias::Constant : slope_scaled_depth_bias != 0.0f ? DepthBias::SlopeOnly : DepthBias::None;
+}
+
+// The bias the draws of a render pass get into an emulated D24 target (MTL_DXGI_FORMAT_EMULATED_D24, stored
+// as Depth32Float_Stencil8): None when the pass's depth target isn't one.
+constexpr DepthBias
+d24PassBias(bool emulated_d24_target, DepthBias state) {
+  return emulated_d24_target ? state : DepthBias::None;
+}
+
+// A D3D11_PRIMITIVE_TOPOLOGY that rasterizes triangles: triangle lists and strips, with or without adjacency,
+// and patch lists (33 to 64). By the topology the game set: a geometry or domain shader's output isn't
+// looked at.
+constexpr bool
+trianglesTopology(uint32_t topology) {
+  return topology == 4 || topology == 5 || topology == 12 || topology == 13 || (topology >= 33 && topology <= 64);
+}
+
+// The RASTER line of a rasterizer state with a DepthBias or SlopeScaledDepthBias, empty for one with neither.
+// fill and cull are D3D11_FILL_MODE and D3D11_CULL_MODE.
+std::string rasterLine(int32_t depth_bias, float slope_scaled_depth_bias, float depth_bias_clamp, uint32_t fill,
+                       uint32_t cull);
+
 // The render thread's counters (the immediate context).
 struct FrontCounters {
   bool on = statsEnabled(); // DXMT_STATS, cached: off, nothing is counted
   uint32_t commit[kCommitWhyCount] = {};
   uint32_t pass_close[kPassCloseCount] = {};
   uint32_t promote[kPromoteCount] = {};
+  // gw2 (#266): ENCODE's d24bias and d24slope, the triangle draws into an emulated D24 target with a
+  // constant bias, and with only a slope
+  uint32_t d24_bias = 0, d24_slope = 0;
+  // One draw. pass_bias is the context's d24PassBias, None with DXMT_STATS=0: one branch per draw.
+  void
+  d24Draw(DepthBias pass_bias, uint32_t topology) {
+    if (pass_bias != DepthBias::None && trianglesTopology(topology))
+      (pass_bias == DepthBias::Constant ? d24_bias : d24_slope)++;
+  }
   // Adds the counters to the shared totals and clears them (once per chunk).
   void publish();
 };

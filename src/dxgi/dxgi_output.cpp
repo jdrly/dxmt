@@ -7,6 +7,7 @@
 #include "dxgi_output.hpp"
 #include "dxgi_options.hpp"
 #include "dxmt_format.hpp"
+#include "dxmt_gw2_stats.hpp"
 #include "dxmt_presenter.hpp"
 #include "log/log.hpp"
 #include "util_string.hpp"
@@ -276,7 +277,10 @@ public:
 
   HRESULT
   STDMETHODCALLTYPE
-  WaitForVBlank() final { return S_OK; }
+  WaitForVBlank() final {
+    gw2::vblankCall(); // gw2 (#250): counted for STATS' vblank
+    return S_OK;
+  }
 
   HRESULT
   STDMETHODCALLTYPE
