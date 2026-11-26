@@ -35,9 +35,10 @@ std::atomic<uint64_t> g_pso_counters[(unsigned)PsoCounter::Count];
 
 namespace {
 
-// Sampled lookups (one in 16 per thread, like Draw in PACE): bucket depth and lock time.
+// Sampled lookups (one in 16, like Draw in PACE): bucket depth and lock time. gw2 (#28): the
+// counter is the cache's (shared by its lookups on every thread), not a `thread_local`: emulated TLS
+// costs about 0.1 us an access under Rosetta, on about 1,000 lookups a frame.
 constexpr uint32_t kPsoSampleEvery = 16;
-thread_local uint32_t t_pso_sample_counter = 0;
 std::atomic<uint64_t> g_pso_samples;
 std::atomic<uint64_t> g_pso_depth_sum;
 std::atomic<uint64_t> g_pso_depth_max;
@@ -53,11 +54,11 @@ drain(std::atomic<uint64_t> &v) {
 // the lock_guard's (declared later), so `held` ends after the unlock.
 class PsoLookupSample {
 public:
-  PsoLookupSample() {
+  explicit PsoLookupSample(std::atomic<uint32_t> &counter) {
     if (!statsEnabled())
       return;
     stats_ = true;
-    if ((t_pso_sample_counter++ % kPsoSampleEvery) == 0)
+    if ((counter.fetch_add(1, std::memory_order_relaxed) % kPsoSampleEvery) == 0)
       t0_ = nowNs();
   }
 
@@ -339,6 +340,9 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
   PipelineMap<MTLCompiledTessellationMeshPipeline> pipelines_ts_;
   dxmt::mutex mutex_ts_;
 
+  // gw2 (#28): PsoLookupSample's 1-in-16 counter, for the three lookups above
+  std::atomic<uint32_t> gw2_pso_sample_counter_ = 0;
+
   std::unordered_map<ManagedShader, std::unique_ptr<MTLCompiledComputePipeline>> pipelines_cs_;
   dxmt::mutex mutex_cs_;
 
@@ -504,7 +508,7 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
 
   void GetGraphicsPipeline(MTL_GRAPHICS_PIPELINE_DESC *pDesc,
                            MTLCompiledGraphicsPipeline **ppPipeline) override {
-    gw2::PsoLookupSample sample; // gw2 (#6)
+    gw2::PsoLookupSample sample(gw2_pso_sample_counter_); // gw2 (#6, #28)
     std::lock_guard<dxmt::mutex> lock(mutex_);
     sample.locked(pipelines_, *pDesc);
 
@@ -527,7 +531,7 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
   void GetGeometryPipeline(
       MTL_GRAPHICS_PIPELINE_DESC *pDesc,
       MTLCompiledGeometryPipeline **ppPipeline) override {
-    gw2::PsoLookupSample sample; // gw2 (#6)
+    gw2::PsoLookupSample sample(gw2_pso_sample_counter_); // gw2 (#6, #28)
     std::lock_guard<dxmt::mutex> lock(mutex_gs_);
     sample.locked(pipelines_gs_, *pDesc);
 
@@ -550,7 +554,7 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
   void GetTessellationPipeline(MTL_GRAPHICS_PIPELINE_DESC * pDesc,
                                    MTLCompiledTessellationMeshPipeline *
                                        *ppPipeline) override {
-    gw2::PsoLookupSample sample; // gw2 (#6)
+    gw2::PsoLookupSample sample(gw2_pso_sample_counter_); // gw2 (#6, #28)
     std::lock_guard<dxmt::mutex> lock(mutex_ts_);
     sample.locked(pipelines_ts_, *pDesc);
 

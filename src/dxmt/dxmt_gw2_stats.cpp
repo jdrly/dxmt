@@ -5,6 +5,7 @@
 #include <atomic>
 #include <deque>
 #include <mutex>
+#include <vector>
 #include <version.h>
 #include <windows.h>
 
@@ -75,54 +76,180 @@ const char *const kApiNames[kApiCount] = {"present", "map", "flush", "create", "
 namespace {
 std::atomic<uint64_t> g_other_calls[kApiCount];
 std::atomic<uint64_t> g_other_ns[kApiCount];
-thread_local bool t_presenter = false;
-thread_local int t_depth = 0;
-thread_local uint32_t t_sample_state = 0; // sampleDraw's xorshift32 state, seeded per thread
-thread_local ThreadInterval t_interval;
 constexpr uint32_t kSampleEvery = 16;
+
+// gw2 (#28): ApiThread ownership. A thread takes a block on its first lookup and keeps it in a
+// fiber-local slot whose callback releases it when the thread exits. A released block has tid 0, so
+// no ApiThreadCache can return it, and it is reset only when the next thread takes it: a block is
+// never reset while its thread lives. Blocks are never freed (a cache may still point at one).
+// The exit callback only stores two atomics: at process exit it runs after NtTerminateProcess has
+// killed the other threads (LdrShutdownProcess), so it must not take a lock one of them may hold or
+// allocate. Taking a block (never at exit) scans all blocks for a released one under the mutex.
+std::mutex g_threads_mutex;
+std::vector<ApiThread *> g_all_threads; // every block ever made
+std::atomic<DWORD> g_fls = FLS_OUT_OF_INDEXES;
+std::atomic<bool> g_fls_failed = false;
+// a thread whose block isn't in the fiber-local slot (FlsAlloc or FlsSetValue failed): that block is
+// never released and never cached, so no other thread can take or match it
+thread_local ApiThread *t_thread = nullptr;
+
+void WINAPI
+releaseThread(void *block) {
+  if (!block)
+    return;
+  auto t = static_cast<ApiThread *>(block);
+  t->tid.store(0, std::memory_order_release);
+  t->released.store(true, std::memory_order_release);
+}
+
+DWORD
+flsIndex() {
+  DWORD fls = g_fls.load(std::memory_order_acquire);
+  if (fls != FLS_OUT_OF_INDEXES || g_fls_failed.load(std::memory_order_relaxed))
+    return fls;
+  std::lock_guard lock(g_threads_mutex);
+  fls = g_fls.load(std::memory_order_relaxed);
+  if (fls == FLS_OUT_OF_INDEXES && !g_fls_failed.load(std::memory_order_relaxed)) {
+    fls = FlsAlloc(releaseThread);
+    if (fls == FLS_OUT_OF_INDEXES) {
+      g_fls_failed.store(true, std::memory_order_relaxed);
+      Logger::warn("GW2 PACE: FlsAlloc failed; API time falls back to a TLS lookup per call");
+    } else {
+      g_fls.store(fls, std::memory_order_release);
+    }
+  }
+  return fls;
+}
+
+ApiThread *
+takeBlock(uint32_t tid) {
+  ApiThread *t = nullptr;
+  {
+    std::lock_guard lock(g_threads_mutex);
+    for (auto b : g_all_threads) {
+      if (b->released.load(std::memory_order_acquire) && b->released.exchange(false, std::memory_order_acq_rel)) {
+        t = b;
+        break;
+      }
+    }
+    if (!t) {
+      t = new ApiThread();
+      g_all_threads.push_back(t);
+    }
+  }
+  t->reset(); // an exited thread's state: this thread starts fresh, as a new TLS block did
+  t->tid.store(tid, std::memory_order_release); // from here on, caches return it to this thread only
+  return t;
+}
 } // namespace
 
+void
+ApiThread::reset() {
+  cacheable = false;
+  depth = 0;
+  sample_state = 0;
+  presenter = false;
+  interval = {};
+}
+
 uint32_t
-sampleDraw() {
-  uint32_t x = t_sample_state;
+ApiThread::draw() {
+  uint32_t x = sample_state;
   if (!x) // seeded from the thread id (Knuth's multiplicative hash), never 0
-    x = (uint32_t(GetCurrentThreadId()) * 2654435761u) | 1u;
+    x = (tid.load(std::memory_order_relaxed) * 2654435761u) | 1u;
   x ^= x << 13;
   x ^= x >> 17;
   x ^= x << 5;
-  t_sample_state = x;
+  sample_state = x;
   return x;
 }
 
 void
-apiAdd(Api api, uint64_t ns) {
-  if (t_presenter)
-    t_interval.api.ns[(unsigned)api] += ns;
-  else
-    g_other_ns[(unsigned)api].fetch_add(ns, std::memory_order_relaxed);
-}
-
-void
-apiCall(Api api) {
-  if (t_presenter)
-    t_interval.api.calls[(unsigned)api]++;
+ApiThread::call(Api api) {
+  if (presenter)
+    interval.api.calls[(unsigned)api]++;
   else
     g_other_calls[(unsigned)api].fetch_add(1, std::memory_order_relaxed);
 }
 
 void
+ApiThread::add(Api api, uint64_t ns) {
+  if (presenter)
+    interval.api.ns[(unsigned)api] += ns;
+  else
+    g_other_ns[(unsigned)api].fetch_add(ns, std::memory_order_relaxed);
+}
+
+ApiThread &
+apiThread() {
+  DWORD fls = flsIndex();
+  if (fls != FLS_OUT_OF_INDEXES) {
+    if (auto t = static_cast<ApiThread *>(FlsGetValue(fls)))
+      return *t;
+  }
+  if (auto t = t_thread)
+    return *t;
+  auto t = takeBlock(uint32_t(GetCurrentThreadId()));
+  if (fls != FLS_OUT_OF_INDEXES && FlsSetValue(fls, t)) {
+    t->cacheable = true; // released at exit, so a cache may hold it
+  } else {
+    t_thread = t; // not released at exit: kept per thread, never cached
+    static std::atomic<bool> warned = false;
+    if (fls != FLS_OUT_OF_INDEXES && !warned.exchange(true))
+      Logger::warn("GW2 PACE: FlsSetValue failed; this thread's API time uses a TLS lookup per call");
+  }
+  return *t;
+}
+
+ApiThread &
+ApiThreadCache::get() {
+  uint32_t tid = uint32_t(GetCurrentThreadId());
+  ApiThread *t = last_.load(std::memory_order_acquire);
+  if (t && t->tid.load(std::memory_order_acquire) == tid)
+    return *t; // tid is set only by the owning thread and cleared when it exits: this thread's
+  t = &apiThread();
+  if (t->cacheable) // a block without the exit callback keeps its tid after its thread dies
+    last_.store(t, std::memory_order_release);
+  return *t;
+}
+
+void
+apiThreadsDetach() {
+  DWORD fls = g_fls.exchange(FLS_OUT_OF_INDEXES);
+  if (fls != FLS_OUT_OF_INDEXES)
+    FlsFree(fls); // runs releaseThread for every thread's block: the callback mustn't outlive the DLL
+}
+
+uint32_t
+sampleDraw() {
+  return apiThread().draw();
+}
+
+void
+apiAdd(Api api, uint64_t ns) {
+  apiThread().add(api, ns);
+}
+
+void
+apiCall(Api api) {
+  apiThread().call(api);
+}
+
+void
 waitAdd(Wait wait, uint64_t ns) {
-  if (!t_presenter)
+  auto &t = apiThread();
+  if (!t.presenter)
     return;
-  t_interval.wait_ns[(unsigned)wait] += ns;
-  t_interval.wait_count[(unsigned)wait]++;
+  t.interval.wait_ns[(unsigned)wait] += ns;
+  t.interval.wait_count[(unsigned)wait]++;
 }
 
 ThreadInterval
 takeThreadInterval() {
-  t_presenter = true;
-  ThreadInterval out = t_interval;
-  t_interval = {};
+  auto &t = apiThread();
+  t.presenter = true;
+  ThreadInterval out = t.interval;
+  t.interval = {};
   return out;
 }
 
@@ -136,15 +263,17 @@ otherDrain() {
   return t;
 }
 
-ApiScope::ApiScope(Api api, bool sampled) : api_(api) {
+ApiScope::ApiScope(Api api, bool sampled, ApiThreadCache *cache) : api_(api) {
   if (!statsEnabled())
     return;
-  if (t_depth++ > 0)
+  ApiThread &t = cache ? cache->get() : apiThread();
+  thread_ = &t;
+  if (t.depth++ > 0)
     return; // nested: the outer scope counts
   outer_ = true;
-  apiCall(api);
+  t.call(api);
   if (sampled) {
-    draw_ = sampleDraw();
+    draw_ = t.draw();
     if ((draw_ >> 28) != 0)
       return;
   }
@@ -153,12 +282,12 @@ ApiScope::ApiScope(Api api, bool sampled) : api_(api) {
 }
 
 ApiScope::~ApiScope() {
-  if (!statsEnabled())
+  if (!thread_)
     return;
-  t_depth--;
+  thread_->depth--;
   if (!outer_ || !scale_)
     return;
-  apiAdd(api_, uint64_t(nowNs() - t0_) * scale_);
+  thread_->add(api_, uint64_t(nowNs() - t0_) * scale_);
 }
 
 // --- GPU spans
