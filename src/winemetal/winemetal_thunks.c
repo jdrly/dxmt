@@ -1067,7 +1067,7 @@ CacheWriter_alloc_init(const char *path, uint64_t version) {
   return params.ret_cache;
 }
 
-WINEMETAL_API void
+WINEMETAL_API bool
 CacheWriter_set(
     obj_handle_t writer, const void *key, uint64_t key_length, obj_handle_t value
 ) {
@@ -1076,7 +1076,25 @@ CacheWriter_set(
   WMT_MEMPTR_SET(params.key, key);
   params.key_length = key_length;
   params.value_data = value;
+  params.query_size = 0;
+  params.ret_success = 0;
+  params.ret_db_bytes = 0;
   UNIX_CALL(118, &params);
+  return params.ret_success != 0;
+}
+
+WINEMETAL_API uint64_t
+CacheWriter_byteSize(obj_handle_t writer) {
+  struct unixcall_cache_set params;
+  params.cache = writer;
+  WMT_MEMPTR_SET(params.key, NULL);
+  params.key_length = 0;
+  params.value_data = 0;
+  params.query_size = 1;
+  params.ret_success = 0;
+  params.ret_db_bytes = 0;
+  UNIX_CALL(118, &params);
+  return params.ret_db_bytes;
 }
 
 WINEMETAL_API bool

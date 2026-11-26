@@ -4,6 +4,7 @@
 #include "d3d11_shader.hpp"
 #include "d3d11_pipeline.hpp"
 #include "dxmt_gw2_compile.hpp"
+#include "dxmt_gw2_recipe.hpp"
 #include "dxmt_shader_cache.hpp"
 #include "dxmt_tasks.hpp"
 #include "log/log.hpp"
@@ -385,7 +386,10 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
       shader->bytecode_length = BytecodeLength;
       memcpy(shader->bytecode, pBytecode, BytecodeLength);
 #endif
-      return shaders_.emplace(sha1, std::move(shader)).first->second.get();
+      auto created = shaders_.emplace(sha1, std::move(shader)).first->second.get();
+      lock.unlock();
+      gw2::recipeShader(sha1, pBytecode, BytecodeLength); // gw2 (#57): its DXBC, once per process
+      return created;
     }
   }
 

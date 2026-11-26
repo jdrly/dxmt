@@ -1501,9 +1501,16 @@ public:
     return Reference<CacheWriter>(CacheWriter_alloc_init(path, version));
   };
 
-  void
+  // gw2 (#57): false if the row wasn't stored (SQLite's error is logged on the unix side)
+  bool
   set(const void *key, uint64_t key_length, DispatchData value) {
-    CacheWriter_set(handle, key, key_length, value);
+    return CacheWriter_set(handle, key, key_length, value);
+  };
+
+  // gw2 (#57): the database file's size in bytes (pages in use and free); 0 if unknown
+  uint64_t
+  byteSize() {
+    return CacheWriter_byteSize(handle);
   };
 
   template <typename K>

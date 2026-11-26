@@ -202,6 +202,11 @@ public:
   return false if it's not ready
    */
   virtual bool GetShader(MTL_COMPILED_SHADER *pShaderData) = 0;
+  /**
+  gw2 (#57): the shader's SHA-1 and variant digest (the AIR cache's key), for recipe recording;
+  false if this compiled shader has none
+   */
+  virtual bool GetIdentity(Sha1Digest *pShader, Sha1Digest *pVariant) { return false; }
 };
 
 class Shader {

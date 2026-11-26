@@ -22,6 +22,7 @@
 #include "d3d11_pipeline.hpp"
 #include "log/log.hpp"
 #include "dxmt_gw2_compile.hpp"
+#include "dxmt_gw2_recipe.hpp"
 
 namespace dxmt {
 
@@ -136,6 +137,7 @@ public:
     info.raster_sample_count = SampleCount;
 
     gw2::compileTraceBuild(compile_trace); // gw2 (#46)
+    gw2::recipePipelineUnsupported(); // gw2 (#57): not recorded yet
     auto t0 = gw2::compileClock(); // gw2 (#5)
     state_mesh_ = device_->GetMTLDevice().newRenderPipelineState(info, err);
     gw2::compilePipelineBuilt(t0, state_mesh_ != nullptr); // gw2 (#5)

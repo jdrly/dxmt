@@ -24,6 +24,7 @@
 #include "d3d11_shader.hpp"
 #include "log/log.hpp"
 #include "dxmt_gw2_compile.hpp"
+#include "dxmt_gw2_recipe.hpp"
 #include "thread.hpp"
 
 namespace dxmt {
@@ -178,6 +179,7 @@ public:
     {
       std::lock_guard<dxmt::mutex> lock(ts_global_mutex);
       gw2::compileTraceBuild(compile_trace); // gw2 (#46)
+      gw2::recipePipelineUnsupported(); // gw2 (#57): not recorded yet
       auto t0 = gw2::compileClock(); // gw2 (#5)
       state_rasterization_ =
           device_->GetMTLDevice().newRenderPipelineState(info, err);

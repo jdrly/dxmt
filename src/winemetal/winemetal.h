@@ -2029,7 +2029,10 @@ WINEMETAL_API obj_handle_t CacheReader_get(obj_handle_t reader, const void *key,
 
 WINEMETAL_API obj_handle_t CacheWriter_alloc_init(const char *path, uint64_t version);
 
-WINEMETAL_API void CacheWriter_set(obj_handle_t writer, const void *key, uint64_t key_length, obj_handle_t value);
+WINEMETAL_API bool CacheWriter_set(obj_handle_t writer, const void *key, uint64_t key_length, obj_handle_t value);
+
+// gw2 (#57): the database file's size in bytes (page_count * page_size); 0 if unknown
+WINEMETAL_API uint64_t CacheWriter_byteSize(obj_handle_t writer);
 
 WINEMETAL_API bool WMTSetMetalShaderCachePath(const char *path);
 

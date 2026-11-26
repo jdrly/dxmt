@@ -5,6 +5,7 @@
 #include "d3d11_shader.hpp"
 #include "log/log.hpp"
 #include "dxmt_gw2_compile.hpp"
+#include "dxmt_gw2_recipe.hpp"
 #include <atomic>
 
 namespace dxmt {
@@ -99,6 +100,17 @@ public:
     info.raster_sample_count = SampleCount;
     info.immutable_vertex_buffers = (1 << 16) | (1 << 29) | (1 << 30);
     info.immutable_fragment_buffers = (1 << 29) | (1 << 30);
+    if (gw2::recipeRecording()) {
+      // gw2 (#57): this pipeline's recipe, from the exact descriptor Metal gets. Only when every
+      // shader variant's inputs were recorded (a stream-output vertex variant's never are).
+      Sha1Digest vs_sha1, vs_variant, ps_sha1, ps_variant;
+      bool has_ps = PixelShader && PixelShader->GetIdentity(&ps_sha1, &ps_variant);
+      if (VertexShader->GetIdentity(&vs_sha1, &vs_variant) && (has_ps || !PixelShader))
+        gw2::recipePipeline(vs_sha1, vs_variant, has_ps ? &ps_sha1 : nullptr, has_ps ? &ps_variant : nullptr,
+                            device_->GetDXMTDevice().metalVersion(), info);
+      else
+        gw2::recipePipelineUnsupported();
+    }
 
     gw2::compileTraceBuild(compile_trace); // gw2 (#46)
     auto t0 = gw2::compileClock(); // gw2 (#5)
@@ -179,6 +191,7 @@ public:
     WMT::InitializeComputePipelineInfo(info);
 
     info.compute_function = cs.Function;
+    gw2::recipePipelineUnsupported(); // gw2 (#57): compute recipes aren't recorded yet
     info.tgsize_is_multiple_of_sgwidth = tgsize_is_multiple_of_sgwidth;
     info.immutable_buffers = (1 << 29) | (1 << 30);
 
