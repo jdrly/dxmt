@@ -1162,6 +1162,8 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer &cmdbuf, uint64_t seqI
       // Fences and the queue order keep it behind the frame. DXMT_PRESENT_SPLIT=0 turns it off.
       if (present_split_ && encoder_count - encoder_index > 0) {
         cmdbuf.commit();
+        if (gw2::statsEnabled())
+          queue_.KeepSplitCommandBuffer(seqId, cmdbuf); // gw2 (#3): its GPU span counts for the frame
         cmdbuf = queue_.CreateCommandBuffer();
         currentFrameStatistics().present_split_count++;
       }
@@ -1177,19 +1179,25 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer &cmdbuf, uint64_t seqI
       );
       auto t1 = clock::now();
       currentFrameStatistics().drawable_blocking_interval += (t1 - t0);
-      currentFrameStatistics().next_drawable_interval += data->presenter->lastNextDrawable();
+      // gw2 (#3): STATS2's nextdrawable and present branch, only with DXMT_STATS on
+      bool stats = gw2::statsEnabled();
+      if (stats)
+        currentFrameStatistics().next_drawable_interval += data->presenter->lastNextDrawable();
       // gw2 (#7): when the drawable reaches the screen, for the PRESENT section
-      if (gw2::statsEnabled())
+      if (stats)
         gw2::presentTrack(drawable.handle, frame_id_);
       if (data->after > 0) {
         cmdbuf.presentDrawableAfterMinimumDuration(drawable, data->after);
-        currentFrameStatistics().present_after++;
+        if (stats)
+          currentFrameStatistics().present_after++;
       } else if (data->deadline > 0) {
         cmdbuf.presentDrawableWithDeadline(drawable, data->deadline);
-        currentFrameStatistics().present_deadline++;
+        if (stats)
+          currentFrameStatistics().present_deadline++;
       } else {
         cmdbuf.presentDrawable(drawable);
-        currentFrameStatistics().present_plain++;
+        if (stats)
+          currentFrameStatistics().present_plain++;
       }
       data->~PresentData();
       break;

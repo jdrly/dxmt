@@ -26,6 +26,7 @@
 #include "dxmt_command_list.hpp"
 #include "dxmt_context.hpp"
 #include "dxmt_counter.hpp"
+#include "dxmt_gw2_stats.hpp"
 #include "dxmt_occlusion_query.hpp"
 #include "dxmt_resource_initializer.hpp"
 #include "dxmt_ring_bump_allocator.hpp"
@@ -136,6 +137,9 @@ public:
 private:
   CommandQueue *queue;
   WMT::Reference<WMT::CommandBuffer> attached_cmdbuf;
+  // gw2 (#3): the buffers the present split committed before attached_cmdbuf, kept (with
+  // DXMT_STATS on) until the chunk completes so the finish thread can read their GPU timestamps
+  std::vector<WMT::Reference<WMT::CommandBuffer>> split_cmdbufs;
   
   CommandList<ArgumentEncodingContext> list_enc;
   AllocationRefTracking ref_tracker;
@@ -152,6 +156,7 @@ public:
     list_enc.reset();
     ref_tracker.clear();
     attached_cmdbuf = nullptr;
+    split_cmdbufs.clear();
   }
 };
 
@@ -223,6 +228,15 @@ public:
   CreateCommandBuffer() {
     return commandQueue.commandBuffer();
   }
+
+  // gw2 (#3): a buffer the present split committed off chunk `seq`, for the GPU line
+  void
+  KeepSplitCommandBuffer(uint64_t seq, WMT::CommandBuffer cmdbuf) {
+    chunks[seq % chunk_count_].split_cmdbufs.emplace_back(cmdbuf);
+  }
+
+  // gw2 (#3): this queue's completed frames' GPU spans (filled by its finish thread)
+  gw2::GpuCollector gpu_collector;
 
   InternalCommandLibrary cmd_library;
   ArgumentEncodingContext argument_encoding_ctx;

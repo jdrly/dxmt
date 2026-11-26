@@ -16,6 +16,15 @@ statsEnabled() {
   return enabled;
 }
 
+double
+hitchMs() {
+  static const double ms = [] {
+    auto v = env::getEnvVar("DXMT_HITCH_MS");
+    return v.empty() ? 50.0 : std::strtod(v.c_str(), nullptr);
+  }();
+  return ms;
+}
+
 int64_t
 nowNs() {
   return std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -61,28 +70,58 @@ emitSections(double window_ms, uint32_t frames) {
 
 // --- API time
 
-const char *const kApiNames[kApiCount] = {"present", "map", "flush", "create", "draw", "dispatch"};
+const char *const kApiNames[kApiCount] = {"present", "map", "flush", "create", "draw", "dispatch", "presentwait"};
 
 namespace {
-std::atomic<uint64_t> g_calls[kApiCount];
-std::atomic<uint64_t> g_ns[kApiCount];
+std::atomic<uint64_t> g_other_calls[kApiCount];
+std::atomic<uint64_t> g_other_ns[kApiCount];
+thread_local bool t_presenter = false;
 thread_local int t_depth = 0;
-thread_local uint32_t t_sample_counter = 0;
-thread_local uint64_t t_frame_ns[kApiCount];
-thread_local uint64_t t_frame_calls[kApiCount];
+thread_local uint32_t t_sample_counter[kApiCount]; // per category: one can't use up another's samples
+thread_local ThreadInterval t_interval;
 constexpr uint32_t kSampleEvery = 16;
 } // namespace
 
 void
 apiAdd(Api api, uint64_t ns) {
-  g_ns[(unsigned)api].fetch_add(ns, std::memory_order_relaxed);
-  t_frame_ns[(unsigned)api] += ns;
+  if (t_presenter)
+    t_interval.api.ns[(unsigned)api] += ns;
+  else
+    g_other_ns[(unsigned)api].fetch_add(ns, std::memory_order_relaxed);
 }
 
 void
 apiCall(Api api) {
-  g_calls[(unsigned)api].fetch_add(1, std::memory_order_relaxed);
-  t_frame_calls[(unsigned)api]++;
+  if (t_presenter)
+    t_interval.api.calls[(unsigned)api]++;
+  else
+    g_other_calls[(unsigned)api].fetch_add(1, std::memory_order_relaxed);
+}
+
+void
+waitAdd(Wait wait, uint64_t ns) {
+  if (!t_presenter)
+    return;
+  t_interval.wait_ns[(unsigned)wait] += ns;
+  t_interval.wait_count[(unsigned)wait]++;
+}
+
+ThreadInterval
+takeThreadInterval() {
+  t_presenter = true;
+  ThreadInterval out = t_interval;
+  t_interval = {};
+  return out;
+}
+
+ApiTotals
+otherDrain() {
+  ApiTotals t;
+  for (unsigned i = 0; i < kApiCount; i++) {
+    t.calls[i] = g_other_calls[i].exchange(0, std::memory_order_relaxed);
+    t.ns[i] = g_other_ns[i].exchange(0, std::memory_order_relaxed);
+  }
+  return t;
 }
 
 ApiScope::ApiScope(Api api, bool sampled) : api_(api) {
@@ -91,9 +130,8 @@ ApiScope::ApiScope(Api api, bool sampled) : api_(api) {
   if (t_depth++ > 0)
     return; // nested: the outer scope counts
   outer_ = true;
-  g_calls[(unsigned)api].fetch_add(1, std::memory_order_relaxed);
-  t_frame_calls[(unsigned)api]++;
-  if (sampled && (t_sample_counter++ % kSampleEvery) != 0)
+  apiCall(api);
+  if (sampled && (t_sample_counter[(unsigned)api]++ % kSampleEvery) != 0)
     return;
   scale_ = sampled ? kSampleEvery : 1;
   t0_ = nowNs();
@@ -108,54 +146,21 @@ ApiScope::~ApiScope() {
   apiAdd(api_, uint64_t(nowNs() - t0_) * scale_);
 }
 
-ApiTotals
-apiDrain() {
-  ApiTotals t;
-  for (unsigned i = 0; i < kApiCount; i++) {
-    t.calls[i] = g_calls[i].exchange(0, std::memory_order_relaxed);
-    t.ns[i] = g_ns[i].exchange(0, std::memory_order_relaxed);
-  }
-  return t;
-}
-
-ApiTotals
-apiFrameOfThisThread() {
-  ApiTotals t;
-  for (unsigned i = 0; i < kApiCount; i++) {
-    t.calls[i] = t_frame_calls[i];
-    t.ns[i] = t_frame_ns[i];
-  }
-  return t;
-}
-
-void
-apiFrameReset() {
-  for (unsigned i = 0; i < kApiCount; i++) {
-    t_frame_calls[i] = 0;
-    t_frame_ns[i] = 0;
-  }
-}
-
 // --- GPU spans
 
 namespace {
 constexpr size_t kMaxQueued = 1024;
-std::mutex g_gpu_mutex;
-std::deque<GpuFrame> g_gpu_done;
-// finish-thread state: the frame being collected
-uint64_t g_gpu_frame = ~0ull;
-std::vector<std::pair<uint64_t, uint64_t>> g_gpu_spans;
-uint32_t g_gpu_missing = 0;
+} // namespace
 
 void
-finalizeGpuFrame() {
-  if (g_gpu_frame == ~0ull)
+GpuCollector::finalize() {
+  if (frame_ == ~0ull)
     return;
-  GpuFrame f{g_gpu_frame, 0, ~0ull, 0, uint32_t(g_gpu_spans.size()) + g_gpu_missing, g_gpu_missing};
-  std::sort(g_gpu_spans.begin(), g_gpu_spans.end());
+  GpuFrame f{frame_, 0, ~0ull, 0, 0, uint32_t(spans_.size()) + missing_, missing_, false, false};
+  std::sort(spans_.begin(), spans_.end());
   uint64_t cs = 0, ce = 0;
   bool open = false;
-  for (auto [s, e] : g_gpu_spans) {
+  for (auto [s, e] : spans_) {
     f.first_ns = std::min(f.first_ns, s);
     f.last_ns = std::max(f.last_ns, e);
     if (!open) {
@@ -169,78 +174,63 @@ finalizeGpuFrame() {
   }
   if (open)
     f.span_ns += ce - cs;
-  if (g_gpu_spans.empty())
+  if (spans_.empty())
     f.first_ns = f.last_ns = 0;
-  g_gpu_spans.clear();
-  g_gpu_missing = 0;
-  std::lock_guard lock(g_gpu_mutex);
-  if (g_gpu_done.size() >= kMaxQueued)
-    g_gpu_done.pop_front();
-  g_gpu_done.push_back(f);
+  // A frame with a buffer without timestamps has an unknown span and unknown ends: it is neither
+  // averaged nor used as either end of a gap.
+  f.complete = open && missing_ == 0;
+  if (!f.complete) {
+    f.span_ns = 0;
+    prev_last_ns_ = 0;
+  } else {
+    if (prev_last_ns_) {
+      f.has_gap = true;
+      f.gap_ns = f.first_ns > prev_last_ns_ ? f.first_ns - prev_last_ns_ : 0;
+    }
+    prev_last_ns_ = std::max(prev_last_ns_, f.last_ns);
+  }
+  spans_.clear();
+  missing_ = 0;
+  std::lock_guard lock(mutex_);
+  if (done_.size() >= kMaxQueued) {
+    done_.pop_front();
+    dropped_++;
+  }
+  done_.push_back(f);
 }
-} // namespace
 
 void
-gpuSpanAdd(uint64_t frame, uint64_t gpu_start_ns, uint64_t gpu_end_ns) {
-  if (!statsEnabled())
-    return;
-  if (frame != g_gpu_frame) {
-    finalizeGpuFrame();
-    g_gpu_frame = frame;
+GpuCollector::add(uint64_t frame, uint64_t gpu_start_ns, uint64_t gpu_end_ns) {
+  if (frame != frame_) {
+    finalize();
+    frame_ = frame;
   }
   if (gpu_start_ns == 0 || gpu_end_ns < gpu_start_ns)
-    g_gpu_missing++;
+    missing_++;
   else
-    g_gpu_spans.emplace_back(gpu_start_ns, gpu_end_ns);
+    spans_.emplace_back(gpu_start_ns, gpu_end_ns);
 }
 
 std::vector<GpuFrame>
-gpuSpanDrain() {
-  std::lock_guard lock(g_gpu_mutex);
-  std::vector<GpuFrame> out(g_gpu_done.begin(), g_gpu_done.end());
-  g_gpu_done.clear();
-  return out;
-}
-
-// --- app pacing
-
-namespace {
-std::mutex g_app_mutex;
-std::vector<double> g_app_intervals;
-int64_t g_app_last = 0;
-} // namespace
-
-double
-appPresent() {
-  if (!statsEnabled())
-    return 0;
-  auto now = nowNs();
-  std::lock_guard lock(g_app_mutex);
-  double ms = 0;
-  if (g_app_last) {
-    ms = (now - g_app_last) / 1e6;
-    if (g_app_intervals.size() < 16384)
-      g_app_intervals.push_back(ms);
-  }
-  g_app_last = now;
-  return ms;
-}
-
-std::vector<double>
-appDrain() {
-  std::lock_guard lock(g_app_mutex);
-  std::vector<double> out;
-  out.swap(g_app_intervals);
+GpuCollector::drain(uint32_t &dropped) {
+  std::lock_guard lock(mutex_);
+  std::vector<GpuFrame> out(done_.begin(), done_.end());
+  done_.clear();
+  dropped = dropped_;
+  dropped_ = 0;
   return out;
 }
 
 // --- startup line
 
+bool
+takeStartup() {
+  static std::atomic<bool> done = false;
+  return !done.exchange(true);
+}
+
 void
 logStartup(const std::string &extra) {
-  static std::atomic<bool> done = false;
-  if (done.exchange(true))
-    return;
   std::string vars;
   if (auto block = GetEnvironmentStringsA()) {
     for (const char *p = block; *p; p += strlen(p) + 1) {
@@ -252,7 +242,7 @@ logStartup(const std::string &extra) {
     FreeEnvironmentStringsA(block);
   }
   Logger::info(str::format(
-      "GW2 fork ", DXMT_VERSION, ":", vars.empty() ? std::string(" (no DXMT_* set)") : vars, " ", extra
+      "GW2 fork ", DXMT_VERSION, ": ", extra, " set:", vars.empty() ? std::string(" none") : vars
   ));
 }
 
