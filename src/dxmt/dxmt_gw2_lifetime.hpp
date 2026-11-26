@@ -13,7 +13,7 @@
 // - Bump buffers (argument buffers, temp, staging): the ring allocators, freed by sequence after
 //   the chunk retired.
 // - The drawable, the events of Signal/Wait/keyed mutexes, the presenter and the MetalFX scalers:
-//   the chunk's keep lists (CommandQueue::KeepUntilRetired), released in reset().
+//   the queue's retirement ledger (CommandQueue::Hold, #66), released when the chunk retires.
 // - Pipelines, depth-stencil and sampler states: the device's caches, never evicted; DXMT's
 //   internal ones (clears, blits, tile barrier, present) belong to the queue's encoding context or
 //   the presenter. The present's pipelines are rebuilt only after every earlier present's chunk has
@@ -22,7 +22,7 @@
 // - Device teardown: with DXMT_UNRETAINED=1 or DXMT_LIFETIME_CHECK=1 the D3D11 device waits for
 //   every committed chunk before its caches go, and the queue for its command buffers.
 //
-// The keep lists and the teardown waits act only with DXMT_UNRETAINED=1 or the check on; with both
+// The ledger's holds and the teardown waits act only with DXMT_UNRETAINED=1 or the check on; with both
 // off, the retained command buffers hold those objects as upstream (keepUntilRetired()).
 //
 // DXMT_LIFETIME_CHECK=1 checks it, as d9mt's D9MT_LIFETIME_CHECK: every object a chunk uses is
@@ -80,7 +80,7 @@ check() {
 bool unretained();
 
 // DXMT_UNRETAINED=1 or the check: DXMT itself holds what the retained command buffers would hold
-// (the keep lists, the teardown waits). False: today's path.
+// (the ledger's holds, the teardown waits). False: today's path.
 bool keepUntilRetired();
 
 // A command queue starts (its id for the stamps; 0 with the check off) and logs the command
