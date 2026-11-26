@@ -38,6 +38,7 @@
 #include "dxmt_gw2_warm.hpp"
 #include "dxmt_gw2_warm_bridge.hpp"
 extern "C" {
+#include "cache_dir.h"
 #include "pso_archive_publish.h"
 }
 #include <algorithm>
@@ -87,11 +88,12 @@ struct Options {
 void
 usage(FILE *f) {
   fprintf(f, "usage: pso_archive_tool run|verify|status [options]\n"
-             "  --cache-dir DIR     DXMT's per-exe cache (default: $(getconf DARWIN_USER_CACHE_DIR)dxmt/<exe>)\n"
+             "  --cache-dir DIR     DXMT's per-exe cache (default: <base>dxmt/<exe>, where <base> is\n"
+             "                      DXMT_CACHE_DIR if it's absolute, else $(getconf DARWIN_USER_CACHE_DIR))\n"
              "  --recipes FILE      W1's recipes (default: <cache-dir>/recipes_1.db)\n"
              "  --air FILE          the AIR cache, read-only (default: <cache-dir>/shaders_<target>.db)\n"
              "  --archive-dir DIR   the archive store's base, as DXMT_PSO_ARCHIVE_DIR (default:\n"
-             "                      $(getconf DARWIN_USER_CACHE_DIR)dxmt/pso); a separate one is a store no game reads\n"
+             "                      <base>dxmt/pso); a separate one is a store no game reads\n"
              "  --exe NAME          the game's executable (default: Gw2-64.exe)\n"
              "  --keep N            sessions a generation keeps (default 4, as the DLL)\n"
              "  --limit N           recipes at most, in first-use order (default: all)\n"
@@ -191,7 +193,7 @@ parseArgs(int argc, char **argv, Options &o) {
 std::string
 userCacheDir() {
   char buf[PATH_MAX];
-  size_t n = confstr(_CS_DARWIN_USER_CACHE_DIR, buf, sizeof(buf));
+  size_t n = dxmt_cache_base(buf, sizeof(buf)); // gw2 (#134): DXMT_CACHE_DIR, if set, as the DLL
   std::string s = n ? std::string(buf) : std::string();
   if (!s.empty() && s.back() != '/')
     s += '/';
