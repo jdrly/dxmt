@@ -20,6 +20,7 @@
 #include "dxmt_command_queue.hpp"
 #include "dxmt_gw2_compile.hpp"
 #include "dxmt_gw2_deps.hpp"
+#include "dxmt_gw2_layer_set.hpp"
 #include "dxmt_gw2_present.hpp"
 #include "dxmt_gw2_residency.hpp"
 #include "dxmt_gw2_metal4.hpp"
@@ -202,9 +203,16 @@ CommandQueue::CommandQueue(WMT::Device device) :
           "Metal 4: on (DXMT_METAL4=1, the default): this device's chunks go to an MTL4CommandQueue, with ", chunk_count_,
           " command allocators (one per chunk slot) and commit feedback"
       ));
-      // gw2 (#184): the queue holds only the device's set; a queue takes at most 32
-      Logger::info("Metal 4: drawables stay resident through their layer's residency set, used by each present's "
-                   "command buffer; the queue holds no layer's set");
+      // gw2 (#184): the queue holds only the device's set; a queue takes at most 32. gw2 (#226): unless
+      // DXMT_MTL4_LAYER_SET=queue, the placement before #184, for at most 16 presenters
+      if (gw2::mtl4LayerSet() == gw2::LayerSet::Queue)
+        Logger::info(str::format(
+            "Metal 4: each layer's residency set is on the queue (DXMT_MTL4_LAYER_SET=queue), at most ",
+            gw2::kLayerSetQueuePlaces
+        ));
+      else
+        Logger::info("Metal 4: drawables stay resident through their layer's residency set, used by each present's "
+                     "command buffer; the queue holds no layer's set");
       // gw2 (#154)
       Logger::info(
           gw2::mtl4TimestampReuse()
@@ -575,7 +583,8 @@ CommandQueue::RetireRecovered(uint64_t seq, const gw2::RetireStep &step, const g
 // gw2 (#77): what both finish paths report of a completed chunk, from its records: device errors (the
 // last buffer's as upstream's line, then its logs; a split buffer's with the chunk's frame and
 // sequence id, through the throttle, then its logs), and with DXMT_STATS the GPU spans (gw2 #3: the
-// split buffers', then the last one's) and the last one's end for PRESENT's aftergpu (gw2 #7).
+// split buffers', then the last one's) and the last one's end for PRESENT's aftergpu (gw2 #7), and the
+// present pass's span (gw2 #224).
 void
 CommandQueue::ReportCompletedChunk(CommandChunk &chunk, const CompletedChunk &completed, bool stats) {
   struct Sink {
@@ -613,6 +622,11 @@ CommandQueue::ReportCompletedChunk(CommandChunk &chunk, const CompletedChunk &co
     }
   } sink{*this, chunk.frame_, completed.seq()};
   gw2::reportCompletedChunk(completed.records(), completed.order(), stats, split_errors_, sink);
+  // gw2 (#224): the present pass's own span, for PRESENT's drawwait and early (noted with DXMT_STATS)
+  if (stats) {
+    if (auto *pass = gw2::presentPassRecord(completed.records(), chunk.readback.present_commit))
+      gw2::presentPassGpu(chunk.frame_, pass->gpu_start_ns.value_or(0), pass->gpu_end_ns.value_or(0));
+  }
 }
 
 void CommandQueue::Retain(uint64_t seq, Allocation* allocation) {

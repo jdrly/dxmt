@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Metal.hpp"
+#include "dxmt_gw2_commit_record.hpp"
 #include "dxmt_gw2_mtl4_queue.hpp"
 #include "dxmt_gw2_timestamp.hpp"
 #include "dxmt_gw2_stats.hpp"
@@ -518,6 +519,8 @@ struct QueryReadbacks {
   std::unique_ptr<VisibilityResultReadback> visibility;
   std::unique_ptr<TimestampReadback> timestamp;
   std::unique_ptr<TimestampEstimateReadback> timestamp_estimate; // gw2 (#24)
+  // gw2 (#224): the record of the chunk's present pass (gw2::presentPassRecord), with DXMT_STATS only
+  uint32_t present_commit = gw2::kNoPresentCommit;
 };
 
 } // namespace dxmt
