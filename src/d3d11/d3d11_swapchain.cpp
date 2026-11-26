@@ -10,6 +10,7 @@
 #include "dxmt_hud_state.hpp"
 #include "dxmt_statistics.hpp"
 #include "dxmt_gw2_compile.hpp"
+#include "dxmt_gw2_control.hpp"
 #include "dxmt_gw2_present.hpp"
 #include "dxmt_gw2_map.hpp"
 #include "dxmt_gw2_rebind.hpp"
@@ -32,6 +33,7 @@
 #include "dxmt_presenter.hpp"
 #include <atomic>
 #include <cfloat>
+#include <cmath>
 #include <format>
 #include <algorithm>
 #include <mutex>
@@ -252,6 +254,8 @@ public:
       hWnd(hWnd),
       monitor_(wsi::getWindowMonitor(hWnd)),
       hud(WMT::DeveloperHUDProperties::instance()) {
+
+    gw2::controlStart(); // gw2 (#7): DXMT_CONTROL's poll thread, once per process
 
     native_view_ = WMT::CreateMetalViewFromHWND((intptr_t)hWnd, pDevice->GetMTLDevice(), layer_weak_);
 
@@ -904,11 +908,13 @@ public:
     // (presentDrawable:atTime:). macOS runs the GPU at the lowest clock that meets the deadline it
     // can infer, and a plain present carries none: GW2 ran 78% of the time at the minimum clock,
     // the CPU waiting for a slow GPU (LASRecomp #203 measured the same). DXMT_PRESENT_DEADLINE=0
-    // turns it off; DXMT_PRESENT_DEADLINE=<ms> sets the deadline.
+    // turns it off; DXMT_PRESENT_DEADLINE=<ms> sets the deadline. gw2 (#7): DXMT_CONTROL's
+    // present_deadline replaces it while the control file sets it.
     double present_deadline = 0;
-    if (present_deadline_ms_ != 0) {
+    double deadline_ms = PresentDeadlineMs();
+    if (deadline_ms != 0) {
       double refresh = init_refresh_rate_ != DBL_MAX ? init_refresh_rate_ : 60.0;
-      present_deadline = present_deadline_ms_ > 0 ? present_deadline_ms_ / 1000.0 : 1.0 / refresh;
+      present_deadline = deadline_ms > 0 ? deadline_ms / 1000.0 : 1.0 / refresh;
     }
     stats_deadline_ms_ = present_deadline * 1000;
     stats_sync_interval_ = SyncInterval;
@@ -1048,7 +1054,8 @@ public:
         "DXMT_BG_POLICY={} DXMT_RENDER_THREAD_PRIORITY={} DXMT_PSO_BLEND_HASH={} DXMT_PSO_MRU={} "
         "DXMT_PSO_TOPOLOGY_KEEP={} DXMT_CHUNKS={} DXMT_MAX_FRAME_LATENCY={} DXMT_COMPILE_WAIT_MS={} "
         "DXMT_PSO_ARCHIVE={} DXMT_PSO_ARCHIVE_DIR={} DXMT_PSO_FLUSH_EVERY={} DXMT_PROMOTE_FLUSH_MIN={} "
-        "DXMT_PROMOTE_FLUSH_MS={} DXMT_TIMESTAMP_MODE={} DXMT_MAP_FAST={} DXMT_SKIP_REBIND={} cpus={} refresh={}",
+        "DXMT_PROMOTE_FLUSH_MS={} DXMT_TIMESTAMP_MODE={} DXMT_MAP_FAST={} DXMT_SKIP_REBIND={} DXMT_CONTROL={} "
+        "cpus={} refresh={}",
         gw2::hitchMs(), int(queue.argument_encoding_ctx.presentSplit()), int(display_sync_vsync_), deadline,
         int(cap_limiter_),
         // read as d3d11_resource_helper.cpp and RaiseRenderThreadPriority read them
@@ -1061,6 +1068,7 @@ public:
         gw2::timestampModeName(gw2::timestampMode()), // gw2 (#24)
         int(gw2::mapFast()),                          // gw2 (#25)
         int(gw2::skipRebind()),                       // gw2 (#30)
+        gw2::controlPath().empty() ? std::string("off") : gw2::controlPath(), // gw2 (#7)
         GetActiveProcessorCount(ALL_PROCESSOR_GROUPS), refresh
     ));
   }
@@ -1200,6 +1208,29 @@ public:
       return;
     }
     std::this_thread::sleep_until(cap_deadline_);
+  }
+
+  // gw2 (#7): the deadline setting this Present uses (-1 one refresh, 0 off, > 0 ms): the control
+  // file's present_deadline if it sets one, else DXMT_PRESENT_DEADLINE. A change is logged with the
+  // frame it applies from (1-based, as HITCH counts). Render thread; two atomic loads, unless the
+  // control file's poll thread has queued lines to log.
+  double PresentDeadlineMs() {
+    gw2::controlLogPending(); // the poll thread's lines, before the change line they may explain
+    int32_t us = gw2::controlPresentDeadlineUs();
+    double ms = us == gw2::kControlUnset ? present_deadline_ms_ : us < 0 ? -1.0 : us / 1000.0;
+    if (ms == deadline_applied_ms_)
+      return ms;
+    auto name = [](double v) {
+      return v < 0 ? std::string("refresh") : v == 0 ? std::string("off") : std::format("{} ms", v);
+    };
+    Logger::info(std::format(
+        "Present deadline: {} from frame {} (was {}; {})", name(ms), presentation_count_ + 1,
+        name(deadline_applied_ms_),
+        us == gw2::kControlUnset ? "DXMT_PRESENT_DEADLINE, the control file doesn't set it"
+                                 : "DXMT_CONTROL present_deadline"
+    ));
+    deadline_applied_ms_ = ms;
+    return ms;
   }
 
   // gw2 (#7): the pacing in effect, once and on each change; also hands it to the PRESENT section.
@@ -1820,11 +1851,16 @@ private:
     if (v.empty())
       return -1.0;
     try {
-      return std::stod(v);
+      // gw2 (#7): NaN already meant one refresh (it is neither 0 nor > 0); as -1 it also compares
+      // equal to itself, so PresentDeadlineMs doesn't log it as a change on every Present
+      double ms = std::stod(v);
+      return std::isnan(ms) ? -1.0 : ms;
     } catch (...) {
       return -1.0;
     }
   }();
+  // gw2 (#7): the deadline setting the last Present used (PresentDeadlineMs)
+  double deadline_applied_ms_ = present_deadline_ms_;
   HUDState hud;
   Rc<Presenter> presenter;
   ModeSetGuard modeset_guard_;
