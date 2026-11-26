@@ -1,8 +1,11 @@
 #pragma once
 
 #include "Metal.hpp"
+#include "dxmt_gw2_timestamp.hpp"
+#include "dxmt_gw2_stats.hpp"
 #include "rc/util_rc_ptr.hpp"
 #include "wsi_platform.hpp"
+#include <algorithm>
 #include <atomic>
 #include <cassert>
 #include <cstdint>
@@ -231,7 +234,8 @@ using TimestampQueryList = std::vector<std::pair<Rc<TimestampQuery>, uint64_t>>;
 class TimestampReadbackSBuf {
 public:
   TimestampReadbackSBuf(
-      WMT::Device device, WMT::CommandBuffer cmdbuf, uint64_t num_samples, TimestampQueryList &&queries
+      WMT::Device device, WMT::CommandBuffer cmdbuf, uint64_t num_samples, TimestampQueryList &&queries,
+      uint64_t /* frame, gw2 (#24): TimestampReadbackCBuf's */
   ) :
       queries_(std::move(queries)),
       num_samples_(num_samples) {
@@ -264,11 +268,13 @@ private:
 class TimestampReadbackCBuf {
 public:
   TimestampReadbackCBuf(
-      WMT::Device device, WMT::CommandBuffer cmdbuf, uint64_t num_samples, TimestampQueryList &&queries
+      WMT::Device device, WMT::CommandBuffer cmdbuf, uint64_t num_samples, TimestampQueryList &&queries,
+      uint64_t frame
   ) :
       queries_(std::move(queries)),
       num_samples_(num_samples),
-      cmdbuf_(cmdbuf) {}
+      cmdbuf_(cmdbuf),
+      frame_(frame) {}
 
   ~TimestampReadbackCBuf() {
     // TODO: small_vector opt
@@ -280,11 +286,17 @@ public:
     `thread_local` makes sense because this destructor is only called on 1. finishing thread 2. (abnormal) device
     destruction
     */
-    thread_local uint64_t latest_ts_on_finish_thread = 0;
+    // gw2 (#24): the thread_local is shared with TimestampEstimateReadback
+    uint64_t &latest_ts_on_finish_thread = gw2::timestampLatest();
     latest_ts_on_finish_thread = std::max(cmdbuf_.gpuEndTime(), latest_ts_on_finish_thread);
     std::fill(results.begin(), results.end(), latest_ts_on_finish_thread);
     for (const auto &[query, sample_index] : queries_) {
       query->issue(results[sample_index]);
+    }
+    // gw2 (#24): TIMESTAMP's tsspan, for the A/B against estimate
+    if (gw2::statsEnabled()) {
+      for (const auto &[query, sample_index] : queries_)
+        gw2::timestampResolved(frame_, results[sample_index], false);
     }
   }
 
@@ -300,6 +312,88 @@ private:
   TimestampQueryList queries_;
   uint64_t num_samples_;
   WMT::CommandBuffer cmdbuf_;
+  uint64_t frame_;
+};
+
+/**
+gw2 (#24): DXMT_TIMESTAMP_MODE estimate and boundary. The queries were marked inside the chunk
+without a pass split, each at its position: 2 x the encoders closed before it, + 1 if it fell inside an
+open one. A query reads its command buffer's GPU start + (end - start) x its share of the buffer's
+positions, as if every encoder took the same GPU time. The present split gives the chunk a second
+buffer (split()); a query at the split point reads the earlier buffer's end. As TimestampReadbackCBuf,
+a value is never below one handed out before it, so the values stay monotonic.
+
+Runs on the finish thread after the chunk's last buffer completed (or at the device's destruction).
+It holds a reference to each buffer; one the present split committed earlier is waited for, as the
+GPU line does.
+*/
+class TimestampEstimateReadback {
+public:
+  TimestampEstimateReadback(WMT::CommandBuffer cmdbuf, uint64_t positions, TimestampQueryList &&queries, uint64_t frame) :
+      queries_(std::move(queries)),
+      positions_(positions),
+      frame_(frame) {
+    segments_.push_back(Segment{WMT::Reference<WMT::CommandBuffer>(cmdbuf), 0});
+  }
+
+  ~TimestampEstimateReadback() {
+    uint64_t &latest = gw2::timestampLatest();
+    bool stats = gw2::statsEnabled();
+    size_t s = 0;
+    for (const auto &[query, position] : queries_) {
+      // the first buffer whose positions reach this query's (positions don't decrease)
+      while (s + 1 < segments_.size() && segments_[s + 1].begin < position)
+        s++;
+      auto &segment = segments_[s];
+      segment.resolve();
+      uint64_t begin = segment.begin;
+      uint64_t end = s + 1 < segments_.size() ? segments_[s + 1].begin : positions_;
+      uint64_t value = segment.gpu_end;
+      if (segment.gpu_start && segment.gpu_end > segment.gpu_start && end > begin)
+        value = segment.gpu_start +
+                (segment.gpu_end - segment.gpu_start) * (std::min(position, end) - begin) / (end - begin);
+      bool clamped = value < latest;
+      latest = std::max(value, latest);
+      query->issue(latest);
+      if (stats)
+        gw2::timestampResolved(frame_, latest, clamped);
+    }
+  }
+
+  // The present split: the chunk's encoders from `position` (2 x the encoder index) on go to `cmdbuf`.
+  void
+  split(WMT::CommandBuffer cmdbuf, uint64_t position) {
+    segments_.push_back(Segment{WMT::Reference<WMT::CommandBuffer>(cmdbuf), position});
+  }
+
+  TimestampEstimateReadback(const TimestampEstimateReadback &) = delete;
+  TimestampEstimateReadback(TimestampEstimateReadback &&) = delete;
+
+private:
+  struct Segment {
+    WMT::Reference<WMT::CommandBuffer> cmdbuf;
+    uint64_t begin;
+    uint64_t gpu_start = 0;
+    uint64_t gpu_end = 0;
+    bool resolved = false;
+
+    void
+    resolve() {
+      if (resolved)
+        return;
+      auto status = cmdbuf.status();
+      if (status >= WMTCommandBufferStatusCommitted && status <= WMTCommandBufferStatusScheduled)
+        cmdbuf.waitUntilCompleted();
+      gpu_start = cmdbuf.gpuStartTime();
+      gpu_end = cmdbuf.gpuEndTime();
+      resolved = true;
+    }
+  };
+
+  TimestampQueryList queries_; // the second member is the query's position
+  std::vector<Segment> segments_;
+  uint64_t positions_;
+  uint64_t frame_;
 };
 
 // compile-time: choose a timestamp impl: SBuf (sample buffer) or CBuf (command buffer `gpuEndTime`)
@@ -322,25 +416,44 @@ public:
   }
 
   std::unique_ptr<TimestampReadback>
-  flush(WMT::CommandBuffer cmdbuf) {
+  flush(WMT::CommandBuffer cmdbuf, uint64_t frame) {
     if (num_samples_ == 0)
       return {};
 
-    auto ret = std::make_unique<TimestampReadback>(device_, cmdbuf, num_samples_, std::move(queries_));
+    auto ret = std::make_unique<TimestampReadback>(device_, cmdbuf, num_samples_, std::move(queries_), frame);
     num_samples_ = 0;
     queries_ = {};
+    return ret;
+  }
+
+  // gw2 (#24): a query marked without an encoder of its own (DXMT_TIMESTAMP_MODE estimate/boundary)
+  void
+  markQuery(TimestampQuery *query, uint64_t position) {
+    estimated_.push_back({query, position});
+  }
+
+  // gw2 (#24): `positions`: 2 x the chunk's encoders
+  std::unique_ptr<TimestampEstimateReadback>
+  flushEstimated(WMT::CommandBuffer cmdbuf, uint64_t positions, uint64_t frame) {
+    if (estimated_.empty())
+      return {};
+
+    auto ret = std::make_unique<TimestampEstimateReadback>(cmdbuf, positions, std::move(estimated_), frame);
+    estimated_ = {};
     return ret;
   }
 
 private:
   uint64_t num_samples_ = 0;
   TimestampQueryList queries_;
+  TimestampQueryList estimated_; // gw2 (#24)
   WMT::Device device_;
 };
 
 struct QueryReadbacks {
   std::unique_ptr<VisibilityResultReadback> visibility;
   std::unique_ptr<TimestampReadback> timestamp;
+  std::unique_ptr<TimestampEstimateReadback> timestamp_estimate; // gw2 (#24)
 };
 
 } // namespace dxmt

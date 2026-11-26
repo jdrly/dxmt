@@ -340,11 +340,14 @@ public:
     switch (desc.Query) {
     case D3D11_QUERY_EVENT:
     case D3D11_QUERY_TIMESTAMP_DISJOINT:
-      promote_flush = true;
+      // gw2 (#24): DXMT_TIMESTAMP_MODE=estimate: timestamps don't make the command list commit
+      if (desc.Query == D3D11_QUERY_EVENT || gw2::timestampMode() != gw2::TimestampMode::Estimate)
+        promote_flush = true;
       ctx_state.current_cmdlist->issued_event_query.push_back(static_cast<MTLD3D11EventQuery *>(pAsync));
       break;
     case D3D11_QUERY_TIMESTAMP: {
-      promote_flush = true;
+      if (gw2::timestampMode() != gw2::TimestampMode::Estimate) // gw2 (#24)
+        promote_flush = true;
       ctx_state.current_cmdlist->issued_timestamp_query.push_back(static_cast<MTLD3D11TimestampQuery *>(pAsync));
       break;
     }

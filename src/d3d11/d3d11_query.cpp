@@ -88,6 +88,8 @@ class MTLD3D11TimestampQueryImpl : public MTLD3DQueryBase<MTLD3D11TimestampQuery
 
   Rc<TimestampQuery> query_ = new TimestampQuery();
   uint64_t latest_value_ = 0;
+  uint64_t issued_chunk_ = 0; // gw2 (#24): stays 0 in exact mode (chunk ids start at 1)
+  uint32_t polls_ = 0;
 
   virtual UINT STDMETHODCALLTYPE
   GetDataSize() override {
@@ -112,8 +114,26 @@ class MTLD3D11TimestampQueryImpl : public MTLD3DQueryBase<MTLD3D11TimestampQuery
       query_ = new TimestampQuery();
     }
     state_ = QueryState::Issued;
+    polls_ = 0;
     return query_.ptr();
   };
+
+  virtual void
+  SetIssuedChunk(uint64_t seq) override {
+    issued_chunk_ = seq;
+  }
+
+  virtual bool
+  PollStalled(uint64_t current_seq) override {
+    // a committed chunk resolves without help (the GPU, then the finish thread)
+    if (issued_chunk_ != current_seq)
+      return false;
+    if (polls_ < kEventStallThreshold) {
+      polls_++;
+      return false;
+    }
+    return true;
+  }
 };
 
 HRESULT

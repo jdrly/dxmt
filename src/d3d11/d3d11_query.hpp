@@ -176,6 +176,11 @@ class MTLD3D11TimestampQuery : public ID3D11Query1 {
 public:
   virtual HRESULT GetData(void *data) = 0;
   virtual TimestampQuery *End() = 0;
+  // gw2 (#24): DXMT_TIMESTAMP_MODE estimate/boundary: the chunk the last End was recorded in
+  virtual void SetIssuedChunk(uint64_t seq) = 0;
+  // gw2 (#24): a poll that found the value unresolved; true after kEventStallThreshold such polls
+  // while the query's chunk is still the one being recorded (`current_seq`): the caller then commits
+  virtual bool PollStalled(uint64_t current_seq) = 0;
 };
 
 HRESULT CreateTimestampQuery(MTLD3D11Device *pDevice,

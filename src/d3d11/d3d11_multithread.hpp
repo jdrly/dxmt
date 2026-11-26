@@ -12,8 +12,14 @@ public:
   bool set_protected(bool Protected);
   bool get_protected();
 
+  // gw2 (#4): the lock excludes from now on whatever the game's multithread protection says, so
+  // another thread of DXMT (the DXMT_PROMOTE_FLUSH_MIN watchdog) can enter the immediate context.
+  // Call it before the device is visible to the game; it can't be undone.
+  void force_locking() { forced_ = true; }
+
 private:
   bool protected_ = false;
+  bool forced_ = false; // gw2 (#4)
   std::atomic_uint32_t owner_ = 0;
   uint32_t counter_ = 0;
 };
