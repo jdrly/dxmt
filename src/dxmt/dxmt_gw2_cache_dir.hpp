@@ -1,7 +1,7 @@
 #pragma once
 
 // gw2 (#134): DXMT_CACHE_DIR, an absolute unix path that replaces $(getconf DARWIN_USER_CACHE_DIR)
-// as the base of DXMT's caches (<base>/dxmt/<exe>/…, <base>/dxmt/pso/…), so each setup of the game
+// as the base of DXMT's caches (<base>/dxmt/<exe>/…), so each setup of the game
 // on one Mac keeps its own. The unix side applies it (dxmt_cache_base in
 // src/winemetal/unix/cache_dir.h); this side reads it with the same rule to log the choice once and
 // to show the real base in log lines. Unset: nothing changes. Empty or relative: ignored, with one

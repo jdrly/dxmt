@@ -498,24 +498,6 @@ struct unixcall_wmt_set_thread_base_priority {
   int32_t ret;
 };
 
-struct unixcall_wmt_pso_archive_init {
-  obj_handle_t device;
-  struct WMTConstMemoryPointer config;
-  struct WMTMemoryPointer report;
-  uint64_t report_size;
-  uint64_t ret;
-};
-
-struct unixcall_wmt_pso_archive_flush {
-  struct WMTMemoryPointer report;
-  uint64_t report_size;
-  int64_t ret;
-};
-
-struct unixcall_wmt_pso_archive_query {
-  struct WMTMemoryPointer stats;
-};
-
 /* gw2 (#32): Metal 4. Only 64-bit fields and WMTMemoryPointers, so the 32-bit and
    64-bit layouts match and both tables use the same function. */
 struct unixcall_mtl4_new_argtable {
