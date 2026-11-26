@@ -18,6 +18,11 @@ SpatialScaler::SpatialScaler(WMT::Device device, const WMTFXSpatialScalerInfo &i
   fence_ = device.newFence();
 };
 
+SpatialScaler::SpatialScaler(WMT::Device device, WMTGW2SpatialScalerInfo &info) : metal4_(info.metal4 != 0) {
+  scaler_ = device.newGW2SpatialScaler(info);
+  fence_ = device.newFence();
+}
+
 void
 TemporalScaler::incRef() {
   refcount_.fetch_add(1u, std::memory_order_acquire);

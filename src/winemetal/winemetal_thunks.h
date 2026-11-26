@@ -527,4 +527,20 @@ struct unixcall_mtl4_barrier {
 
 #pragma pack(pop)
 
+/* gw2 (#56) */
+struct unixcall_mtldevice_newgw2spatialscaler {
+  obj_handle_t device;
+  struct WMTMemoryPointer info;
+  obj_handle_t ret;
+};
+
+struct unixcall_mtl4commandbuffer_spatial_scale {
+  obj_handle_t cmdbuf;
+  obj_handle_t scaler;
+  obj_handle_t color;
+  obj_handle_t output;
+  obj_handle_t fence;
+  obj_handle_t residency_set;
+};
+
 #endif

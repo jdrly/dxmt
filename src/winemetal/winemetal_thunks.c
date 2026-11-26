@@ -1677,3 +1677,38 @@ MTL4CommandEncoder_barrier(
   params.visibility = visibility;
   UNIX_CALL(178, &params);
 }
+
+/* gw2 (#56): slots 190-192 */
+WINEMETAL_API bool
+MTLDevice_supportsMetal4FX(obj_handle_t device) {
+  struct unixcall_generic_obj_uint64_ret params;
+  params.handle = device;
+  params.ret = 0;
+  UNIX_CALL(190, &params);
+  return params.ret;
+}
+
+WINEMETAL_API obj_handle_t
+MTLDevice_newGW2SpatialScaler(obj_handle_t device, struct WMTGW2SpatialScalerInfo *info) {
+  struct unixcall_mtldevice_newgw2spatialscaler params;
+  params.device = device;
+  WMT_MEMPTR_SET(params.info, info);
+  params.ret = NULL_OBJECT_HANDLE;
+  UNIX_CALL(191, &params);
+  return params.ret;
+}
+
+WINEMETAL_API void
+MTL4CommandBuffer_encodeSpatialScale(
+    obj_handle_t cmdbuf, obj_handle_t scaler, obj_handle_t color, obj_handle_t output, obj_handle_t fence,
+    obj_handle_t residency_set
+) {
+  struct unixcall_mtl4commandbuffer_spatial_scale params;
+  params.cmdbuf = cmdbuf;
+  params.scaler = scaler;
+  params.color = color;
+  params.output = output;
+  params.fence = fence;
+  params.residency_set = residency_set;
+  UNIX_CALL(192, &params);
+}

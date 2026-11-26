@@ -2452,4 +2452,32 @@ WINEMETAL_API void MTL4CommandEncoder_barrier(
     uint64_t visibility
 );
 
+/* gw2 (#56): MetalFX spatial upscaling of GW2's Subsample pass (DXMT_SUBSAMPLE_METALFX), slots
+   190-192 */
+struct WMTGW2SpatialScalerInfo {
+  enum WMTPixelFormat color_format;
+  enum WMTPixelFormat output_format;
+  uint32_t input_width;
+  uint32_t input_height;
+  uint32_t output_width;
+  uint32_t output_height;
+  uint32_t color_processing_mode; /* MTLFXSpatialScalerColorProcessingMode: 0 perceptual, 1 linear, 2 HDR */
+  uint32_t metal4;                /* 1: an MTL4FXSpatialScaler (built with an MTL4Compiler) */
+  uint64_t color_usage;           /* out: the scaler's colorTextureUsage (WMTTextureUsage bits) */
+  uint64_t output_usage;          /* out: the scaler's outputTextureUsage */
+};
+STATIC_ASSERT(sizeof(struct WMTGW2SpatialScalerInfo) == 48);
+
+/* MTLFXSpatialScalerDescriptor supportsMetal4FX: (false before macOS 26) */
+WINEMETAL_API bool MTLDevice_supportsMetal4FX(obj_handle_t device);
+/* +1, or 0 if MetalFX refuses the descriptor (a format it doesn't take); fills the usages */
+WINEMETAL_API obj_handle_t MTLDevice_newGW2SpatialScaler(obj_handle_t device, struct WMTGW2SpatialScalerInfo *info);
+/* an MTL4FXSpatialScaler's work into an open MTL4CommandBuffer, outside any encoder. It waits for
+   and updates fence (MetalFX's own synchronisation of untracked resources). color's and output's
+   memory go into residency_set (the chunk's; committed with the command buffer) */
+WINEMETAL_API void MTL4CommandBuffer_encodeSpatialScale(
+    obj_handle_t cmdbuf, obj_handle_t scaler, obj_handle_t color, obj_handle_t output, obj_handle_t fence,
+    obj_handle_t residency_set
+);
+
 #endif

@@ -1063,6 +1063,13 @@ public:
     MTL4CommandBuffer_useResidencySet(handle, residency_set);
   }
 
+  // gw2 (#56): an MTL4FXSpatialScaler's work, outside any encoder; color's and output's memory go
+  // into residency_set
+  void
+  encodeSpatialScale(FXSpatialScaler scaler, Texture color, Texture output, Fence fence, ResidencySet residency_set) {
+    MTL4CommandBuffer_encodeSpatialScale(handle, scaler, color, output, fence, residency_set);
+  }
+
   MTL4RenderCommandEncoder
   renderCommandEncoder(const WMTRenderPassInfo &info, WMTMtl4BindingState *state) {
     MTL4RenderCommandEncoder encoder;
@@ -1383,6 +1390,17 @@ public:
   bool
   supportsFXSpatialScaler() {
     return MTLDevice_supportsFXSpatialScaler(handle);
+  }
+
+  // gw2 (#56): a Metal 3 or Metal 4 (info.metal4) MetalFX spatial scaler; fills info's usages
+  Reference<FXSpatialScaler>
+  newGW2SpatialScaler(WMTGW2SpatialScalerInfo &info) {
+    return Reference<FXSpatialScaler>(MTLDevice_newGW2SpatialScaler(handle, &info));
+  }
+
+  bool
+  supportsMetal4FX() {
+    return MTLDevice_supportsMetal4FX(handle);
   }
 
   bool

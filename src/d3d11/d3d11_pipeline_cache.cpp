@@ -7,6 +7,7 @@
 #include "dxmt_shader_cache.hpp"
 #include "dxmt_tasks.hpp"
 #include "log/log.hpp"
+#include "dxmt_gw2_subsample.hpp" // gw2 (#56)
 #include "sha1/sha1_util.hpp"
 #include "util_env.hpp"
 #include "../d3d10/d3d10_shader.hpp"
@@ -406,6 +407,9 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
     if (!managed_shader) {
       return E_FAIL;
     }
+    // gw2 (#56): the DXBC instruction counts the Subsample detector checks (only with its switch)
+    if (gw2::subsampleMode() != gw2::SubsampleMode::Off)
+      gw2::notePixelShader(managed_shader->sha1().string(), pBytecode, BytecodeLength);
     *ppShader = ref(new TShaderBase<ID3D11PixelShader, MTLD3D10PixelShader>(device, managed_shader));
     return S_OK;
   }
