@@ -1,0 +1,84 @@
+name: Task
+description: A planned change to the fork, written as a precise specification (developers and agents)
+title: ""
+labels: ["needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Write the title as `Context: Actionable result`, for example
+        `Background throttle: Key on the foreground process, not the window`, and use **the same
+        title for the pull request** (see [CONTRIBUTING.md](../blob/gw2-on-mac/.github/CONTRIBUTING.md#issues)).
+        The area is a label, not a title prefix.
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: What should happen and why, and where the request came from.
+      placeholder: |
+        Where it came from (a measurement, a trace, a council or review, an upstream change, d9mt),
+        what problem it solves in GW2, and what happens if it isn't done. Link the evidence.
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Affected areas
+      description: >-
+        Files, functions, switches or log lines this touches. **List only what you have verified
+        in the repository**: a wrong path costs whoever picks this up more time than an empty
+        field.
+    validations:
+      required: false
+
+  - type: textarea
+    id: changes
+    attributes:
+      label: What's needed
+      description: A numbered list of concrete changes, each with its log line and off-switch.
+      placeholder: |
+        1. …
+        2. …
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Technical, observable conditions for done (a log line, a STATS field, a build). The developer checks them.
+      value: |
+        - [ ]
+        - [ ]
+    validations:
+      required: true
+
+  - type: textarea
+    id: uat
+    attributes:
+      label: Verification (UAT)
+      description: >-
+        Not the same as the acceptance criteria. **UAT is a scenario Jan plays through in GW2**
+        and answers yes or no at the end. Each step is an action and, after the arrow, the
+        expected result.
+      value: |
+        **Fork build:** (commit)
+        **Settings:** (BACKEND=dxmt, NCPU, graphics options that matter)
+        **Starting point:** (for example: GW2 closed, the new build installed)
+
+        1. Action.
+           → Expected result.
+        2.
+           →
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Implementation notes
+      description: Constraints, traps, dependencies on other issues, what deliberately not to do.
+    validations:
+      required: false
