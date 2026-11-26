@@ -469,6 +469,7 @@ CommandQueue::ReportCompletedChunk(CommandChunk &chunk, const CompletedChunk &co
     }
   } sink{*this, chunk.frame_, completed.seq()};
   gw2::reportCompletedChunk(completed.records(), completed.order(), stats, split_errors_, sink);
+  gw2ReportPresentFences(chunk, completed); // gw2 (#353): Metal 4, at a device error and the chunk after it
   // gw2 (#224): the present pass's own span, for PRESENT's drawwait and early (noted with DXMT_STATS)
   if (stats) {
     if (auto *pass = gw2::presentPassRecord(completed.records(), chunk.readback.present_commit))

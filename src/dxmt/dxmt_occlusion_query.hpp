@@ -3,6 +3,7 @@
 #include "Metal.hpp"
 #include "dxmt_gw2_commit_record.hpp"
 #include "dxmt_gw2_mtl4_queue.hpp"
+#include "dxmt_gw2_present_fences.hpp" // gw2 (#353)
 #include "dxmt_gw2_timestamp.hpp"
 #include "dxmt_gw2_stats.hpp"
 #include "rc/util_rc_ptr.hpp"
@@ -521,6 +522,7 @@ struct QueryReadbacks {
   std::unique_ptr<TimestampEstimateReadback> timestamp_estimate; // gw2 (#24)
   // gw2 (#224): the record of the chunk's present pass (gw2::presentPassRecord), with DXMT_STATS only
   uint32_t present_commit = gw2::kNoPresentCommit;
+  gw2::PresentFenceChunk present_fences; // gw2 (#353): Metal 4: for the line at a device error
 };
 
 } // namespace dxmt

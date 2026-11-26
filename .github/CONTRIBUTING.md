@@ -209,6 +209,8 @@ The decisions these rules rest on, and the ones a change must stay consistent wi
   through a ccache that only pushes save, and pushes don't read it.
 - [ADR 0017](../docs/gw2/adr/0017-the-shown-wait-before-the-first-back-buffer-write-is-the-default.md):
   the shown wait before the first back-buffer write (ADR 0009) is the default.
+- [ADR 0018](../docs/gw2/adr/0018-a-metal-3-present-s-fences-go-to-the-metal-4-queue-behind-a-switch.md):
+  a Metal 3 present's fences go to the Metal 4 queue, behind `DXMT_MTL4_PRESENT_FENCES`.
 
 ## Definition of Done
 

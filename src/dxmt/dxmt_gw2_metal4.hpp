@@ -38,6 +38,13 @@ bool mtl4PresentMetal3();
 // (ADR 0017); `next` (exactly) puts the wait right after the present again.
 bool mtl4ShownWaitWrite();
 
+// gw2 (#353): DXMT_MTL4_PRESENT_FENCES=1 (exactly), read once per process. With DXMT_MTL4_PRESENT=mtl3
+// the present pass encodes no fences; with it on, an encoder of the Metal 4 queue waits on the pass's
+// waits and updates its fence (dxmt_gw2_present_fences.hpp, ADR 0018). Off by default.
+bool mtl4PresentFences();
+// For the startup line and the device-error line: "0", "1", or "unused" (on without mtl3 on Metal 4)
+const char *mtl4PresentFencesState();
+
 // gw2 (#204): DXMT_MTL4_ALLOCATOR_POOL (on unless exactly "0"), read on each call: the command queue
 // reads it once, for its Metal 4 queue (gw2::Mtl4Queue's allocator_pool).
 // On (the default), the queue's command allocators come from a pool; =0: one per chunk slot.

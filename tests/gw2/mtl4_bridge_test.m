@@ -39,9 +39,11 @@
 //    WMT_MTL4_NO_ATTACHMENT_RESIDENCY, WMT_MTL4_BYTES_RESIDENT): the chunk set gets only what the
 //    unmarked packets name (UseResource's two, the blits' six), the compute replay adds nothing.
 // 2. Part 4: a fence orders two separately committed command buffers (A fills 64 MB, B copies its
-//    end), as the present split and queue-level events rely on; and the present path on a layer
-//    without a window (waitForDrawable, a pass, signalDrawable, present at a deadline), skipped if
-//    the layer gives no drawable.
+//    end), as the present split and queue-level events rely on. gw2 (#353): an encoder with no
+//    command, in a command buffer of its own, that waits on A's fence and updates another passes the
+//    order on to a third command buffer (DXMT_MTL4_PRESENT_FENCES's encoder, DXMT_PRESENT_SKIP_NIL's).
+//    And the present path on a layer without a window (waitForDrawable, a pass, signalDrawable,
+//    present at a deadline), skipped if the layer gives no drawable.
 // 3. Probe (the issue's question, with --metallibs <copy of a DXMT shaders_*.db> [--limit n]):
 //    airconv's metallibs (GW2's own shaders, from DXMT's shader cache) load; their vertex functions
 //    (with a constant fragment function of the test's) and kernel functions build pipelines both
@@ -708,6 +710,114 @@ test_cross_commit_fence(struct mtl4 *m) {
   [event release];
 }
 
+/* gw2 (#353): DXMT_MTL4_PRESENT_FENCES=1 (and DXMT_PRESENT_SKIP_NIL=1) encode a fence-only encoder:
+   an MTL4 compute encoder with no command that waits on fences and updates one. A fills 64 MB and
+   updates `first`; B, committed separately, has only that encoder (waits on `first`, updates `second`);
+   C, committed separately, waits on `second` and copies the fill's last bytes: they must be the fill's.
+   A control D, committed right after A with no wait, copies the same bytes; its RESULT line says
+   what it read, a hint at how far ahead of the fill an unordered copy runs on this GPU. */
+static void
+test_fence_relay(struct mtl4 *m) {
+  const NSUInteger big_size = 64u << 20;
+  id<MTLBuffer> big = [m->device newBufferWithLength:big_size
+                                             options:MTLResourceStorageModePrivate | MTLResourceHazardTrackingModeUntracked];
+  id<MTLBuffer> small = resident_buffer(m, 16);
+  id<MTLBuffer> control = resident_buffer(m, 16);
+  [m->residency addAllocation:big];
+  id<MTLFence> first = [m->device newFence];
+  id<MTLFence> second = [m->device newFence];
+  id<MTLSharedEvent> event = [m->device newSharedEvent];
+  obj_handle_t cmdbufs[3];
+  for (int i = 0; i < 3; i++) {
+    struct unixcall_generic_obj_obj_ret nb = {.handle = H(m->device)};
+    _MTLDevice_newMTL4CommandBuffer(&nb);
+    cmdbufs[i] = nb.ret;
+  }
+  struct WMTMtl4BindingState state;
+  memset(&state, 0, sizeof(state));
+  struct WMTMtl4CommitFeedback fa, fb, fc, fd;
+
+  begin(m);
+  {
+    obj_handle_t enc = compute_encoder(m, &state);
+    struct chain c = {0};
+    struct wmtcmd_blit_fillbuffer *fill = chain_add(&c, sizeof(*fill), WMTBlitCommandFillBuffer);
+    fill->buffer = H(big), fill->offset = 0, fill->length = big_size, fill->value = 0x5a;
+    struct wmtcmd_blit_fence_op *update = chain_add(&c, sizeof(*update), WMTBlitCommandUpdateFence);
+    update->fence = H(first);
+    replay(_MTL4ComputeCommandEncoder_encodeBlitCommands, enc, &state, &c);
+    [(id<MTL4ComputeCommandEncoder>)enc endEncoding];
+  }
+  [m->residency commit];
+  commit_one(m, m->cmdbuf, &fa, event, 1);
+  {
+    /* the control: no wait */
+    struct unixcall_generic_obj_obj_noret b = {.handle = cmdbufs[2], .arg = m->allocator};
+    _MTL4CommandBuffer_beginCommandBuffer(&b);
+    struct unixcall_mtl4_new_encoder e = {.cmdbuf = cmdbufs[2]};
+    e.state.ptr = &state;
+    _MTL4CommandBuffer_computeCommandEncoder(&e);
+    struct chain c = {0};
+    struct wmtcmd_blit_copy_from_buffer_to_buffer *copy =
+        chain_add(&c, sizeof(*copy), WMTBlitCommandCopyFromBufferToBuffer);
+    copy->src = H(big), copy->src_offset = big_size - 16, copy->dst = H(control), copy->copy_length = 16;
+    replay(_MTL4ComputeCommandEncoder_encodeBlitCommands, e.ret, &state, &c);
+    [(id<MTL4ComputeCommandEncoder>)e.ret endEncoding];
+    commit_one(m, cmdbufs[2], &fd, event, 2);
+  }
+
+  for (int i = 0; i < 2; i++) {
+    struct unixcall_generic_obj_obj_noret b = {.handle = cmdbufs[i], .arg = m->allocator};
+    _MTL4CommandBuffer_beginCommandBuffer(&b);
+    struct unixcall_mtl4_new_encoder e = {.cmdbuf = cmdbufs[i]};
+    e.state.ptr = &state;
+    _MTL4CommandBuffer_computeCommandEncoder(&e);
+    struct chain c = {0};
+    struct wmtcmd_blit_fence_op *wait = chain_add(&c, sizeof(*wait), WMTBlitCommandWaitForFence);
+    wait->fence = H(i == 0 ? first : second);
+    if (i == 0) {
+      /* the fence-only encoder: nothing between its wait and its update */
+      struct wmtcmd_blit_fence_op *update = chain_add(&c, sizeof(*update), WMTBlitCommandUpdateFence);
+      update->fence = H(second);
+    } else {
+      struct wmtcmd_blit_copy_from_buffer_to_buffer *copy =
+          chain_add(&c, sizeof(*copy), WMTBlitCommandCopyFromBufferToBuffer);
+      copy->src = H(big), copy->src_offset = big_size - 16, copy->dst = H(small), copy->copy_length = 16;
+    }
+    replay(_MTL4ComputeCommandEncoder_encodeBlitCommands, e.ret, &state, &c);
+    [(id<MTL4ComputeCommandEncoder>)e.ret endEncoding];
+    commit_one(m, cmdbufs[i], i == 0 ? &fb : &fc, event, 3 + i);
+  }
+  wait_value(event, 4, "fence relay");
+  wait_done(&fd, "fence relay control");
+  wait_done(&fa, "fence relay A");
+  wait_done(&fb, "fence relay B");
+  wait_done(&fc, "fence relay C");
+  CHECK(!fa.error && !fb.error && !fc.error && !fd.error, "fence relay: GPU error");
+  const uint8_t *bytes = small.contents;
+  bool ok = true;
+  for (int i = 0; i < 16; i++)
+    ok &= bytes[i] == 0x5a;
+  CHECK(ok, "fence relay: the third command buffer read 0x%02x, want 0x5a (the fence-only encoder didn't pass the "
+            "order on)",
+        bytes[0]);
+  printf("fence relay: %s (A %.3f-%.3f ms, B %.3f-%.3f ms, C %.3f-%.3f ms)\n", ok ? "ok" : "FAILED",
+         fa.gpu_start * 1e3, fa.gpu_end * 1e3, fb.gpu_start * 1e3, fb.gpu_end * 1e3, fc.gpu_start * 1e3,
+         fc.gpu_end * 1e3);
+  printf("RESULT fence relay control (no wait): read 0x%02x (the fill's byte is 0x5a)\n",
+         ((const uint8_t *)control.contents)[0]);
+  struct unixcall_generic_obj_uint64_ret reset = {.handle = m->allocator};
+  _MTL4CommandAllocator_reset(&reset);
+  for (int i = 0; i < 3; i++)
+    [(id)cmdbufs[i] release];
+  [m->residency removeAllocation:big];
+  [m->residency commit];
+  [big release];
+  [first release];
+  [second release];
+  [event release];
+}
+
 /* the present path: waitForDrawable, a pass into the drawable (kept out of the chunk's set; the
    layer's set on the queue), commit, signalDrawable, present. Headless, a layer may give no
    drawable: then it's skipped. */
@@ -1016,6 +1126,7 @@ main(int argc, char **argv) {
     [m.chunk release];
     m.chunk = nil;
     test_cross_commit_fence(&m);
+    test_fence_relay(&m); // gw2 (#353)
     test_drawable(&m);
     if (db)
       probe_metallibs(&m, db, limit);

@@ -30,6 +30,7 @@
 #include "dxmt_gw2_mtl4_encoding.hpp"
 #include "dxmt_gw2_metal4.hpp"
 #include "dxmt_gw2_shown_wait.hpp"
+#include "dxmt_gw2_present_fences.hpp" // gw2 (#353)
 #include "dxmt_occlusion_query.hpp"
 #include "dxmt_presenter.hpp"
 #include "dxmt_residency.hpp"
@@ -1097,6 +1098,13 @@ private:
   // gw2 (#271): DXMT_MTL4_SHOWN_WAIT=write's state across chunks (encode thread)
   bool gw2_shown_write_ = gw2::mtl4ShownWaitWrite();
   gw2::ShownWait gw2_shown_;
+  // gw2 (#353): DXMT_MTL4_PRESENT_FENCES and the chunk's present-fence record (encode thread); the
+  // hooks are defined in dxmt_gw2_present_fences.cpp
+  gw2::PresentFences gw2_present_fences_{gw2::mtl4PresentFences()};
+  void gw2PresentFencesScan(EncoderData *current, bool deps_counting);
+  void gw2PresentFencesRelay(gw2::Mtl4Encoding &cmdbuf, PresentData *data);
+  void gw2PresentFencesPresented(PresentData *data, bool mtl3, uint64_t value, bool deps_counting);
+  void gw2PresentFencesChunk(gw2::Mtl4Encoding &cmdbuf, QueryReadbacks &readbacks);
   gw2::RebindCounters gw2_rebind_; // gw2 (#30): the encode thread's REBIND counters
   bool skip_rebind_ = gw2::skipRebind(); // gw2 (#30): DXMT_SKIP_REBIND
   bool rebind_logged_ = false;           // gw2 (#30): the first skip is logged

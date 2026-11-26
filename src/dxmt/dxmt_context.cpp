@@ -1200,6 +1200,8 @@ ArgumentEncodingContext::flushCommandsImpl(CommandBuffer &cmdbuf, uint64_t seqId
       lt(readbacks.timestamp->sampleBuffer(), LtKind::CounterSampleBuffer);
   }
 
+  if constexpr (kMetal4)
+    gw2_present_fences_.begin(encoder_count); // gw2 (#353)
   while (encoder_index) {
     auto current = encoders[encoder_count - encoder_index];
     if constexpr (kMetal4) {
@@ -1210,8 +1212,10 @@ ArgumentEncodingContext::flushCommandsImpl(CommandBuffer &cmdbuf, uint64_t seqId
         if (uint64_t value = gw2_shown_.waitBefore()) {
           cmdbuf.waitShown(value);
           gw2::metal4ShownWaited(encoder_count - encoder_index, encoder_count);
+          gw2_present_fences_.shownWaited(encoder_count - encoder_index, value); // gw2 (#353)
         }
       }
+      gw2PresentFencesScan(current, deps_counting); // gw2 (#353)
     }
     // gw2 (#4): the Metal encoders as they are encoded, after the optimizer's merges
     if (gw2_stats && current->type != EncoderType::Null) {
@@ -1446,6 +1450,7 @@ ArgumentEncodingContext::flushCommandsImpl(CommandBuffer &cmdbuf, uint64_t seqId
     case EncoderType::Present: {
       auto data = static_cast<PresentData *>(current);
       if constexpr (kMetal4) {
+        gw2PresentFencesRelay(cmdbuf, data); // gw2 (#353): DXMT_MTL4_PRESENT_FENCES=1, ahead of the split
         // gw2 (#32): present on Metal 4. The split commits the frame's work before nextDrawable, as on
         // Metal 3 (DXMT_PRESENT_SPLIT); the queue waits for the drawable before the present pass's
         // command buffer, which is committed on its own, then the drawable is signalled at the queue
@@ -1475,14 +1480,17 @@ ArgumentEncodingContext::flushCommandsImpl(CommandBuffer &cmdbuf, uint64_t seqId
             // gw2 (#271): with DXMT_MTL4_SHOWN_WAIT=write a present before it may still be left to a write,
             // and this one may have replaced its texture as the one writes are checked against: wait now
             if (gw2_shown_write_)
-              if (uint64_t value = gw2_shown_.waitBefore())
+              if (uint64_t value = gw2_shown_.waitBefore()) {
                 cmdbuf.waitShown(value);
+                gw2_present_fences_.shownWaited(encoder_count - encoder_index, value); // gw2 (#353)
+              }
             static std::atomic<bool> s_logged{false};
             if (!s_logged.exchange(true, std::memory_order_relaxed))
               ERR("Metal 4: no Metal 3 command buffer for a present; it presents the Metal 4 way "
                   "(DXMT_MTL4_PRESENT=mtl3; logged once)");
           }
         }
+        gw2PresentFencesPresented(data, mtl3, mtl3_value, deps_counting); // gw2 (#353)
         auto t0 = clock::now();
         auto drawable =
             mtl3 ? data->presenter->encodeCommands(
@@ -1515,6 +1523,8 @@ ArgumentEncodingContext::flushCommandsImpl(CommandBuffer &cmdbuf, uint64_t seqId
             // Metal 4 queue's `frame` signal and its later waits are paired with it
             const bool now = !gw2_shown_write_ || data->gw2_shown_now;
             cmdbuf.commitMetal3Present(mtl3_present, mtl3_value, now);
+            if (now)
+              gw2_present_fences_.shownWaited(encoder_count - encoder_index + 1, mtl3_value); // gw2 (#353)
             if (gw2_shown_write_) {
               gw2_shown_.flushed(mtl3_value, now);
               if (!now)
@@ -1562,6 +1572,8 @@ ArgumentEncodingContext::flushCommandsImpl(CommandBuffer &cmdbuf, uint64_t seqId
           // texture than the one before it
           const bool now = !gw2_shown_write_ || data->gw2_shown_now;
           cmdbuf.commitMetal3Present(mtl3_present, mtl3_value, now);
+          if (now)
+            gw2_present_fences_.shownWaited(encoder_count - encoder_index + 1, mtl3_value); // gw2 (#353)
           if (gw2_shown_write_) {
             gw2_shown_.flushed(mtl3_value, now);
             if (!now)
@@ -1926,6 +1938,7 @@ ArgumentEncodingContext::flushCommandsImpl(CommandBuffer &cmdbuf, uint64_t seqId
         for (size_t i = 1; i < segments.size(); i++)
           readbacks.timestamp_estimate->split(segments[i].commit, segments[i].begin);
     }
+    gw2PresentFencesChunk(cmdbuf, readbacks); // gw2 (#353): the record for a device error
   }
 
   cmdbuf.encodeSignalEvent(queue_.event, event_seq_id);

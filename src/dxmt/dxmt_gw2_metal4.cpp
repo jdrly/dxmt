@@ -56,6 +56,10 @@ sw::Effective kMtl4ShownWaitLine{"DXMT_MTL4_SHOWN_WAIT", [] {
     return std::string("next");
   return std::string(mtl4ShownWaitWrite() && metal4Active() ? "write" : "unused");
 }};
+// gw2 (#353): =1 only, off by default (ADR 0018). The startup line shows `unused` for 1 without
+// DXMT_MTL4_PRESENT=mtl3 on Metal 4
+sw::Switch<bool> kMtl4PresentFences{"DXMT_MTL4_PRESENT_FENCES", false, sw::legacy::exactlyOne};
+sw::Effective kMtl4PresentFencesLine{"DXMT_MTL4_PRESENT_FENCES", [] { return std::string(mtl4PresentFencesState()); }};
 } // namespace
 
 bool
@@ -79,6 +83,19 @@ bool
 mtl4ShownWaitWrite() {
   static const bool on = kMtl4ShownWait() == "write" && mtl4PresentMetal3();
   return on;
+}
+
+bool
+mtl4PresentFences() {
+  static const bool on = kMtl4PresentFences();
+  return on;
+}
+
+const char *
+mtl4PresentFencesState() {
+  if (!mtl4PresentFences())
+    return "0";
+  return mtl4PresentMetal3() && metal4Active() ? "1" : "unused";
 }
 
 bool

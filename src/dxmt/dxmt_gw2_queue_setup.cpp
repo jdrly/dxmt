@@ -224,6 +224,10 @@ CommandQueue::gw2AttachSubmission(WMT::Device device) {
         Logger::info("Metal 4: the next frame waits for a Metal 3 present only before it writes the presented "
                      "texture (DXMT_MTL4_SHOWN_WAIT=write)");
       }
+      // gw2 (#353): off by default (ADR 0018); unset, no line
+      if (gw2::mtl4PresentMetal3() && gw2::mtl4PresentFences())
+        Logger::info("Metal 4: a present's fence waits and update go to the Metal 4 queue, in an encoder of their "
+                     "own before the frame's commit (DXMT_MTL4_PRESENT_FENCES=1)");
     }
   }
   // gw2 (#78): Metal 3, unless the queue is on Metal 4
