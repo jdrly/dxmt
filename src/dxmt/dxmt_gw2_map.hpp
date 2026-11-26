@@ -19,6 +19,9 @@ namespace dxmt::gw2 {
 
 // DXMT_MAP_FAST (default on): the Map/Unmap fast path for dynamic and default-usage buffers.
 bool mapFast();
+// gw2 (#145): DXMT_UPDATE_ONE_CALL (default on, needs DXMT_MAP_FAST): the immediate context handles
+// UpdateSubresource's fast branch in one call, without the nested Map and Unmap.
+bool updateOneCall();
 
 // What a Map/Unmap is on, from the resource (D3D11ResourceCommon::gw2_map_kind_).
 enum class MapKind : uint8_t {
@@ -117,6 +120,52 @@ private:
   MapKind kind_;
   MapOp op_;
   uint32_t scale_ = 0; // 0: not timed
+  int64_t t0_ = 0;
+};
+
+// gw2 (#145): one UpdateSubresource of a buffer that DXMT_UPDATE_ONE_CALL handles without its Map and
+// Unmap. It counts both in MAP (`op`, then unmap) and PACE (`map`, twice), as their MapScopes and
+// ApiScopes did, and PACE leaves them to an outer scope as a nested ApiScope does. One draw decides
+// whether it times the update (1 in 16, ApiScope's k, scaled); both lines take that interval, MAP on
+// `op`'s bucket. With stats off it does nothing.
+class UpdateScope {
+public:
+  UpdateScope(MapCounters &counters, MapKind kind, MapOp op, ApiThreadCache &cache) :
+      c_(counters),
+      kind_(kind),
+      op_(op) {
+    if (!c_.on)
+      return;
+    thread_ = &cache.get();
+    if ((thread_->draw() >> 28) == 0) {
+      timed_ = true;
+      t0_ = nowNs();
+    }
+  }
+  ~UpdateScope() {
+    if (!thread_)
+      return;
+    uint64_t ns = timed_ ? uint64_t(nowNs() - t0_) * 16 : 0;
+    c_.dirty = true;
+    c_.calls[(unsigned)kind_][(unsigned)op_]++;
+    c_.calls[(unsigned)kind_][(unsigned)MapOp::Unmap]++;
+    c_.ns[(unsigned)kind_][(unsigned)op_] += ns;
+    if (thread_->depth)
+      return;
+    thread_->call(Api::Map);
+    thread_->call(Api::Map);
+    if (timed_)
+      thread_->add(Api::Map, ns);
+  }
+  UpdateScope(const UpdateScope &) = delete;
+  UpdateScope &operator=(const UpdateScope &) = delete;
+
+private:
+  MapCounters &c_;
+  ApiThread *thread_ = nullptr; // null: stats off
+  MapKind kind_;
+  MapOp op_;
+  bool timed_ = false;
   int64_t t0_ = 0;
 };
 

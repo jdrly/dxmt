@@ -46,6 +46,11 @@ public:
   immediateName() {
     return name_;
   }
+  // gw2 (#145): the same, without a reference count (the caller holds the device lock)
+  BufferAllocation *
+  immediateNamePtr() {
+    return name_.ptr();
+  }
 
   uint32_t
   immediateSuballocation() {

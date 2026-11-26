@@ -1,5 +1,6 @@
 #include "dxmt_gw2_map.hpp"
 #include "dxmt_gw2_stats.hpp"
+#include "dxmt_gw2_switches.hpp"
 #include "util_env.hpp"
 #include <atomic>
 #include <format>
@@ -17,6 +18,18 @@ const char *const kMapOpNames[kMapOpCount] = {
 bool
 mapFast() {
   static const bool on = env::getEnvVar("DXMT_MAP_FAST") != "0";
+  return on;
+}
+
+namespace {
+// gw2 (#145): on unless exactly "0"; the startup line shows 0 when DXMT_MAP_FAST=0 leaves it nothing to do
+sw::Switch<bool> kUpdateOneCall{"DXMT_UPDATE_ONE_CALL", true, sw::legacy::notZero};
+sw::Effective kUpdateOneCallLine{"DXMT_UPDATE_ONE_CALL", [] { return sw::formatValue(updateOneCall()); }};
+} // namespace
+
+bool
+updateOneCall() {
+  static const bool on = mapFast() && kUpdateOneCall();
   return on;
 }
 
