@@ -54,6 +54,12 @@ sw::Switch<uint32_t> kChunks{"DXMT_CHUNKS", kCommandChunkCount, sw::legacy::ulon
 // instead of every later hold being kept until teardown. Read at each queue's creation.
 sw::Switch<bool> kRetireRecovery{"DXMT_RETIRE_RECOVERY", true, sw::legacy::notZero};
 
+// gw2 (#269): DXMT_RELEASE_POOL (on; 0: off): the finish thread drains an autorelease pool around each
+// chunk's retirement, and the bridge's unix side (_NSObject_release) one around each release that frees
+// its object, which reads the switch itself, once, from the process environment (as DXMT_CACHE_DIR).
+// Read here at each queue's creation.
+sw::Switch<bool> kReleasePool{"DXMT_RELEASE_POOL", true, sw::legacy::notZero};
+
 uint32_t
 ChunkCountFromEnv() {
   auto v = kChunks.requested();
@@ -153,6 +159,7 @@ CommandQueue::CommandQueue(WMT::Device device) :
     unretained_(gw2::lifetime::unretained()),
     lifetime_id_(gw2::lifetime::attachQueue()), // gw2 (#31): logs the command buffer mode once per queue
     retire_recovery_(kRetireRecovery()),        // gw2 (#113)
+    release_pool_(kReleasePool()),              // gw2 (#269)
     thread_priority_(kThreadPriority.read()),   // gw2 (#151)
     // gw2 (#69): Metal 3's policy until the constructor knows whether the queue is on Metal 4
     ledger_(chunk_count_, {.unretained = unretained_, .lifetime_check = gw2::lifetime::check()}),
@@ -465,7 +472,15 @@ CommandQueue::WaitForFinishThread() {
     if (chunk.signal_frame_latency_fence_ != ~0ull)
       frame_latency_fence_.signal(chunk.signal_frame_latency_fence_);
 
-    RetireChunk(chunk, internal_seq, std::move(completed)); // gw2 (#66); gw2 (#113): the loop's sequence
+    {
+      // gw2 (#269): the retirement frees allocations and the ledger's holds on this thread, which has no
+      // pool, and so may the Metal 4 chunk's residency set when its removal drops a last reference
+      // (outside any NSObject_release); Apple's drivers autorelease their device there
+      WMT::Reference<WMT::Object> pool;
+      if (release_pool_)
+        pool = WMT::MakeAutoreleasePool();
+      RetireChunk(chunk, internal_seq, std::move(completed)); // gw2 (#66); gw2 (#113): the loop's sequence
+    }
 
     internal_seq++;
   }
