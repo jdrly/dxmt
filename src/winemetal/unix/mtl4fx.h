@@ -1,4 +1,4 @@
-/* gw2 (#56): MetalFX spatial upscaling of GW2's Subsample pass (slots 190-192), in mtl4fx.c. A file of
+/* gw2 (#56): MetalFX spatial upscaling of GW2's Subsample pass (bridge calls), in mtl4fx.c. A file of
    its own so that tests/gw2/mtl4fx_test.m can drive the same code natively. */
 #ifndef __WINEMETAL_UNIX_MTL4FX_H
 #define __WINEMETAL_UNIX_MTL4FX_H

@@ -1,4 +1,4 @@
-/* gw2 (#32): the Metal 4 bridge calls (slots 155-178 of jdrly/dxmt #32's 155-189), in mtl4.c. A file
+/* gw2 (#32): the Metal 4 bridge calls (their numbers: winemetal_calls.h), in mtl4.c. A file
    of its own so that tests/gw2/mtl4_bridge_test.m can drive the same code natively. */
 #ifndef __WINEMETAL_UNIX_MTL4_H
 #define __WINEMETAL_UNIX_MTL4_H

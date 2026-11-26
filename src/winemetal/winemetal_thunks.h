@@ -4,6 +4,9 @@
 
 #include "winemetal.h"
 
+/* gw2 (B3, #76): enum WMTCall, the bridge's call numbers, and the manifest's checks */
+#include "winemetal_call_numbers.h"
+
 #pragma pack(push, 8)
 
 struct unixcall_generic_obj_ret {
@@ -485,7 +488,7 @@ struct unixcall_wmt_pso_archive_query {
   struct WMTMemoryPointer stats;
 };
 
-/* gw2 (#32): Metal 4 (slots 155-189). Only 64-bit fields and WMTMemoryPointers, so the 32-bit and
+/* gw2 (#32): Metal 4. Only 64-bit fields and WMTMemoryPointers, so the 32-bit and
    64-bit layouts match and both tables use the same function. */
 struct unixcall_mtl4_new_argtable {
   obj_handle_t device;

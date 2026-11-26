@@ -9,12 +9,16 @@
 #include "assert.h"
 #include "string.h"
 
+/* gw2 (B3, #76): a thunk names its bridge call, UNIX_CALL(NSObject_retain, &obj); the name is pasted
+   onto WMTCall_ (winemetal_call_numbers.h), so a literal number doesn't build. UNIX_CALL_STATUS
+   returns the call's status, for the thunks that report a failure. */
+#define UNIX_CALL_STATUS(call, params) WINE_UNIX_CALL(WMTCall_##call, params)
 #ifdef NDEBUG
-#define UNIX_CALL(code, params) WINE_UNIX_CALL(code, params)
+#define UNIX_CALL(call, params) WINE_UNIX_CALL(WMTCall_##call, params)
 #else
-#define UNIX_CALL(code, params)                                                                                        \
+#define UNIX_CALL(call, params)                                                                                        \
   {                                                                                                                    \
-    NTSTATUS status = WINE_UNIX_CALL(code, params);                                                                    \
+    NTSTATUS status = WINE_UNIX_CALL(WMTCall_##call, params);                                                          \
     assert(!status && "unix call failed");                                                                             \
   }
 #endif
@@ -23,12 +27,12 @@
 
 WINEMETAL_API void
 NSObject_retain(obj_handle_t obj) {
-  UNIX_CALL(0, &obj);
+  UNIX_CALL(NSObject_retain, &obj);
 }
 
 WINEMETAL_API void
 NSObject_release(obj_handle_t obj) {
-  UNIX_CALL(1, &obj);
+  UNIX_CALL(NSObject_release, &obj);
 }
 
 WINEMETAL_API obj_handle_t
@@ -37,7 +41,7 @@ NSArray_object(obj_handle_t array, uint64_t index) {
   params.handle = array;
   params.arg = index;
   params.ret = 0;
-  UNIX_CALL(2, &params);
+  UNIX_CALL(NSArray_object, &params);
   return params.ret;
 }
 
@@ -46,7 +50,7 @@ NSArray_count(obj_handle_t array) {
   struct unixcall_generic_obj_uint64_ret params;
   params.handle = array;
   params.ret = 0;
-  UNIX_CALL(3, &params);
+  UNIX_CALL(NSArray_count, &params);
   return params.ret;
 }
 
@@ -54,7 +58,7 @@ WINEMETAL_API obj_handle_t
 WMTCopyAllDevices() {
   struct unixcall_generic_obj_ret params;
   params.ret = 0;
-  UNIX_CALL(4, &params);
+  UNIX_CALL(MTLCopyAllDevices, &params);
   return params.ret;
 }
 
@@ -63,7 +67,7 @@ MTLDevice_recommendedMaxWorkingSetSize(obj_handle_t device) {
   struct unixcall_generic_obj_uint64_ret params;
   params.handle = device;
   params.ret = 0;
-  UNIX_CALL(5, &params);
+  UNIX_CALL(MTLDevice_recommendedMaxWorkingSetSize, &params);
   return params.ret;
 }
 
@@ -72,7 +76,7 @@ MTLDevice_currentAllocatedSize(obj_handle_t device) {
   struct unixcall_generic_obj_uint64_ret params;
   params.handle = device;
   params.ret = 0;
-  UNIX_CALL(6, &params);
+  UNIX_CALL(MTLDevice_currentAllocatedSize, &params);
   return params.ret;
 }
 
@@ -81,7 +85,7 @@ MTLDevice_name(obj_handle_t device) {
   struct unixcall_generic_obj_obj_ret params;
   params.handle = device;
   params.ret = 0;
-  UNIX_CALL(7, &params);
+  UNIX_CALL(MTLDevice_name, &params);
   return params.ret;
 }
 
@@ -92,7 +96,7 @@ NSString_getCString(obj_handle_t str, char *buffer, uint64_t maxLength, enum WMT
   params.buffer_ptr = PtrToUInt64(buffer);
   params.max_length = maxLength;
   params.encoding = encoding;
-  UNIX_CALL(8, &params);
+  UNIX_CALL(NSString_getCString, &params);
   return params.ret;
 }
 
@@ -102,7 +106,7 @@ MTLDevice_newCommandQueue(obj_handle_t device, uint64_t maxCommandBufferCount) {
   params.handle = device;
   params.arg = maxCommandBufferCount;
   params.ret = 0;
-  UNIX_CALL(9, &params);
+  UNIX_CALL(MTLDevice_newCommandQueue, &params);
   return params.ret;
 }
 
@@ -110,7 +114,7 @@ WINEMETAL_API obj_handle_t
 NSAutoreleasePool_alloc_init() {
   struct unixcall_generic_obj_ret params;
   params.ret = 0;
-  UNIX_CALL(10, &params);
+  UNIX_CALL(NSAutoreleasePool_alloc_init, &params);
   return params.ret;
 }
 
@@ -119,7 +123,7 @@ MTLCommandQueue_commandBuffer(obj_handle_t queue) {
   struct unixcall_generic_obj_obj_ret params;
   params.handle = queue;
   params.ret = 0;
-  UNIX_CALL(11, &params);
+  UNIX_CALL(MTLCommandQueue_commandBuffer, &params);
   return params.ret;
 }
 
@@ -127,7 +131,7 @@ WINEMETAL_API void
 MTLCommandBuffer_commit(obj_handle_t cmdbuf) {
   struct unixcall_generic_obj_noret params;
   params.handle = cmdbuf;
-  UNIX_CALL(12, &params);
+  UNIX_CALL(MTLCommandBuffer_commit, &params);
   return;
 }
 
@@ -135,7 +139,7 @@ WINEMETAL_API void
 MTLCommandBuffer_waitUntilCompleted(obj_handle_t cmdbuf) {
   struct unixcall_generic_obj_noret params;
   params.handle = cmdbuf;
-  UNIX_CALL(13, &params);
+  UNIX_CALL(MTLCommandBuffer_waitUntilCompleted, &params);
   return;
 }
 
@@ -144,7 +148,7 @@ MTLCommandBuffer_status(obj_handle_t cmdbuf) {
   struct unixcall_generic_obj_uint64_ret params;
   params.handle = cmdbuf;
   params.ret = 0;
-  UNIX_CALL(14, &params);
+  UNIX_CALL(MTLCommandBuffer_status, &params);
   return params.ret;
 }
 
@@ -153,7 +157,7 @@ MTLDevice_newSharedEvent(obj_handle_t device) {
   struct unixcall_generic_obj_obj_ret params;
   params.handle = device;
   params.ret = 0;
-  UNIX_CALL(15, &params);
+  UNIX_CALL(MTLDevice_newSharedEvent, &params);
   return params.ret;
 }
 
@@ -162,7 +166,7 @@ MTLSharedEvent_signaledValue(obj_handle_t event) {
   struct unixcall_generic_obj_uint64_ret params;
   params.handle = event;
   params.ret = 0;
-  UNIX_CALL(16, &params);
+  UNIX_CALL(MTLSharedEvent_signaledValue, &params);
   return params.ret;
 }
 
@@ -172,7 +176,7 @@ MTLCommandBuffer_encodeSignalEvent(obj_handle_t cmdbuf, obj_handle_t event, uint
   params.handle = cmdbuf;
   params.arg0 = event;
   params.arg1 = value;
-  UNIX_CALL(17, &params);
+  UNIX_CALL(MTLCommandBuffer_encodeSignalEvent, &params);
   return;
 }
 
@@ -181,7 +185,7 @@ MTLDevice_newBuffer(obj_handle_t device, struct WMTBufferInfo *info) {
   struct unixcall_mtldevice_newbuffer params;
   params.device = device;
   WMT_MEMPTR_SET(params.info, info);
-  UNIX_CALL(18, &params);
+  UNIX_CALL(MTLDevice_newBuffer, &params);
   return params.ret;
 }
 
@@ -190,7 +194,7 @@ MTLDevice_newSamplerState(obj_handle_t device, struct WMTSamplerInfo *info) {
   struct unixcall_mtldevice_newsamplerstate params;
   params.device = device;
   WMT_MEMPTR_SET(params.info, info);
-  UNIX_CALL(19, &params);
+  UNIX_CALL(MTLDevice_newSamplerState, &params);
   return params.ret;
 }
 
@@ -199,7 +203,7 @@ MTLDevice_newDepthStencilState(obj_handle_t device, const struct WMTDepthStencil
   struct unixcall_mtldevice_newdepthstencilstate params;
   params.device = device;
   WMT_MEMPTR_SET(params.info, info);
-  UNIX_CALL(20, &params);
+  UNIX_CALL(MTLDevice_newDepthStencilState, &params);
   return params.ret;
 }
 
@@ -208,7 +212,7 @@ MTLDevice_newTexture(obj_handle_t device, struct WMTTextureInfo *info) {
   struct unixcall_mtldevice_newtexture params;
   params.device = device;
   WMT_MEMPTR_SET(params.info, info);
-  UNIX_CALL(21, &params);
+  UNIX_CALL(MTLDevice_newTexture, &params);
   return params.ret;
 }
 
@@ -219,7 +223,7 @@ MTLBuffer_newTexture(obj_handle_t buffer, struct WMTTextureInfo *info, uint64_t 
   WMT_MEMPTR_SET(params.info, info);
   params.offset = offset;
   params.bytes_per_row = bytes_per_row;
-  UNIX_CALL(22, &params);
+  UNIX_CALL(MTLBuffer_newTexture, &params);
   return params.ret;
 }
 
@@ -238,7 +242,7 @@ MTLTexture_newTextureView(
   params.slice_start = slice_start;
   params.slice_count = slice_count;
   params.swizzle = swizzle;
-  UNIX_CALL(23, &params);
+  UNIX_CALL(MTLTexture_newTextureView, &params);
   *out_gpu_resource_id = params.gpu_resource_id;
   return params.ret;
 }
@@ -249,7 +253,7 @@ MTLDevice_minimumLinearTextureAlignmentForPixelFormat(obj_handle_t device, enum 
   params.handle = device;
   params.arg = (uint64_t)format;
   params.ret = 0;
-  UNIX_CALL(24, &params);
+  UNIX_CALL(MTLDevice_minimumLinearTextureAlignmentForPixelFormat, &params);
   return params.ret;
 }
 
@@ -262,7 +266,7 @@ MTLDevice_newLibrary(
   params.data = data;
   params.ret_error = 0;
   params.ret_library = 0;
-  UNIX_CALL(25, &params);
+  UNIX_CALL(MTLDevice_newLibrary, &params);
   if (err_out)
     *err_out = params.ret_error;
   return params.ret_library;
@@ -274,7 +278,7 @@ MTLLibrary_newFunction(obj_handle_t library, const char *name) {
   params.handle = library;
   params.arg = PtrToUInt64(name);
   params.ret = 0;
-  UNIX_CALL(26, &params);
+  UNIX_CALL(MTLLibrary_newFunction, &params);
   return params.ret;
 }
 
@@ -284,7 +288,7 @@ NSString_lengthOfBytesUsingEncoding(obj_handle_t str, enum WMTStringEncoding enc
   params.handle = str;
   params.arg = (uint64_t)(encoding);
   params.ret = 0;
-  UNIX_CALL(27, &params);
+  UNIX_CALL(NSString_lengthOfBytesUsingEncoding, &params);
   return params.ret;
 }
 
@@ -292,7 +296,7 @@ WINEMETAL_API obj_handle_t
 NSObject_description(obj_handle_t nserror) {
   struct unixcall_generic_obj_obj_ret params;
   params.handle = nserror;
-  UNIX_CALL(28, &params);
+  UNIX_CALL(NSObject_description, &params);
   return params.ret;
 }
 
@@ -305,7 +309,7 @@ MTLDevice_newComputePipelineState(
   WMT_MEMPTR_SET(params.info, info);
   params.ret_error = 0;
   params.ret_pso = 0;
-  UNIX_CALL(29, &params);
+  UNIX_CALL(MTLDevice_newComputePipelineState, &params);
   if (err_out)
     *err_out = params.ret_error;
   return params.ret_pso;
@@ -316,7 +320,7 @@ MTLCommandBuffer_blitCommandEncoder(obj_handle_t cmdbuf) {
   struct unixcall_generic_obj_obj_ret params;
   params.handle = cmdbuf;
   params.ret = 0;
-  UNIX_CALL(30, &params);
+  UNIX_CALL(MTLCommandBuffer_blitCommandEncoder, &params);
   return params.ret;
 }
 
@@ -326,7 +330,7 @@ MTLCommandBuffer_computeCommandEncoder(obj_handle_t cmdbuf, bool concurrent) {
   params.handle = cmdbuf;
   params.arg = concurrent;
   params.ret = 0;
-  UNIX_CALL(31, &params);
+  UNIX_CALL(MTLCommandBuffer_computeCommandEncoder, &params);
   return params.ret;
 }
 
@@ -336,7 +340,7 @@ MTLCommandBuffer_renderCommandEncoder(obj_handle_t cmdbuf, struct WMTRenderPassI
   params.handle = cmdbuf;
   params.arg = PtrToUInt64(info);
   params.ret = 0;
-  UNIX_CALL(32, &params);
+  UNIX_CALL(MTLCommandBuffer_renderCommandEncoder, &params);
   return params.ret;
 }
 
@@ -344,7 +348,7 @@ WINEMETAL_API void
 MTLCommandEncoder_endEncoding(obj_handle_t encoder) {
   struct unixcall_generic_obj_noret params;
   params.handle = encoder;
-  UNIX_CALL(33, &params);
+  UNIX_CALL(MTLCommandEncoder_endEncoding, &params);
   return;
 }
 
@@ -355,7 +359,7 @@ MTLDevice_newRenderPipelineState(obj_handle_t device, const struct WMTRenderPipe
   WMT_MEMPTR_SET(params.info, info);
   params.ret_error = 0;
   params.ret_pso = 0;
-  UNIX_CALL(34, &params);
+  UNIX_CALL(MTLDevice_newRenderPipelineState, &params);
   if (err_out)
     *err_out = params.ret_error;
   return params.ret_pso;
@@ -370,7 +374,7 @@ MTLDevice_newMeshRenderPipelineState(
   WMT_MEMPTR_SET(params.info, info);
   params.ret_error = 0;
   params.ret_pso = 0;
-  UNIX_CALL(35, &params);
+  UNIX_CALL(MTLDevice_newMeshRenderPipelineState, &params);
   if (err_out)
     *err_out = params.ret_error;
   return params.ret_pso;
@@ -381,7 +385,7 @@ MTLBlitCommandEncoder_encodeCommands(obj_handle_t encoder, const struct wmtcmd_b
   struct unixcall_generic_obj_cmd_noret params;
   params.encoder = encoder;
   WMT_MEMPTR_SET(params.cmd_head, cmd_head);
-  UNIX_CALL(36, &params);
+  UNIX_CALL(MTLBlitCommandEncoder_encodeCommands, &params);
 }
 
 WINEMETAL_API void
@@ -389,7 +393,7 @@ MTLComputeCommandEncoder_encodeCommands(obj_handle_t encoder, const struct wmtcm
   struct unixcall_generic_obj_cmd_noret params;
   params.encoder = encoder;
   WMT_MEMPTR_SET(params.cmd_head, cmd_head);
-  UNIX_CALL(37, &params);
+  UNIX_CALL(MTLComputeCommandEncoder_encodeCommands, &params);
 }
 
 WINEMETAL_API void
@@ -397,7 +401,7 @@ MTLRenderCommandEncoder_encodeCommands(obj_handle_t encoder, const struct wmtcmd
   struct unixcall_generic_obj_cmd_noret params;
   params.encoder = encoder;
   WMT_MEMPTR_SET(params.cmd_head, cmd_head);
-  UNIX_CALL(38, &params);
+  UNIX_CALL(MTLRenderCommandEncoder_encodeCommands, &params);
 }
 
 WINEMETAL_API enum WMTPixelFormat
@@ -405,7 +409,7 @@ MTLTexture_pixelFormat(obj_handle_t texture) {
   struct unixcall_generic_obj_uint64_ret params;
   params.handle = texture;
   params.ret = 0;
-  UNIX_CALL(39, &params);
+  UNIX_CALL(MTLTexture_pixelFormat, &params);
   return (enum WMTPixelFormat)params.ret;
 }
 
@@ -414,7 +418,7 @@ MTLTexture_width(obj_handle_t texture) {
   struct unixcall_generic_obj_uint64_ret params;
   params.handle = texture;
   params.ret = 0;
-  UNIX_CALL(40, &params);
+  UNIX_CALL(MTLTexture_width, &params);
   return params.ret;
 }
 WINEMETAL_API uint64_t
@@ -422,7 +426,7 @@ MTLTexture_height(obj_handle_t texture) {
   struct unixcall_generic_obj_uint64_ret params;
   params.handle = texture;
   params.ret = 0;
-  UNIX_CALL(41, &params);
+  UNIX_CALL(MTLTexture_height, &params);
   return params.ret;
 }
 WINEMETAL_API uint64_t
@@ -430,7 +434,7 @@ MTLTexture_depth(obj_handle_t texture) {
   struct unixcall_generic_obj_uint64_ret params;
   params.handle = texture;
   params.ret = 0;
-  UNIX_CALL(42, &params);
+  UNIX_CALL(MTLTexture_depth, &params);
   return params.ret;
 }
 WINEMETAL_API uint64_t
@@ -438,7 +442,7 @@ MTLTexture_arrayLength(obj_handle_t texture) {
   struct unixcall_generic_obj_uint64_ret params;
   params.handle = texture;
   params.ret = 0;
-  UNIX_CALL(43, &params);
+  UNIX_CALL(MTLTexture_arrayLength, &params);
   return params.ret;
 }
 WINEMETAL_API uint64_t
@@ -446,7 +450,7 @@ MTLTexture_mipmapLevelCount(obj_handle_t texture) {
   struct unixcall_generic_obj_uint64_ret params;
   params.handle = texture;
   params.ret = 0;
-  UNIX_CALL(44, &params);
+  UNIX_CALL(MTLTexture_mipmapLevelCount, &params);
   return params.ret;
 }
 WINEMETAL_API void
@@ -463,7 +467,7 @@ MTLTexture_replaceRegion(
   params.data = data;
   params.bytes_per_row = bytes_per_row;
   params.bytes_per_image = bytes_per_image;
-  UNIX_CALL(45, &params);
+  UNIX_CALL(MTLTexture_replaceRegion, &params);
 }
 
 WINEMETAL_API void
@@ -472,7 +476,7 @@ MTLBuffer_didModifyRange(obj_handle_t buffer, uint64_t start, uint64_t length) {
   params.handle = buffer;
   params.arg = start;
   params.ret = length;
-  UNIX_CALL(46, &params);
+  UNIX_CALL(MTLBuffer_didModifyRange, &params);
 }
 
 WINEMETAL_API void
@@ -480,7 +484,7 @@ MTLCommandBuffer_presentDrawable(obj_handle_t cmdbuf, obj_handle_t drawable) {
   struct unixcall_generic_obj_obj_noret params;
   params.handle = cmdbuf;
   params.arg = drawable;
-  UNIX_CALL(47, &params);
+  UNIX_CALL(MTLCommandBuffer_presentDrawable, &params);
 };
 
 WINEMETAL_API void
@@ -489,7 +493,7 @@ MTLCommandBuffer_presentDrawableAfterMinimumDuration(obj_handle_t cmdbuf, obj_ha
   params.handle = cmdbuf;
   params.arg0 = drawable;
   params.arg1 = after;
-  UNIX_CALL(48, &params);
+  UNIX_CALL(MTLCommandBuffer_presentDrawableAfterMinimumDuration, &params);
 };
 
 WINEMETAL_API void
@@ -498,10 +502,10 @@ MTLCommandBuffer_presentDrawableWithDeadline(obj_handle_t cmdbuf, obj_handle_t d
   params.handle = cmdbuf;
   params.arg0 = drawable;
   params.arg1 = interval;
-  UNIX_CALL(146, &params);
+  UNIX_CALL(MTLCommandBuffer_presentDrawableWithDeadline, &params);
 };
 
-// gw2 (#7): unix call 148 (147 is #1's)
+// gw2 (#7)
 WINEMETAL_API uint32_t
 MTLDrawable_trackPresented(
     obj_handle_t drawable, uint64_t frame, struct WMTPresentedRecord *out, uint32_t capacity, uint32_t *lost
@@ -512,7 +516,7 @@ MTLDrawable_trackPresented(
   params.capacity = capacity < WMT_PRESENTED_BATCH ? capacity : WMT_PRESENTED_BATCH;
   params.count = 0;
   params.lost = 0;
-  UNIX_CALL(148, &params);
+  UNIX_CALL(MTLDrawable_trackPresented, &params);
   uint32_t count = (uint32_t)params.count;
   for (uint32_t i = 0; i < count; i++)
     out[i] = params.records[i];
@@ -527,7 +531,7 @@ MTLDevice_supportsFamily(obj_handle_t device, enum WMTGPUFamily gpu_family) {
   params.handle = device;
   params.arg = gpu_family;
   params.ret = 0;
-  UNIX_CALL(49, &params);
+  UNIX_CALL(MTLDevice_supportsFamily, &params);
   return params.ret;
 }
 
@@ -536,7 +540,7 @@ MTLDevice_supportsBCTextureCompression(obj_handle_t device) {
   struct unixcall_generic_obj_uint64_ret params;
   params.handle = device;
   params.ret = 0;
-  UNIX_CALL(50, &params);
+  UNIX_CALL(MTLDevice_supportsBCTextureCompression, &params);
   return params.ret;
 };
 
@@ -546,7 +550,7 @@ MTLDevice_supportsTextureSampleCount(obj_handle_t device, uint8_t sample_count) 
   params.handle = device;
   params.arg = sample_count;
   params.ret = 0;
-  UNIX_CALL(51, &params);
+  UNIX_CALL(MTLDevice_supportsTextureSampleCount, &params);
   return params.ret;
 }
 
@@ -555,7 +559,7 @@ MTLDevice_hasUnifiedMemory(obj_handle_t device) {
   struct unixcall_generic_obj_uint64_ret params;
   params.handle = device;
   params.ret = 0;
-  UNIX_CALL(52, &params);
+  UNIX_CALL(MTLDevice_hasUnifiedMemory, &params);
   return params.ret;
 };
 
@@ -563,7 +567,7 @@ WINEMETAL_API obj_handle_t
 MTLCaptureManager_sharedCaptureManager() {
   struct unixcall_generic_obj_ret params;
   params.ret = NULL_OBJECT_HANDLE;
-  UNIX_CALL(53, &params);
+  UNIX_CALL(MTLCaptureManager_sharedCaptureManager, &params);
   return params.ret;
 }
 
@@ -572,7 +576,7 @@ MTLCaptureManager_startCapture(obj_handle_t mgr, struct WMTCaptureInfo *info) {
   struct unixcall_mtlcapturemanager_startcapture params;
   params.capture_manager = mgr;
   WMT_MEMPTR_SET(params.info, info);
-  UNIX_CALL(54, &params);
+  UNIX_CALL(MTLCaptureManager_startCapture, &params);
   return params.ret;
 }
 
@@ -580,7 +584,7 @@ WINEMETAL_API void
 MTLCaptureManager_stopCapture(obj_handle_t mgr) {
   struct unixcall_generic_obj_noret params;
   params.handle = mgr;
-  UNIX_CALL(55, &params);
+  UNIX_CALL(MTLCaptureManager_stopCapture, &params);
 }
 
 WINEMETAL_API obj_handle_t
@@ -588,7 +592,7 @@ MTLDevice_newTemporalScaler(obj_handle_t device, const struct WMTFXTemporalScale
   struct unixcall_mtldevice_newfxtemporalscaler params;
   params.device = device;
   WMT_MEMPTR_SET(params.info, info);
-  UNIX_CALL(56, &params);
+  UNIX_CALL(MTLDevice_newTemporalScaler, &params);
   return params.ret;
 }
 
@@ -597,7 +601,7 @@ MTLDevice_newSpatialScaler(obj_handle_t device, const struct WMTFXSpatialScalerI
   struct unixcall_mtldevice_newfxspatialscaler params;
   params.device = device;
   WMT_MEMPTR_SET(params.info, info);
-  UNIX_CALL(57, &params);
+  UNIX_CALL(MTLDevice_newSpatialScaler, &params);
   return params.ret;
 }
 
@@ -616,7 +620,7 @@ MTLCommandBuffer_encodeTemporalScale(
   params.exposure = exposure;
   params.fence = fence;
   WMT_MEMPTR_SET(params.props, props);
-  UNIX_CALL(58, &params);
+  UNIX_CALL(MTLCommandBuffer_encodeTemporalScale, &params);
 }
 
 WINEMETAL_API void
@@ -629,7 +633,7 @@ MTLCommandBuffer_encodeSpatialScale(
   params.color = color;
   params.output = output;
   params.fence = fence;
-  UNIX_CALL(59, &params);
+  UNIX_CALL(MTLCommandBuffer_encodeSpatialScale, &params);
 }
 
 WINEMETAL_API obj_handle_t
@@ -638,7 +642,7 @@ NSString_string(const char *data, enum WMTStringEncoding encoding) {
   WMT_MEMPTR_SET(params.buffer_ptr, data);
   params.encoding = encoding;
   params.ret = NULL_OBJECT_HANDLE;
-  UNIX_CALL(60, &params);
+  UNIX_CALL(NSString_string, &params);
   return params.ret;
 }
 
@@ -648,7 +652,7 @@ NSString_alloc_init(const char *data, enum WMTStringEncoding encoding) {
   WMT_MEMPTR_SET(params.buffer_ptr, data);
   params.encoding = encoding;
   params.ret = NULL_OBJECT_HANDLE;
-  UNIX_CALL(61, &params);
+  UNIX_CALL(NSString_alloc_init, &params);
   return params.ret;
 }
 
@@ -656,7 +660,7 @@ WINEMETAL_API obj_handle_t
 DeveloperHUDProperties_instance() {
   struct unixcall_generic_obj_ret params;
   params.ret = NULL_OBJECT_HANDLE;
-  UNIX_CALL(62, &params);
+  UNIX_CALL(DeveloperHUDProperties_instance, &params);
   return params.ret;
 }
 
@@ -667,7 +671,7 @@ DeveloperHUDProperties_addLabel(obj_handle_t obj, obj_handle_t label, obj_handle
   params.arg0 = label;
   params.arg1 = after;
   params.ret = 0;
-  UNIX_CALL(63, &params);
+  UNIX_CALL(DeveloperHUDProperties_addLabel, &params);
   return params.ret;
 }
 
@@ -677,7 +681,7 @@ DeveloperHUDProperties_updateLabel(obj_handle_t obj, obj_handle_t label, obj_han
   params.handle = obj;
   params.arg0 = label;
   params.arg1 = value;
-  UNIX_CALL(64, &params);
+  UNIX_CALL(DeveloperHUDProperties_updateLabel, &params);
 }
 
 WINEMETAL_API void
@@ -685,7 +689,7 @@ DeveloperHUDProperties_remove(obj_handle_t obj, obj_handle_t label) {
   struct unixcall_generic_obj_obj_noret params;
   params.handle = obj;
   params.arg = label;
-  UNIX_CALL(65, &params);
+  UNIX_CALL(DeveloperHUDProperties_remove, &params);
 }
 
 WINEMETAL_API obj_handle_t
@@ -693,7 +697,7 @@ MetalDrawable_texture(obj_handle_t drawable) {
   struct unixcall_generic_obj_obj_ret params;
   params.handle = drawable;
   params.ret = NULL_OBJECT_HANDLE;
-  UNIX_CALL(66, &params);
+  UNIX_CALL(MetalDrawable_texture, &params);
   return params.ret;
 }
 
@@ -702,7 +706,7 @@ MetalLayer_nextDrawable(obj_handle_t layer) {
   struct unixcall_generic_obj_obj_ret params;
   params.handle = layer;
   params.ret = NULL_OBJECT_HANDLE;
-  UNIX_CALL(67, &params);
+  UNIX_CALL(MetalLayer_nextDrawable, &params);
   return params.ret;
 }
 
@@ -711,7 +715,7 @@ MTLDevice_supportsFXSpatialScaler(obj_handle_t device) {
   struct unixcall_generic_obj_uint64_ret params;
   params.handle = device;
   params.ret = 0;
-  UNIX_CALL(68, &params);
+  UNIX_CALL(MTLDevice_supportsFXSpatialScaler, &params);
   return params.ret;
 };
 
@@ -720,7 +724,7 @@ MTLDevice_supportsFXTemporalScaler(obj_handle_t device) {
   struct unixcall_generic_obj_uint64_ret params;
   params.handle = device;
   params.ret = 0;
-  UNIX_CALL(69, &params);
+  UNIX_CALL(MTLDevice_supportsFXTemporalScaler, &params);
   return params.ret;
 };
 
@@ -729,7 +733,7 @@ MetalLayer_setProps(obj_handle_t layer, const struct WMTLayerProps *props) {
   struct unixcall_generic_obj_constptr_noret params;
   params.handle = layer;
   WMT_MEMPTR_SET(params.arg, props);
-  UNIX_CALL(70, &params);
+  UNIX_CALL(MetalLayer_setProps, &params);
 }
 
 WINEMETAL_API void
@@ -737,7 +741,7 @@ MetalLayer_getProps(obj_handle_t layer, struct WMTLayerProps *props) {
   struct unixcall_generic_obj_ptr_noret params;
   params.handle = layer;
   WMT_MEMPTR_SET(params.arg, props);
-  UNIX_CALL(71, &params);
+  UNIX_CALL(MetalLayer_getProps, &params);
 }
 
 WINEMETAL_API obj_handle_t
@@ -747,7 +751,7 @@ CreateMetalViewFromHWND(intptr_t hwnd, obj_handle_t device, obj_handle_t *layer)
   params.device = device;
   params.ret_layer = NULL_OBJECT_HANDLE;
   params.ret_view = NULL_OBJECT_HANDLE;
-  UNIX_CALL(72, &params);
+  UNIX_CALL(CreateMetalViewFromHWND, &params);
   *layer = params.ret_layer;
   return params.ret_view;
 }
@@ -756,7 +760,7 @@ WINEMETAL_API void
 ReleaseMetalView(obj_handle_t view) {
   struct unixcall_generic_obj_noret params;
   params.handle = view;
-  UNIX_CALL(73, &params);
+  UNIX_CALL(ReleaseMetalView, &params);
 }
 
 WINEMETAL_API uint64_t
@@ -764,7 +768,7 @@ MetalView_visibility(obj_handle_t view) {
   struct unixcall_generic_obj_uint64_ret params;
   params.handle = view;
   params.ret = 0;
-  UNIX_CALL(147, &params);
+  UNIX_CALL(MetalView_visibility, &params);
   return params.ret;
 }
 
@@ -773,7 +777,7 @@ MTLCommandEncoder_setLabel(obj_handle_t encoder, obj_handle_t label) {
   struct unixcall_generic_obj_obj_noret params;
   params.handle = encoder;
   params.arg = label;
-  UNIX_CALL(86, &params);
+  UNIX_CALL(MTLCommandEncoder_setLabel, &params);
 }
 
 WINEMETAL_API void
@@ -781,7 +785,7 @@ MTLDevice_setShouldMaximizeConcurrentCompilation(obj_handle_t device, bool value
   struct unixcall_generic_obj_uint64_noret params;
   params.handle = device;
   params.arg = value;
-  UNIX_CALL(87, &params);
+  UNIX_CALL(MTLDevice_setShouldMaximizeConcurrentCompilation, &params);
 }
 
 WINEMETAL_API obj_handle_t
@@ -789,7 +793,7 @@ MTLCommandBuffer_error(obj_handle_t cmdbuf) {
   struct unixcall_generic_obj_obj_ret params;
   params.handle = cmdbuf;
   params.ret = NULL_OBJECT_HANDLE;
-  UNIX_CALL(89, &params);
+  UNIX_CALL(MTLCommandBuffer_error, &params);
   return params.ret;
 }
 
@@ -798,7 +802,7 @@ MTLCommandBuffer_logs(obj_handle_t cmdbuf) {
   struct unixcall_generic_obj_obj_ret params;
   params.handle = cmdbuf;
   params.ret = NULL_OBJECT_HANDLE;
-  UNIX_CALL(90, &params);
+  UNIX_CALL(MTLCommandBuffer_logs, &params);
   return params.ret;
 }
 
@@ -810,7 +814,7 @@ MTLLogContainer_enumerate(obj_handle_t logs, uint64_t start, uint64_t buffer_siz
   params.buffer_size = buffer_size;
   WMT_MEMPTR_SET(params.buffer, buffer);
   params.ret_read = 0;
-  UNIX_CALL(91, &params);
+  UNIX_CALL(MTLLogContainer_enumerate, &params);
   return params.ret_read;
 }
 
@@ -819,7 +823,7 @@ CGColorSpace_checkColorSpaceSupported(enum WMTColorSpace colorspace) {
   struct unixcall_generic_obj_uint64_ret params;
   params.handle = colorspace;
   params.ret = 0;
-  UNIX_CALL(92, &params);
+  UNIX_CALL(CGColorSpace_checkColorSpaceSupported, &params);
   return params.ret;
 }
 
@@ -829,7 +833,7 @@ MetalLayer_setColorSpace(obj_handle_t layer, enum WMTColorSpace colorspace) {
   params.handle = layer;
   params.arg = colorspace;
   params.ret = 0;
-  UNIX_CALL(93, &params);
+  UNIX_CALL(MetalLayer_setColorSpace, &params);
   return params.ret;
 }
 
@@ -837,7 +841,7 @@ WINEMETAL_API uint32_t
 WMTGetPrimaryDisplayId() {
   struct unixcall_generic_obj_ret params;
   params.ret = 0;
-  UNIX_CALL(94, &params);
+  UNIX_CALL(WMTGetPrimaryDisplayId, &params);
   return params.ret;
 }
 
@@ -845,7 +849,7 @@ WINEMETAL_API uint32_t
 WMTGetSecondaryDisplayId() {
   struct unixcall_generic_obj_ret params;
   params.ret = 0;
-  UNIX_CALL(95, &params);
+  UNIX_CALL(WMTGetSecondaryDisplayId, &params);
   return params.ret;
 }
 
@@ -854,7 +858,7 @@ WMTGetDisplayDescription(uint32_t display_id, struct WMTDisplayDescription *desc
   struct unixcall_generic_obj_ptr_noret params;
   params.handle = display_id;
   WMT_MEMPTR_SET(params.arg, desc);
-  UNIX_CALL(96, &params);
+  UNIX_CALL(WMTGetDisplayDescription, &params);
 }
 
 WINEMETAL_API void
@@ -862,7 +866,7 @@ MetalLayer_getEDRValue(obj_handle_t layer, struct WMTEDRValue *value) {
   struct unixcall_generic_obj_constptr_noret params;
   params.handle = layer;
   WMT_MEMPTR_SET(params.arg, value);
-  UNIX_CALL(97, &params);
+  UNIX_CALL(MetalLayer_getEDRValue, &params);
 }
 
 WINEMETAL_API obj_handle_t
@@ -877,7 +881,7 @@ MTLLibrary_newFunctionWithConstants(
   params.num_constants = num_constants;
   params.ret = 0;
   params.ret_error = 0;
-  UNIX_CALL(98, &params);
+  UNIX_CALL(MTLLibrary_newFunctionWithConstants, &params);
   if (err_out)
     *err_out = params.ret_error;
   return params.ret;
@@ -888,7 +892,7 @@ WMTQueryDisplaySetting(uint32_t display_id, enum WMTColorSpace *colorspace, stru
   struct unixcall_query_display_setting params;
   params.display_id = display_id;
   WMT_MEMPTR_SET(params.hdr_metadata, metadata);
-  UNIX_CALL(99, &params);
+  UNIX_CALL(WMTQueryDisplaySetting, &params);
   *colorspace = params.colorspace;
   return params.ret;
 }
@@ -899,7 +903,7 @@ WMTUpdateDisplaySetting(uint32_t display_id, enum WMTColorSpace colorspace, cons
   params.display_id = display_id;
   params.colorspace = colorspace;
   WMT_MEMPTR_SET(params.hdr_metadata, metadata);
-  UNIX_CALL(100, &params);
+  UNIX_CALL(WMTUpdateDisplaySetting, &params);
 }
 
 WINEMETAL_API void
@@ -910,7 +914,7 @@ WMTQueryDisplaySettingForLayer(
   struct unixcall_query_display_setting_for_layer params;
   params.layer = layer;
   WMT_MEMPTR_SET(params.hdr_metadata, metadata);
-  UNIX_CALL(101, &params);
+  UNIX_CALL(WMTQueryDisplaySettingForLayer, &params);
   *version = params.version;
   *colorspace = params.colorspace;
   *edr_value = params.edr_value;
@@ -922,7 +926,7 @@ MTLCommandBuffer_encodeWaitForEvent(obj_handle_t cmdbuf, obj_handle_t event, uin
   params.handle = cmdbuf;
   params.arg0 = event;
   params.arg1 = value;
-  UNIX_CALL(102, &params);
+  UNIX_CALL(MTLCommandBuffer_encodeWaitForEvent, &params);
   return;
 }
 
@@ -931,7 +935,7 @@ MTLSharedEvent_signalValue(obj_handle_t event, uint64_t value) {
   struct unixcall_generic_obj_uint64_noret params;
   params.handle = event;
   params.arg = value;
-  UNIX_CALL(103, &params);
+  UNIX_CALL(MTLSharedEvent_signalValue, &params);
 }
 
 WINEMETAL_API void
@@ -943,7 +947,7 @@ MTLSharedEvent_setWin32EventAtValue(
   params.shared_event_listener = shared_event_listener;
   params.event_handle = (obj_handle_t)PtrToUInt64(nt_event_handle);
   params.value = at_value;
-  UNIX_CALL(104, &params);
+  UNIX_CALL(MTLSharedEvent_setWin32EventAtValue, &params);
 }
 
 WINEMETAL_API obj_handle_t
@@ -951,7 +955,7 @@ MTLDevice_newFence(obj_handle_t device) {
   struct unixcall_generic_obj_obj_ret params;
   params.handle = device;
   params.ret = 0;
-  UNIX_CALL(105, &params);
+  UNIX_CALL(MTLDevice_newFence, &params);
   return params.ret;
 }
 
@@ -960,7 +964,7 @@ MTLDevice_newEvent(obj_handle_t device) {
   struct unixcall_generic_obj_obj_ret params;
   params.handle = device;
   params.ret = 0;
-  UNIX_CALL(106, &params);
+  UNIX_CALL(MTLDevice_newEvent, &params);
   return params.ret;
 }
 
@@ -971,13 +975,13 @@ MTLBuffer_updateContents(obj_handle_t buffer, uint64_t offset, struct WMTConstMe
   params.offset = offset;
   params.data = data;
   params.length = length;
-  UNIX_CALL(107, &params);
+  UNIX_CALL(MTLBuffer_updateContents, &params);
 }
 
 WINEMETAL_API obj_handle_t
 SharedEventListener_create() {
   struct unixcall_generic_obj_ret params;
-  UNIX_CALL(108, &params);
+  UNIX_CALL(SharedEventListener_create, &params);
   return params.ret;
 }
 
@@ -985,20 +989,20 @@ WINEMETAL_API void
 SharedEventListener_start(obj_handle_t event_queue) {
   struct unixcall_generic_obj_noret params;
   params.handle = event_queue;
-  UNIX_CALL(109, &params);
+  UNIX_CALL(SharedEventListener_start, &params);
 }
 
 WINEMETAL_API void
 SharedEventListener_destroy(obj_handle_t event_queue) {
   struct unixcall_generic_obj_noret params;
   params.handle = event_queue;
-  UNIX_CALL(110, &params);
+  UNIX_CALL(SharedEventListener_destroy, &params);
 }
 
 WINEMETAL_API void
 WMTGetOSVersion(uint64_t *major, uint64_t *minor, uint64_t *patch) {
   struct unixcall_get_os_version params;
-  UNIX_CALL(111, &params);
+  UNIX_CALL(WMTGetOSVersion, &params);
   if (major)
     *major = params.ret_major;
   if (minor)
@@ -1014,7 +1018,7 @@ MTLDevice_newBinaryArchive(obj_handle_t device, const char *url, obj_handle_t *e
   WMT_MEMPTR_SET(params.url, url);
   params.ret_archive = 0;
   params.ret_error = 0;
-  UNIX_CALL(112, &params);
+  UNIX_CALL(MTLDevice_newBinaryArchive, &params);
   if (err_out)
     *err_out = params.ret_error;
   return params.ret_archive;
@@ -1025,7 +1029,7 @@ MTLBinaryArchive_serialize(obj_handle_t archive, const char *url, obj_handle_t *
   struct unixcall_mtlbinaryarchive_serialize params;
   params.archive = archive;
   WMT_MEMPTR_SET(params.url, url);
-  UNIX_CALL(113, &params);
+  UNIX_CALL(MTLBinaryArchive_serialize, &params);
   if (err_out)
     *err_out = params.ret_error;
 }
@@ -1035,7 +1039,7 @@ DispatchData_alloc_init(uint64_t native_ptr, uint64_t length) {
   struct unixcall_generic_obj_uint64_obj_ret params;
   params.handle = native_ptr;
   params.arg = length;
-  UNIX_CALL(114, &params);
+  UNIX_CALL(DispatchData_alloc_init, &params);
   return params.ret;
 }
 
@@ -1044,7 +1048,7 @@ CacheReader_alloc_init(const char *path, uint64_t version) {
   struct unixcall_cache_alloc_init params;
   WMT_MEMPTR_SET(params.path, path);
   params.version = version;
-  UNIX_CALL(115, &params);
+  UNIX_CALL(CacheReader_alloc_init, &params);
   return params.ret_cache;
 }
 
@@ -1054,7 +1058,7 @@ CacheReader_get(obj_handle_t reader, const void *key, uint64_t length) {
   params.cache = reader;
   WMT_MEMPTR_SET(params.key, key);
   params.key_length = length;
-  UNIX_CALL(116, &params);
+  UNIX_CALL(CacheReader_get, &params);
   return params.ret_data;
 }
 
@@ -1063,7 +1067,7 @@ CacheWriter_alloc_init(const char *path, uint64_t version) {
   struct unixcall_cache_alloc_init params;
   WMT_MEMPTR_SET(params.path, path);
   params.version = version;
-  UNIX_CALL(117, &params);
+  UNIX_CALL(CacheWriter_alloc_init, &params);
   return params.ret_cache;
 }
 
@@ -1079,7 +1083,7 @@ CacheWriter_set(
   params.query_size = 0;
   params.ret_success = 0;
   params.ret_db_bytes = 0;
-  UNIX_CALL(118, &params);
+  UNIX_CALL(CacheWriter_set, &params);
   return params.ret_success != 0;
 }
 
@@ -1093,7 +1097,7 @@ CacheWriter_byteSize(obj_handle_t writer) {
   params.query_size = 1;
   params.ret_success = 0;
   params.ret_db_bytes = 0;
-  UNIX_CALL(118, &params);
+  UNIX_CALL(CacheWriter_set, &params);
   return params.ret_db_bytes;
 }
 
@@ -1102,11 +1106,11 @@ WMTSetMetalShaderCachePath(const char *path) {
   struct unixcall_setmetalcachepath params;
   WMT_MEMPTR_SET(params.path, path);
   params.ret_success = 0;
-  UNIX_CALL(119, &params);
+  UNIX_CALL(WMTSetMetalShaderCachePath, &params);
   return params.ret_success;
 }
 
-/* gw2 (#46): bridge call 152 (reserved for jdrly/dxmt #5) */
+/* gw2 (#46) */
 WINEMETAL_API uint32_t
 WMTGetMetalShaderCachePath(char *buf, uint32_t size) {
   struct unixcall_getmetalcachepath params;
@@ -1115,7 +1119,7 @@ WMTGetMetalShaderCachePath(char *buf, uint32_t size) {
   params.ret_length = 0;
   if (buf && size)
     buf[0] = '\0';
-  UNIX_CALL(152, &params);
+  UNIX_CALL(WMTGetMetalShaderCachePath, &params);
   return (uint32_t)params.ret_length;
 }
 
@@ -1124,7 +1128,7 @@ MTLDevice_newSharedTexture(obj_handle_t device, struct WMTTextureInfo *info) {
   struct unixcall_mtldevice_newtexture params;
   params.device = device;
   WMT_MEMPTR_SET(params.info, info);
-  UNIX_CALL(120, &params);
+  UNIX_CALL(MTLDevice_newSharedTexture, &params);
   return params.ret;
 }
 
@@ -1134,7 +1138,7 @@ WMTBootstrapRegister(const char *name, mach_port_t mach_port) {
   strncpy(params.name, name, sizeof(params.name) - 1);
   params.name[sizeof(params.name) - 1] = '\0';
   params.mach_port = mach_port;
-  NTSTATUS ret = WINE_UNIX_CALL(121, &params);
+  NTSTATUS ret = UNIX_CALL_STATUS(WMTBootstrapRegister, &params);
   return !ret;
 }
 
@@ -1144,7 +1148,7 @@ WMTBootstrapLookUp(const char *name, mach_port_t *mach_port) {
   strncpy(params.name, name, sizeof(params.name) - 1);
   params.name[sizeof(params.name) - 1] = '\0';
   params.mach_port = 0;
-  NTSTATUS ret = WINE_UNIX_CALL(122, &params);
+  NTSTATUS ret = UNIX_CALL_STATUS(WMTBootstrapLookUp, &params);
   *mach_port = params.mach_port;
   return !ret;
 }
@@ -1154,7 +1158,7 @@ MTLSharedEvent_createMachPort(obj_handle_t event) {
   struct unixcall_mtlsharedevent_createmachport params;
   params.event = event;
   params.ret_mach_port = 0;
-  UNIX_CALL(123, &params);
+  UNIX_CALL(MTLSharedEvent_createMachPort, &params);
   return params.ret_mach_port;
 }
 
@@ -1164,7 +1168,7 @@ MTLDevice_newSharedEventWithMachPort(obj_handle_t device, mach_port_t mach_port)
   params.device = device;
   params.mach_port = mach_port;
   params.ret_event = 0;
-  UNIX_CALL(124, &params);
+  UNIX_CALL(MTLDevice_newSharedEventWithMachPort, &params);
   return params.ret_event;
 }
 
@@ -1173,7 +1177,7 @@ MTLDevice_registryID(obj_handle_t device) {
   struct unixcall_generic_obj_uint64_ret params;
   params.handle = device;
   params.ret = 0;
-  UNIX_CALL(125, &params);
+  UNIX_CALL(MTLDevice_registryID, &params);
   return params.ret;
 }
 
@@ -1184,7 +1188,7 @@ MTLSharedEvent_waitUntilSignaledValue(obj_handle_t event, uint64_t value, uint64
   params.value = value;
   params.timeout_ms = timeout;
   params.ret_timeout = 0;
-  UNIX_CALL(126, &params);
+  UNIX_CALL(MTLSharedEvent_waitUntilSignaledValue, &params);
   return params.ret_timeout;
 }
 
@@ -1195,7 +1199,7 @@ MTLCounterSampleBuffer_newTimestampBuffer(obj_handle_t device, uint32_t sample_c
   params.sample_count = sample_count;
   params.shared = shared;
   params.ret = 0;
-  UNIX_CALL(127, &params);
+  UNIX_CALL(MTLCounterSampleBuffer_newTimestampBuffer, &params);
   return params.ret;
 }
 
@@ -1209,7 +1213,7 @@ MTLCounterSampleBuffer_resolveCounterRange(
   params.len = len;
   params.data_length = data_length;
   WMT_MEMPTR_SET(params.data_out, data_out);
-  UNIX_CALL(128, &params);
+  UNIX_CALL(MTLCounterSampleBuffer_resolveCounterRange, &params);
 }
 
 WINEMETAL_API obj_handle_t
@@ -1221,7 +1225,7 @@ MTLCommandBuffer_blitCommandEncoderWithSampleBuffers(
   WMT_MEMPTR_SET(params.attachments, sample_buffer_attachments);
   params.num_attachments = num_sample_buffer_attachments;
   params.ret = 0;
-  UNIX_CALL(129, &params);
+  UNIX_CALL(MTLCommandBuffer_blitCommandEncoderWithSampleBuffers, &params);
   return params.ret;
 }
 
@@ -1230,7 +1234,7 @@ MTLCommandBuffer_property(obj_handle_t cmdbuf, enum WMTCommandBufferProperty pro
   struct unixcall_generic_obj_uint64_uint64_ret params;
   params.handle = cmdbuf;
   params.arg = prop;
-  UNIX_CALL(130, &params);
+  UNIX_CALL(MTLCommandBuffer_property, &params);
   return params.ret;
 }
 
@@ -1243,7 +1247,7 @@ MTLDevice_newTileRenderPipelineState(
   WMT_MEMPTR_SET(params.info, info);
   params.ret_error = 0;
   params.ret_pso = 0;
-  UNIX_CALL(131, &params);
+  UNIX_CALL(MTLDevice_newTileRenderPipelineState, &params);
   if (err_out)
     *err_out = params.ret_error;
   return params.ret_pso;
@@ -1256,7 +1260,7 @@ MTLDevice_newResidencySet(obj_handle_t device, uint64_t init_capacity, obj_handl
   params.init_capacity = init_capacity;
   params.ret_error = 0;
   params.ret_set = 0;
-  UNIX_CALL(132, &params);
+  UNIX_CALL(MTLDevice_newResidencySet, &params);
   if (err_out)
     *err_out = params.ret_error;
   return params.ret_set;
@@ -1268,7 +1272,7 @@ MTLResidencySet_addAllocations(obj_handle_t residency_set, const obj_handle_t *a
   params.set = residency_set;
   WMT_MEMPTR_SET(params.allocations, allocations);
   params.count = count;
-  UNIX_CALL(133, &params);
+  UNIX_CALL(MTLResidencySet_addAllocations, &params);
 }
 
 WINEMETAL_API void
@@ -1277,21 +1281,21 @@ MTLResidencySet_removeAllocations(obj_handle_t residency_set, const obj_handle_t
   params.set = residency_set;
   WMT_MEMPTR_SET(params.allocations, allocations);
   params.count = count;
-  UNIX_CALL(134, &params);
+  UNIX_CALL(MTLResidencySet_removeAllocations, &params);
 }
 
 WINEMETAL_API void
 MTLResidencySet_removeAllAllocations(obj_handle_t residency_set) {
   struct unixcall_generic_obj_noret params;
   params.handle = residency_set;
-  UNIX_CALL(135, &params);
+  UNIX_CALL(MTLResidencySet_removeAllAllocations, &params);
 }
 
 WINEMETAL_API void
 MTLResidencySet_commit(obj_handle_t residency_set) {
   struct unixcall_generic_obj_noret params;
   params.handle = residency_set;
-  UNIX_CALL(136, &params);
+  UNIX_CALL(MTLResidencySet_commit, &params);
 }
 
 WINEMETAL_API void
@@ -1299,7 +1303,7 @@ MTLCommandQueue_addResidencySet(obj_handle_t queue, obj_handle_t residency_set) 
   struct unixcall_generic_obj_obj_noret params;
   params.handle = queue;
   params.arg = residency_set;
-  UNIX_CALL(137, &params);
+  UNIX_CALL(MTLCommandQueue_addResidencySet, &params);
 }
 
 WINEMETAL_API obj_handle_t
@@ -1307,7 +1311,7 @@ MTLDevice_newHeap(obj_handle_t device, const struct WMTHeapInfo *info) {
   struct unixcall_mtldevice_newheap params;
   params.device = device;
   WMT_MEMPTR_SET(params.info, info);
-  UNIX_CALL(138, &params);
+  UNIX_CALL(MTLDevice_newHeap, &params);
   return params.ret;
 }
 
@@ -1317,7 +1321,7 @@ MTLDevice_heapBufferSizeAndAlign(obj_handle_t device, uint64_t length, enum WMTR
   params.device = device;
   params.length = length;
   params.options = options;
-  UNIX_CALL(139, &params);
+  UNIX_CALL(MTLDevice_heapBufferSizeAndAlign, &params);
   struct WMTSizeAndAlign ret;
   ret.size = params.ret_size;
   ret.align = params.ret_align;
@@ -1329,7 +1333,7 @@ MTLDevice_heapTextureSizeAndAlign(obj_handle_t device, struct WMTTextureInfo *in
   struct unixcall_mtldevice_heaptexturesizeandalign params;
   params.device = device;
   WMT_MEMPTR_SET(params.info, info);
-  UNIX_CALL(140, &params);
+  UNIX_CALL(MTLDevice_heapTextureSizeAndAlign, &params);
   struct WMTSizeAndAlign ret;
   ret.size = params.ret_size;
   ret.align = params.ret_align;
@@ -1342,7 +1346,7 @@ MTLHeap_newBuffer(obj_handle_t heap, struct WMTBufferInfo *info, uint64_t offset
   params.heap = heap;
   WMT_MEMPTR_SET(params.info, info);
   params.offset = offset;
-  UNIX_CALL(141, &params);
+  UNIX_CALL(MTLHeap_newBuffer, &params);
   return params.ret;
 }
 
@@ -1352,7 +1356,7 @@ MTLHeap_newTexture(obj_handle_t heap, struct WMTTextureInfo *info, uint64_t offs
   params.heap = heap;
   WMT_MEMPTR_SET(params.info, info);
   params.offset = offset;
-  UNIX_CALL(142, &params);
+  UNIX_CALL(MTLHeap_newTexture, &params);
   return params.ret;
 }
 
@@ -1365,7 +1369,7 @@ MTLDevice_newIndirectCommandBuffer(
   WMT_MEMPTR_SET(params.info, info);
   params.max_count = max_count;
   params.options = options;
-  UNIX_CALL(143, &params);
+  UNIX_CALL(MTLDevice_newIndirectCommandBuffer, &params);
   return params.ret;
 }
 
@@ -1377,7 +1381,7 @@ MTLDevice_newLibraryWithSource(obj_handle_t device, const char *source, uint64_t
   params.length = length;
   params.ret_error = 0;
   params.ret_library = 0;
-  UNIX_CALL(144, &params);
+  UNIX_CALL(MTLDevice_newLibraryWithSource, &params);
   if (err_out)
     *err_out = params.ret_error;
   return params.ret_library;
@@ -1398,7 +1402,7 @@ MTLTexture_getBytes(
   params.data = data;
   params.bytes_per_row = bytes_per_row;
   params.bytes_per_image = bytes_per_image;
-  UNIX_CALL(145, &params);
+  UNIX_CALL(MTLTexture_getBytes, &params);
 }
 
 WINEMETAL_API int
@@ -1412,7 +1416,7 @@ WMTSetThreadQoSClassSelf(
   params.ret_new_qos_class = 0;
   params.ret = -1;
   params.padding = 0;
-  UNIX_CALL(153, &params);
+  UNIX_CALL(WMTSetThreadQoSClassSelf, &params);
   if (old_qos)
     *old_qos = (enum WMTQoSClass)params.ret_old_qos_class;
   if (new_qos)
@@ -1420,7 +1424,7 @@ WMTSetThreadQoSClassSelf(
   return params.ret;
 }
 
-// gw2 (#5): PSO archives (slots 149-151 of the jdrly/dxmt reservation 149-152)
+// gw2 (#5): PSO archives
 WINEMETAL_API bool
 WMTPSOArchiveInit(obj_handle_t device, const struct WMTPSOArchiveConfig *config, char *report, uint32_t report_size) {
   struct unixcall_wmt_pso_archive_init params;
@@ -1429,7 +1433,7 @@ WMTPSOArchiveInit(obj_handle_t device, const struct WMTPSOArchiveConfig *config,
   WMT_MEMPTR_SET(params.report, report);
   params.report_size = report_size;
   params.ret = 0;
-  UNIX_CALL(149, &params);
+  UNIX_CALL(WMTPSOArchiveInit, &params);
   return params.ret;
 }
 
@@ -1439,7 +1443,7 @@ WMTPSOArchiveFlush(char *report, uint32_t report_size) {
   WMT_MEMPTR_SET(params.report, report);
   params.report_size = report_size;
   params.ret = -1;
-  UNIX_CALL(150, &params);
+  UNIX_CALL(WMTPSOArchiveFlush, &params);
   return (int)params.ret;
 }
 
@@ -1447,26 +1451,26 @@ WINEMETAL_API void
 WMTPSOArchiveQuery(struct WMTPSOArchiveStats *stats) {
   struct unixcall_wmt_pso_archive_query params;
   WMT_MEMPTR_SET(params.stats, stats);
-  UNIX_CALL(151, &params);
+  UNIX_CALL(WMTPSOArchiveQuery, &params);
 }
 
-// gw2 (#31): slot 154 of the jdrly/dxmt reservation 154-155
+// gw2 (#31)
 WINEMETAL_API obj_handle_t
 MTLCommandQueue_commandBufferWithUnretainedReferences(obj_handle_t queue) {
   struct unixcall_generic_obj_obj_ret params;
   params.handle = queue;
   params.ret = 0;
-  UNIX_CALL(154, &params);
+  UNIX_CALL(MTLCommandQueue_commandBufferWithUnretainedReferences, &params);
   return params.ret;
 }
 
-// gw2 (#32): Metal 4, slots 155-178 of the jdrly/dxmt reservation 155-189
+// gw2 (#32): Metal 4
 WINEMETAL_API enum WMTMetal4Support
 MTLDevice_metal4Support(obj_handle_t device) {
   struct unixcall_generic_obj_uint64_ret params;
   params.handle = device;
   params.ret = WMTMetal4NoOS;
-  UNIX_CALL(155, &params);
+  UNIX_CALL(MTLDevice_metal4Support, &params);
   return (enum WMTMetal4Support)params.ret;
 }
 
@@ -1475,7 +1479,7 @@ MTLDevice_newMTL4CommandQueue(obj_handle_t device) {
   struct unixcall_generic_obj_obj_ret params;
   params.handle = device;
   params.ret = 0;
-  UNIX_CALL(156, &params);
+  UNIX_CALL(MTLDevice_newMTL4CommandQueue, &params);
   return params.ret;
 }
 
@@ -1484,7 +1488,7 @@ MTLDevice_newCommandAllocator(obj_handle_t device) {
   struct unixcall_generic_obj_obj_ret params;
   params.handle = device;
   params.ret = 0;
-  UNIX_CALL(157, &params);
+  UNIX_CALL(MTLDevice_newCommandAllocator, &params);
   return params.ret;
 }
 
@@ -1493,7 +1497,7 @@ MTLDevice_newMTL4CommandBuffer(obj_handle_t device) {
   struct unixcall_generic_obj_obj_ret params;
   params.handle = device;
   params.ret = 0;
-  UNIX_CALL(158, &params);
+  UNIX_CALL(MTLDevice_newMTL4CommandBuffer, &params);
   return params.ret;
 }
 
@@ -1504,7 +1508,7 @@ MTLDevice_newArgumentTable(obj_handle_t device, const struct WMTArgTableInfo *in
   WMT_MEMPTR_SET(params.info, info);
   params.ret_error = 0;
   params.ret = 0;
-  UNIX_CALL(159, &params);
+  UNIX_CALL(MTLDevice_newArgumentTable, &params);
   if (err_out)
     *err_out = params.ret_error;
   return params.ret;
@@ -1515,7 +1519,7 @@ MTL4CommandAllocator_reset(obj_handle_t allocator) {
   struct unixcall_generic_obj_uint64_ret params;
   params.handle = allocator;
   params.ret = 0;
-  UNIX_CALL(160, &params);
+  UNIX_CALL(MTL4CommandAllocator_reset, &params);
   return params.ret;
 }
 
@@ -1524,14 +1528,14 @@ MTL4CommandBuffer_beginCommandBuffer(obj_handle_t cmdbuf, obj_handle_t allocator
   struct unixcall_generic_obj_obj_noret params;
   params.handle = cmdbuf;
   params.arg = allocator;
-  UNIX_CALL(161, &params);
+  UNIX_CALL(MTL4CommandBuffer_beginCommandBuffer, &params);
 }
 
 WINEMETAL_API void
 MTL4CommandBuffer_endCommandBuffer(obj_handle_t cmdbuf) {
   struct unixcall_generic_obj_noret params;
   params.handle = cmdbuf;
-  UNIX_CALL(162, &params);
+  UNIX_CALL(MTL4CommandBuffer_endCommandBuffer, &params);
 }
 
 WINEMETAL_API void
@@ -1539,7 +1543,7 @@ MTL4CommandBuffer_useResidencySet(obj_handle_t cmdbuf, obj_handle_t residency_se
   struct unixcall_generic_obj_obj_noret params;
   params.handle = cmdbuf;
   params.arg = residency_set;
-  UNIX_CALL(163, &params);
+  UNIX_CALL(MTL4CommandBuffer_useResidencySet, &params);
 }
 
 WINEMETAL_API void
@@ -1554,7 +1558,7 @@ MTL4CommandQueue_commit(
   WMT_MEMPTR_SET(params.feedback, feedback);
   params.event = event;
   params.event_value = event_value;
-  UNIX_CALL(164, &params);
+  UNIX_CALL(MTL4CommandQueue_commit, &params);
 }
 
 WINEMETAL_API void
@@ -1562,7 +1566,7 @@ MTL4CommandQueue_waitForDrawable(obj_handle_t queue, obj_handle_t drawable) {
   struct unixcall_generic_obj_obj_noret params;
   params.handle = queue;
   params.arg = drawable;
-  UNIX_CALL(165, &params);
+  UNIX_CALL(MTL4CommandQueue_waitForDrawable, &params);
 }
 
 WINEMETAL_API void
@@ -1570,7 +1574,7 @@ MTL4CommandQueue_signalDrawable(obj_handle_t queue, obj_handle_t drawable) {
   struct unixcall_generic_obj_obj_noret params;
   params.handle = queue;
   params.arg = drawable;
-  UNIX_CALL(166, &params);
+  UNIX_CALL(MTL4CommandQueue_signalDrawable, &params);
 }
 
 WINEMETAL_API void
@@ -1579,7 +1583,7 @@ MTL4CommandQueue_signalEvent(obj_handle_t queue, obj_handle_t event, uint64_t va
   params.handle = queue;
   params.arg0 = event;
   params.arg1 = value;
-  UNIX_CALL(167, &params);
+  UNIX_CALL(MTL4CommandQueue_signalEvent, &params);
 }
 
 WINEMETAL_API void
@@ -1588,7 +1592,7 @@ MTL4CommandQueue_waitForEvent(obj_handle_t queue, obj_handle_t event, uint64_t v
   params.handle = queue;
   params.arg0 = event;
   params.arg1 = value;
-  UNIX_CALL(168, &params);
+  UNIX_CALL(MTL4CommandQueue_waitForEvent, &params);
 }
 
 WINEMETAL_API void
@@ -1596,7 +1600,7 @@ MTL4CommandQueue_addResidencySet(obj_handle_t queue, obj_handle_t residency_set)
   struct unixcall_generic_obj_obj_noret params;
   params.handle = queue;
   params.arg = residency_set;
-  UNIX_CALL(169, &params);
+  UNIX_CALL(MTL4CommandQueue_addResidencySet, &params);
 }
 
 WINEMETAL_API void
@@ -1604,7 +1608,7 @@ MTL4CommandQueue_removeResidencySet(obj_handle_t queue, obj_handle_t residency_s
   struct unixcall_generic_obj_obj_noret params;
   params.handle = queue;
   params.arg = residency_set;
-  UNIX_CALL(170, &params);
+  UNIX_CALL(MTL4CommandQueue_removeResidencySet, &params);
 }
 
 WINEMETAL_API obj_handle_t
@@ -1612,7 +1616,7 @@ MetalLayer_residencySet(obj_handle_t layer) {
   struct unixcall_generic_obj_obj_ret params;
   params.handle = layer;
   params.ret = 0;
-  UNIX_CALL(171, &params);
+  UNIX_CALL(MetalLayer_residencySet, &params);
   return params.ret;
 }
 
@@ -1622,7 +1626,7 @@ MetalDrawable_present(obj_handle_t drawable, enum WMTDrawablePresentMode mode, d
   params.drawable = drawable;
   params.mode = mode;
   params.value = value;
-  UNIX_CALL(172, &params);
+  UNIX_CALL(MetalDrawable_present, &params);
 }
 
 WINEMETAL_API obj_handle_t
@@ -1634,7 +1638,7 @@ MTL4CommandBuffer_renderCommandEncoder(
   WMT_MEMPTR_SET(params.info, info);
   WMT_MEMPTR_SET(params.state, state);
   params.ret = 0;
-  UNIX_CALL(173, &params);
+  UNIX_CALL(MTL4CommandBuffer_renderCommandEncoder, &params);
   return params.ret;
 }
 
@@ -1645,7 +1649,7 @@ MTL4CommandBuffer_computeCommandEncoder(obj_handle_t cmdbuf, struct WMTMtl4Bindi
   WMT_MEMPTR_SET(params.info, NULL);
   WMT_MEMPTR_SET(params.state, state);
   params.ret = 0;
-  UNIX_CALL(174, &params);
+  UNIX_CALL(MTL4CommandBuffer_computeCommandEncoder, &params);
   return params.ret;
 }
 
@@ -1657,7 +1661,7 @@ MTL4RenderCommandEncoder_encodeCommands(
   params.encoder = encoder;
   WMT_MEMPTR_SET(params.state, state);
   WMT_MEMPTR_SET(params.cmd_head, cmd_head);
-  UNIX_CALL(175, &params);
+  UNIX_CALL(MTL4RenderCommandEncoder_encodeCommands, &params);
 }
 
 WINEMETAL_API void
@@ -1668,7 +1672,7 @@ MTL4ComputeCommandEncoder_encodeCommands(
   params.encoder = encoder;
   WMT_MEMPTR_SET(params.state, state);
   WMT_MEMPTR_SET(params.cmd_head, cmd_head);
-  UNIX_CALL(176, &params);
+  UNIX_CALL(MTL4ComputeCommandEncoder_encodeCommands, &params);
 }
 
 WINEMETAL_API void
@@ -1679,7 +1683,7 @@ MTL4ComputeCommandEncoder_encodeBlitCommands(
   params.encoder = encoder;
   WMT_MEMPTR_SET(params.state, state);
   WMT_MEMPTR_SET(params.cmd_head, cmd_head);
-  UNIX_CALL(177, &params);
+  UNIX_CALL(MTL4ComputeCommandEncoder_encodeBlitCommands, &params);
 }
 
 WINEMETAL_API void
@@ -1693,16 +1697,16 @@ MTL4CommandEncoder_barrier(
   params.after_stages = after_stages;
   params.before_stages = before_stages;
   params.visibility = visibility;
-  UNIX_CALL(178, &params);
+  UNIX_CALL(MTL4CommandEncoder_barrier, &params);
 }
 
-/* gw2 (#56): slots 190-192 */
+/* gw2 (#56): Metal 4 MetalFX */
 WINEMETAL_API bool
 MTLDevice_supportsMetal4FX(obj_handle_t device) {
   struct unixcall_generic_obj_uint64_ret params;
   params.handle = device;
   params.ret = 0;
-  UNIX_CALL(190, &params);
+  UNIX_CALL(MTLDevice_supportsMetal4FX, &params);
   return params.ret;
 }
 
@@ -1712,7 +1716,7 @@ MTLDevice_newGW2SpatialScaler(obj_handle_t device, struct WMTGW2SpatialScalerInf
   params.device = device;
   WMT_MEMPTR_SET(params.info, info);
   params.ret = NULL_OBJECT_HANDLE;
-  UNIX_CALL(191, &params);
+  UNIX_CALL(MTLDevice_newGW2SpatialScaler, &params);
   return params.ret;
 }
 
@@ -1728,5 +1732,5 @@ MTL4CommandBuffer_encodeSpatialScale(
   params.output = output;
   params.fence = fence;
   params.residency_set = residency_set;
-  UNIX_CALL(192, &params);
+  UNIX_CALL(MTL4CommandBuffer_encodeSpatialScale, &params);
 }

@@ -14,7 +14,7 @@ SM50Initialize(
   params.reflection = pRefl;
   params.error = ppError;
   NTSTATUS status;
-  status = UNIX_CALL(sm50_initialize, &params);
+  status = UNIX_CALL(SM50Initialize, &params);
   if (status)
     return -1;
   return params.ret;
@@ -24,7 +24,7 @@ AIRCONV_API void
 SM50Destroy(sm50_shader_t pShader) {
   struct sm50_destroy_params params;
   params.shader = pShader;
-  UNIX_CALL(sm50_destroy, &params);
+  UNIX_CALL(SM50Destroy, &params);
 }
 
 AIRCONV_API int
@@ -39,7 +39,7 @@ SM50Compile(
   params.bitcode = ppBitcode;
   params.error = ppError;
   NTSTATUS status;
-  status = UNIX_CALL(sm50_compile, &params);
+  status = UNIX_CALL(SM50Compile, &params);
   if (status)
     return -1;
   return params.ret;
@@ -50,14 +50,14 @@ SM50GetCompiledBitcode(sm50_bitcode_t pBitcode, struct SM50_COMPILED_BITCODE *pD
   struct sm50_get_compiled_bitcode_params params;
   params.bitcode = pBitcode;
   params.data_out = pData;
-  UNIX_CALL(sm50_get_compiled_bitcode, &params);
+  UNIX_CALL(SM50GetCompiledBitcode, &params);
 }
 
 AIRCONV_API void
 SM50DestroyBitcode(sm50_bitcode_t pBitcode) {
   struct sm50_destroy_bitcode_params params;
   params.bitcode = pBitcode;
-  UNIX_CALL(sm50_destroy_bitcode, &params);
+  UNIX_CALL(SM50DestroyBitcode, &params);
 }
 
 AIRCONV_API size_t
@@ -67,7 +67,7 @@ SM50GetErrorMessage(sm50_error_t pError, char *pBuffer, size_t BufferSize) {
   params.buffer = pBuffer;
   params.buffer_size = BufferSize;
   params.ret_size = 0;
-  UNIX_CALL(sm50_get_error_message, &params);
+  UNIX_CALL(SM50GetErrorMessage, &params);
   return params.ret_size;
 }
 
@@ -75,7 +75,7 @@ AIRCONV_API void
 SM50FreeError(sm50_error_t pError) {
   struct sm50_free_error_params params;
   params.error = pError;
-  UNIX_CALL(sm50_free_error, &params);
+  UNIX_CALL(SM50FreeError, &params);
 }
 
 AIRCONV_API int
@@ -92,7 +92,7 @@ SM50CompileTessellationPipelineHull(
   params.bitcode = ppBitcode;
   params.error = ppError;
   NTSTATUS status;
-  status = UNIX_CALL(sm50_compile_tessellation_hull, &params);
+  status = UNIX_CALL(SM50CompileTessellationPipelineHull, &params);
   if (status)
     return -1;
   return params.ret;
@@ -112,7 +112,7 @@ SM50CompileTessellationPipelineDomain(
   params.bitcode = ppBitcode;
   params.error = ppError;
   NTSTATUS status;
-  status = UNIX_CALL(sm50_compile_tessellation_domain, &params);
+  status = UNIX_CALL(SM50CompileTessellationPipelineDomain, &params);
   if (status)
     return -1;
   return params.ret;
@@ -132,7 +132,7 @@ SM50CompileGeometryPipelineVertex(
   params.bitcode = ppBitcode;
   params.error = ppError;
   NTSTATUS status;
-  status = UNIX_CALL(sm50_compile_geometry_pipeline_vertex, &params);
+  status = UNIX_CALL(SM50CompileGeometryPipelineVertex, &params);
   if (status)
     return -1;
   return params.ret;
@@ -152,7 +152,7 @@ SM50CompileGeometryPipelineGeometry(
   params.bitcode = ppBitcode;
   params.error = ppError;
   NTSTATUS status;
-  status = UNIX_CALL(sm50_compile_geometry_pipeline_geometry, &params);
+  status = UNIX_CALL(SM50CompileGeometryPipelineGeometry, &params);
   if (status)
     return -1;
   return params.ret;
@@ -166,5 +166,5 @@ AIRCONV_API void SM50GetArgumentsInfo(
   params.shader = pShader;
   params.constant_buffers = pConstantBuffers;
   params.arguments = pArguments;
-  UNIX_CALL(sm50_get_arguments_info, &params);
+  UNIX_CALL(SM50GetArgumentsInfo, &params);
 };

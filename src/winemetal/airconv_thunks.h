@@ -4,21 +4,9 @@
 #ifndef __WINEMETAL_AIRCONV_THUNKS_H
 #define __WINEMETAL_AIRCONV_THUNKS_H
 
-enum airconv_unixcalls {
-  unix_sm50_initialize = 74,
-  unix_sm50_destroy,
-  unix_sm50_compile,
-  unix_sm50_get_compiled_bitcode,
-  unix_sm50_destroy_bitcode,
-  unix_sm50_get_error_message,
-  unix_sm50_free_error,
-  unix_sm50_compile_geometry_pipeline_vertex,
-  unix_sm50_compile_geometry_pipeline_geometry,
-  unix_sm50_compile_tessellation_vertex,
-  unix_sm50_compile_tessellation_hull,
-  unix_sm50_compile_tessellation_domain,
-  unix_sm50_get_arguments_info = 88,
-};
+/* gw2 (B3, #76): the bridge calls are named by the manifest's numbers, WMTCall_SM50Initialize and
+   the rest (winemetal_calls.h), not by an enum of airconv's own */
+#include "winemetal_call_numbers.h"
 
 struct sm50_initialize_params {
   const void *bytecode;
@@ -230,6 +218,6 @@ struct sm50_get_arguments_info_params32 {
 
 COMPATIBLE_STRUCT32(sm50_get_arguments_info_params, 16)
 
-#define UNIX_CALL(code, params) WINE_UNIX_CALL(unix_##code, params)
+#define UNIX_CALL(call, params) WINE_UNIX_CALL(WMTCall_##call, params)
 
 #endif
