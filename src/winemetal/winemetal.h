@@ -1788,6 +1788,20 @@ WINEMETAL_API obj_handle_t CreateMetalViewFromHWND(intptr_t hwnd, obj_handle_t d
 
 WINEMETAL_API void ReleaseMetalView(obj_handle_t view);
 
+/* gw2 (#1): the visibility of the window that holds a view from CreateMetalViewFromHWND, for the
+   background throttle's occlusion policy. The unix side caches it per view and refreshes it on the
+   main thread without waiting, so a call never blocks and returns the state of the previous
+   refresh: 0 (no WMTViewVisibilityKnown) until the first one has run. */
+enum WMTViewVisibility {
+  WMTViewVisibilityKnown = 1,
+  WMTViewVisibilityVisible = 2,       /* occlusionState has NSWindowOcclusionStateVisible */
+  WMTViewVisibilityMiniaturized = 4,  /* isMiniaturized */
+  WMTViewVisibilityOnActiveSpace = 8, /* isOnActiveSpace */
+  WMTViewVisibilityNoWindow = 16,     /* the view isn't in a window */
+};
+
+WINEMETAL_API uint64_t MetalView_visibility(obj_handle_t view);
+
 WINEMETAL_API void MTLCommandEncoder_setLabel(obj_handle_t encoder, obj_handle_t label);
 
 WINEMETAL_API void MTLDevice_setShouldMaximizeConcurrentCompilation(obj_handle_t device, bool value);

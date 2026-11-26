@@ -1728,9 +1728,75 @@ _CreateMetalViewFromHWND(void *obj) {
   return STATUS_SUCCESS;
 }
 
+/* gw2 (#1): the visibility of a metal view's window, for the background throttle's occlusion
+   policy (d9mt 42b0c47 reads the same NSWindow state). AppKit state is read on the main thread:
+   a call returns the cached flags of the previous refresh and queues at most one asynchronous
+   refresh per view, so the render thread never waits for the main thread. */
+#define WMT_VISIBILITY_SLOTS 8
+static struct {
+  _Atomic(void *) view;
+  _Atomic uint64_t flags;
+  _Atomic int pending;
+} g_visibility[WMT_VISIBILITY_SLOTS];
+
+static NTSTATUS
+_MetalView_visibility(void *obj) {
+  struct unixcall_generic_obj_uint64_ret *params = obj;
+  NSView *view = (NSView *)params->handle;
+  params->ret = 0;
+  if (!view)
+    return STATUS_SUCCESS;
+
+  int slot = -1;
+  for (int i = 0; i < WMT_VISIBILITY_SLOTS && slot < 0; i++)
+    if (atomic_load(&g_visibility[i].view) == (void *)view)
+      slot = i;
+  for (int i = 0; i < WMT_VISIBILITY_SLOTS && slot < 0; i++) {
+    void *expected = NULL;
+    if (atomic_compare_exchange_strong(&g_visibility[i].view, &expected, (void *)view)) {
+      atomic_store(&g_visibility[i].flags, 0);
+      atomic_store(&g_visibility[i].pending, 0);
+      slot = i;
+    }
+  }
+  if (slot < 0)
+    return STATUS_SUCCESS; /* more live views than slots: unknown, the throttle treats it as visible */
+
+  if (!atomic_exchange(&g_visibility[slot].pending, 1)) {
+    /* the block retains the view until it has run */
+    dispatch_async(dispatch_get_main_queue(), ^{
+      uint64_t flags = WMTViewVisibilityKnown;
+      NSWindow *win = view.window;
+      if (win) {
+        if (win.occlusionState & NSWindowOcclusionStateVisible)
+          flags |= WMTViewVisibilityVisible;
+        if (win.isMiniaturized)
+          flags |= WMTViewVisibilityMiniaturized;
+        if (win.isOnActiveSpace)
+          flags |= WMTViewVisibilityOnActiveSpace;
+      } else {
+        flags |= WMTViewVisibilityNoWindow;
+      }
+      if (atomic_load(&g_visibility[slot].view) == (void *)view)
+        atomic_store(&g_visibility[slot].flags, flags);
+      atomic_store(&g_visibility[slot].pending, 0);
+    });
+  }
+
+  params->ret = atomic_load(&g_visibility[slot].flags);
+  return STATUS_SUCCESS;
+}
+
 static NTSTATUS
 _ReleaseMetalView(void *obj) {
   struct unixcall_generic_obj_noret *params = obj;
+
+  /* gw2 (#1): free the view's visibility slot */
+  for (int i = 0; i < WMT_VISIBILITY_SLOTS; i++) {
+    void *expected = (void *)params->handle;
+    if (expected && atomic_compare_exchange_strong(&g_visibility[i].view, &expected, NULL))
+      atomic_store(&g_visibility[i].flags, 0);
+  }
 
   void (*pfn_macdrv_view_release_metal_view)(macdrv_metal_view v) = NULL;
 
@@ -3349,8 +3415,8 @@ const void *__wine_unix_call_funcs[] = {
     &_MTLDevice_newLibraryWithSource,
     &_MTLTexture_getBytes,
     &_MTLCommandBuffer_presentDrawableWithDeadline,
-    /* gw2: 147-152 are reserved for other fork issues (#1 147, #7 148, #5 149-152) */
-    NULL,
+    &_MetalView_visibility, /* 147, gw2 (#1) */
+    /* gw2: 148-152 are reserved for other fork issues (#7 148, #5 149-152) */
     NULL,
     NULL,
     NULL,
@@ -3508,8 +3574,8 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_MTLDevice_newLibraryWithSource,
     &_MTLTexture_getBytes,
     &_MTLCommandBuffer_presentDrawableWithDeadline,
-    /* gw2: 147-152 are reserved for other fork issues (#1 147, #7 148, #5 149-152) */
-    NULL,
+    &_MetalView_visibility, /* 147, gw2 (#1) */
+    /* gw2: 148-152 are reserved for other fork issues (#7 148, #5 149-152) */
     NULL,
     NULL,
     NULL,
