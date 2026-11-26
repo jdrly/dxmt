@@ -60,6 +60,17 @@ skipSameState() {
 }
 
 namespace {
+// gw2 (#203): on unless exactly "0"
+sw::Switch<bool> kSkipEmptySlots{"DXMT_SKIP_EMPTY_SLOTS", true, sw::legacy::notZero};
+} // namespace
+
+bool
+skipEmptySlots() {
+  static const bool on = kSkipEmptySlots();
+  return on;
+}
+
+namespace {
 // gw2 (#147): off unless exactly "1"
 sw::Switch<bool> kSkipSameSrv{"DXMT_SKIP_SAME_SRV", false, sw::legacy::exactlyOne};
 } // namespace
@@ -164,18 +175,20 @@ psoSection(double window_ms, uint32_t frames) {
   double held = drain(g_pso_held_ns) * double(kPsoSampleEvery) / 1e6;
   auto at = [&](PsoCounter k) { return double(c[(unsigned)k]); };
   if (!at(PsoCounter::Build) && !at(PsoCounter::Lookup) && !at(PsoCounter::TopologyKept) &&
-      !at(PsoCounter::LayoutSame) && !at(PsoCounter::NullShaderEmpty) && !at(PsoCounter::VertexBufferSame) &&
-      !at(PsoCounter::IndexBufferSame) && !at(PsoCounter::SrvCall) && !at(PsoCounter::SamplerCall))
+      !at(PsoCounter::LayoutSame) && !at(PsoCounter::NullShaderEmpty) && !at(PsoCounter::ShaderSame) &&
+      !at(PsoCounter::VertexBufferSame) && !at(PsoCounter::IndexBufferSame) && !at(PsoCounter::SrvCall) &&
+      !at(PsoCounter::SamplerCall))
     return {};
   double n = std::max(frames, 1u);
   return std::format(
       "builds={:.1f} mru={:.1f} lookups={:.1f} equal={:.1f} depth={:.2f}/{} new={} topokept={:.1f} "
-      "lock={:.3f}/{:.3f} samelayout={:.1f} nullshader={:.1f} samevb={:.1f} sameib={:.1f} "
+      "lock={:.3f}/{:.3f} samelayout={:.1f} nullshader={:.1f} sameshader={:.1f} samevb={:.1f} sameib={:.1f} "
       "srv={:.1f}/{:.1f}/{:.1f}/{:.1f}/{} smp={:.1f}/{:.1f}/{:.1f}",
       at(PsoCounter::Build) / n, at(PsoCounter::MruHit) / n, at(PsoCounter::Lookup) / n, at(PsoCounter::Equal) / n,
       samples ? double(depth_sum) / samples : 0.0, depth_max, c[(unsigned)PsoCounter::New],
       at(PsoCounter::TopologyKept) / n, wait / n, held / n, at(PsoCounter::LayoutSame) / n,
-      at(PsoCounter::NullShaderEmpty) / n, at(PsoCounter::VertexBufferSame) / n, at(PsoCounter::IndexBufferSame) / n,
+      at(PsoCounter::NullShaderEmpty) / n, at(PsoCounter::ShaderSame) / n, at(PsoCounter::VertexBufferSame) / n,
+      at(PsoCounter::IndexBufferSame) / n,
       at(PsoCounter::SrvCall) / n, at(PsoCounter::SrvSlot) / n, at(PsoCounter::SrvSame) / n,
       at(PsoCounter::SrvSet) / n, c[(unsigned)PsoCounter::SrvHazardMissed], at(PsoCounter::SamplerCall) / n,
       at(PsoCounter::SamplerSlot) / n, at(PsoCounter::SamplerSet) / n
@@ -870,9 +883,10 @@ public:
     gw2::g_pso_stats.store(gw2::statsEnabled(), std::memory_order_relaxed); // gw2 (#149)
     Logger::info(std::format(
         "PSO: blend hash {} (DXMT_PSO_BLEND_HASH), MRU {} (DXMT_PSO_MRU), topology keep {} (DXMT_PSO_TOPOLOGY_KEEP), "
-        "skip same state {} (DXMT_SKIP_SAME_STATE), skip same srv {} (DXMT_SKIP_SAME_SRV)",
+        "skip same state {} (DXMT_SKIP_SAME_STATE), skip same srv {} (DXMT_SKIP_SAME_SRV), "
+        "skip empty slots {} (DXMT_SKIP_EMPTY_SLOTS)",
         pso.blend_hash ? "on" : "off", pso.mru ? "on, 4 entries" : "off", pso.topology_keep ? "on" : "off",
-        gw2::skipSameState() ? "on" : "off", gw2::skipSameSrv() ? "on" : "off"
+        gw2::skipSameState() ? "on" : "off", gw2::skipSameSrv() ? "on" : "off", gw2::skipEmptySlots() ? "on" : "off"
     ));
 
     // gw2 (#5): DXMT_PSO_ARCHIVE=1 loads earlier sessions' pipeline archives (once per process)
