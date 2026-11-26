@@ -71,9 +71,12 @@ public:
   Com(Com &&other) : m_ptr(other.m_ptr) { other.m_ptr = nullptr; }
 
   Com &operator=(T *object) {
+    // The object can be the one this holds the last reference to
+    // gw2 (#247): athei dd7c5aa; tests/gw2/com_assign_test.cpp
+    if (object != nullptr)
+      ComRef::incRef(object);
     this->decRef();
     m_ptr = object;
-    this->incRef();
     return *this;
   }
 
