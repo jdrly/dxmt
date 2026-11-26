@@ -40,9 +40,6 @@ const char *warmModeName(WarmMode mode);
 uint32_t warmJobs();
 // DXMT_WARM_MAX: recipes planned at most (default 8192 since #124). Parsed once per process.
 uint32_t warmMax();
-// gw2 (#124) DXMT_WARM_ORDER: "use" (the default) plans the recipes used most recently and most often
-// (the use rows); "rowid" restores the plan of #88, the oldest recipes first. Parsed once per process.
-bool warmOrderByUse();
 
 struct WarmVariant {
   Sha1Digest shader;
@@ -94,7 +91,8 @@ constexpr uint64_t kWarmRowMax = 16ull << 20; // a larger row is skipped (a reci
 // gw2 (#124): with `use`, the plan is by use instead of rowid. Every recipe of the target is read; they
 // are ranked by lastSession (newest first), then sessionsUsed (most first), then rowid; the first `max`
 // are planned, and submitted in firstUseMs order (the character select first), recipes without use rows
-// (recorded before #124, or never used since) after them in rowid order.
+// (recorded before #124, or never used since) after them in rowid order. The warm thread always passes
+// it; without it the read is #88's, which only tests use.
 void warmRead(WarmPlan &plan, const WarmEnumerate &enumerate, uint32_t metal_version, WarmMode mode, uint32_t max,
               const std::atomic<bool> &stop, uint64_t row_max = kWarmRowMax, const WarmUseTable *use = nullptr);
 

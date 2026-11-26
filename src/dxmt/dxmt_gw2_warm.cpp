@@ -43,22 +43,16 @@ parseJobs(const std::string &raw, const uint32_t &fallback) {
 sw::Switch<std::string> kWarm{"DXMT_WARM", "off", rawText};
 // gw2 (#124): 8192 (about two sessions of GW2's 2,700-4,800 pipelines); #88's was 2048
 sw::Switch<uint32_t> kWarmMax{"DXMT_WARM_MAX", 8192, parseMax};
-// gw2 (#124): "use" (default) or "rowid" (#88's plan)
-sw::Switch<std::string> kWarmOrder{"DXMT_WARM_ORDER", "use", rawText};
 // gw2 (#159): speculative jobs at once while the warm builds are slow; 1 (default): one at a time
 sw::Switch<uint32_t> kWarmJobs{"DXMT_WARM_JOBS", 1, parseJobs};
 // the startup line shows the effective mode by name (off for anything not understood)
 sw::Effective kWarmLine{"DXMT_WARM", [] { return std::string(warmModeName(warmMode())); }};
-// gw2 (#124): the order in effect (anything but "rowid" plans by use)
-sw::Effective kWarmOrderLine{"DXMT_WARM_ORDER", [] { return std::string(warmOrderByUse() ? "use" : "rowid"); }};
 
 std::atomic<uint64_t> g_counters[uint32_t(WarmCounter::Count)];
 std::atomic<uint64_t> g_planned_functions{0}, g_planned_pipelines{0}, g_planned_recipes{0}, g_capped{0},
     g_other_target{0}, g_malformed{0};
 std::atomic<uint64_t> g_read_error{0}, g_busy{0}, g_oversized{0}, g_buffer_bytes{0}; // gw2 (#114)
 std::atomic<double> g_read_ms{0};
-// gw2 (#124): the plan by use
-std::atomic<bool> g_by_use{false};
 std::atomic<uint64_t> g_used_planned{0}, g_used_total{0}, g_newest{0}, g_use_error{0};
 constinit std::atomic<WarmHitUse> g_hit_use{nullptr};
 std::atomic<int64_t> g_oldest{-1};
@@ -97,12 +91,11 @@ section(double, uint32_t) {
             // gw2 (#114): how the read went; readerror= is SQLite's code (5: SQLITE_BUSY), 0 when read
             std::format(" readerror={} busy={} oversized={} buffer={}KB", g_read_error.load(), g_busy.load(),
                         g_oversized.load(), g_buffer_bytes.load() >> 10) +
-            // gw2 (#124): the order, and how much of the plan the use rows chose
-            (g_by_use.load() ? std::format(" order=use used={}/{} newest={} oldest={} useerror={}",
-                                           g_used_planned.load(), g_used_total.load(), g_newest.load(),
-                                           g_oldest.load() < 0 ? std::string("-") : std::to_string(g_oldest.load()),
-                                           g_use_error.load())
-                             : std::string(" order=rowid"));
+            // gw2 (#124): how much of the plan the use rows chose (the plan is always by use)
+            std::format(" order=use used={}/{} newest={} oldest={} useerror={}", g_used_planned.load(),
+                        g_used_total.load(), g_newest.load(),
+                        g_oldest.load() < 0 ? std::string("-") : std::to_string(g_oldest.load()),
+                        g_use_error.load());
   return text;
 }
 
@@ -129,12 +122,6 @@ warmModeName(WarmMode mode) {
   default:
     return "off";
   }
-}
-
-bool
-warmOrderByUse() {
-  static const bool by_use = kWarmOrder() != "rowid";
-  return by_use;
 }
 
 uint32_t
@@ -258,7 +245,8 @@ warmRead(WarmPlan &plan, const WarmEnumerate &enumerate, uint32_t metal_version,
          const std::atomic<bool> &stop, uint64_t row_max, const WarmUseTable *use) {
   ReadStatus status;
   if (!use) {
-    // rowid order (#88; DXMT_WARM_ORDER=rowid): the oldest recipes first, streamed
+    // rowid order (#88): the oldest recipes first, streamed. Only tests read this way; the warm
+    // thread always passes the use table
     readRows(enumerate, stop, row_max, status, [&](const uint8_t *, uint32_t, const uint8_t *value, uint32_t length) {
       warmPlanAdd(plan, value, length, metal_version, mode, max);
     });
@@ -403,7 +391,6 @@ warmPlanned(const WarmPlan &plan, double read_ms) {
   g_busy = plan.busy;
   g_oversized = plan.oversized;
   g_buffer_bytes = plan.buffer_bytes;
-  g_by_use = plan.by_use;
   g_used_planned = plan.used_planned;
   g_used_total = plan.used_total;
   g_newest = plan.newest;
