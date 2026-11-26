@@ -9,14 +9,11 @@ namespace dxmt::gw2 {
 
 const char *const kCommitWhyNames[kCommitWhyCount] = {
     "none",     "other", "flush",   "getdata", "map",   "occlusion",  "timestamp", "event",    "staging", "readback",
-    "cmdlist",  "present", "fence", "keyedmutex", "idle", "poll", "timer", "watchdog",
+    "cmdlist",  "present", "fence", "keyedmutex", "idle",
 };
 const char *const kPassCloseNames[kPassCloseCount] = {
     "other", "render", "compute", "blit",  "targets", "clear",   "resolve",
     "query", "flush",  "present", "state", "upscale", "copy",
-};
-const char *const kPromoteNames[kPromoteCount] = {
-    "skip", "reached", "nodefer", "gpuidle", "present", "explicit", "poll", "timer", "watchdog",
 };
 const char *const kGetDataNames[kGetDataKindCount] = {"event", "occlusion", "timestamp", "disjoint"};
 const char *const kEncNames[kEncCount] = {
@@ -32,10 +29,7 @@ using counter = std::atomic<uint64_t>;
 
 counter g_commit[kCommitWhyCount];
 counter g_pass_close[kPassCloseCount];
-counter g_promote[kPromoteCount];
 counter g_getflush[kGetDataKindCount], g_getskip[kGetDataKindCount]; // gw2 (#158)
-std::atomic<uint32_t> g_promote_min{0};
-std::atomic<uint32_t> g_promote_ms{2};
 
 counter g_draws, g_dispatches, g_tile, g_pso, g_use_resource, g_blit_cmds;
 counter g_enc[kEncCount];
@@ -98,17 +92,6 @@ cmdsSection(double, uint32_t frames) {
   out += " close=" + perFrameList(takeAll(g_pass_close), kPassCloseNames, f, 0, -1);
   out += " getflush=" + perFrameList(takeAll(g_getflush), kGetDataNames, f, 0, -1);
   out += " getskip=" + perFrameList(takeAll(g_getskip), kGetDataNames, f, 0, -1);
-  uint32_t min = g_promote_min.load(std::memory_order_relaxed);
-  if (!min) {
-    for (auto &c : g_promote)
-      take(c);
-    out += " promote=off";
-  } else {
-    // window totals: the forced ends (poll, timer, watchdog) are rare
-    out += std::format(" promote=min:{}", min);
-    for (unsigned i = 0; i < kPromoteCount; i++)
-      out += std::format(",{}:{}", kPromoteNames[i], take(g_promote[i]));
-  }
   return out;
 }
 
@@ -144,22 +127,6 @@ SectionRegistrar s_encode("ENCODE", &encodeSection);
 
 } // namespace
 
-void
-setPromoteFlush(uint32_t min, uint32_t ms) {
-  g_promote_min.store(min, std::memory_order_relaxed);
-  g_promote_ms.store(ms, std::memory_order_relaxed);
-}
-
-uint32_t
-promoteFlushMin() {
-  return g_promote_min.load(std::memory_order_relaxed);
-}
-
-uint32_t
-promoteFlushMs() {
-  return g_promote_ms.load(std::memory_order_relaxed);
-}
-
 std::string
 rasterLine(int32_t depth_bias, float slope_scaled_depth_bias, float depth_bias_clamp, uint32_t fill, uint32_t cull) {
   if (depthBiasOf(depth_bias, slope_scaled_depth_bias) == DepthBias::None)
@@ -185,8 +152,6 @@ FrontCounters::publish() {
     add(g_commit[i], commit[i]);
   for (unsigned i = 0; i < kPassCloseCount; i++)
     add(g_pass_close[i], pass_close[i]);
-  for (unsigned i = 0; i < kPromoteCount; i++)
-    add(g_promote[i], promote[i]);
   add(g_d24_bias, d24_bias);
   add(g_d24_slope, d24_slope);
   *this = {};

@@ -29,8 +29,7 @@ void d3d11_device_mutex::lock_contended(uint32_t tid) {
 bool d3d11_device_mutex::set_protected(bool Protected) {
   bool ret = protected_;
   protected_ = Protected;
-  // gw2 (#4): a forced lock keeps its owner; turning protection off changes nothing then
-  if (ret && !Protected && !forced_) {
+  if (ret && !Protected) {
     counter_ = 0;
     owner_.store(0, std::memory_order_release);
   }

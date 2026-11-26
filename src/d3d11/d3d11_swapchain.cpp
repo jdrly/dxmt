@@ -1113,9 +1113,6 @@ public:
             {"DXMT_CHUNKS", std::format("{}", queue.ChunkCount())}, // the ring in effect
             {"DXMT_MAX_FRAME_LATENCY", max_latency},
             {"DXMT_COMPILE_WAIT_MS", std::format("{}", compile.wait_ms)},
-            // gw2 (#4): as the immediate context parsed them
-            {"DXMT_PROMOTE_FLUSH_MIN", std::format("{}", gw2::promoteFlushMin())},
-            {"DXMT_PROMOTE_FLUSH_MS", std::format("{}", gw2::promoteFlushMs())},
             {"DXMT_TIMESTAMP_MODE", gw2::timestampModeName(gw2::timestampMode())}, // gw2 (#24)
             {"DXMT_MAP_FAST", std::format("{}", int(gw2::mapFast()))},             // gw2 (#25)
             {"DXMT_SKIP_REBIND", std::format("{}", int(gw2::skipRebind()))},       // gw2 (#30)
