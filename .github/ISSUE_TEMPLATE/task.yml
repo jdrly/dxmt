@@ -60,8 +60,8 @@ body:
     attributes:
       label: Verification (UAT)
       description: >-
-        Not the same as the acceptance criteria. **UAT is a scenario Jan plays through in GW2**
-        and answers yes or no at the end. Each step is an action and, after the arrow, the
+        Not the same as the acceptance criteria. **UAT is a scenario I play through in GW2**
+        and answer yes or no at the end. Each step is an action and, after the arrow, the
         expected result.
       value: |
         **Fork build:** (commit)

@@ -32,20 +32,22 @@ If two sources conflict, report the conflict instead of silently choosing one.
   parentheses (`Present deadline: … (Lion's Arch 39 → 47 fps)`).
 - The area is a label, never a title prefix ([triage labels](../docs/agents/triage-labels.md)).
 - *Affected areas* lists only paths you have verified in the repository.
-- *Verification (UAT)* is a scenario Jan plays through in GW2: each step is an action in the
+- *Verification (UAT)* is a scenario I play through in GW2: each step is an action in the
   game and, after the arrow, the expected result.
 - An issue that a council or review produced links it.
 
 ## Branches
 
 - Never push to `gw2-on-mac` or `main` directly. Every change goes through a pull request into
-  `gw2-on-mac`. `main` only mirrors upstream.
+  `gw2-on-mac`. `main` only mirrors upstream: after an upstream sync merges, it is fast-forwarded
+  to the synced upstream commit, never forced, and that is the only push it gets.
 - Name the branch `<type>/<issue>-<short-description>`, in English `lower-case-kebab-case`, for
   example `fix/1-throttle-foreground-process`. Types: `feat`, `fix`, `perf`, `port` (from upstream
   or from d9mt), `diag`, `exp` (an experiment behind a switch, off by default), `chore`, `docs`.
 - One branch is one issue. Measurement variants (`tmp/…`) are never merged.
 - **Upstream syncs** merge `upstream/main` into `gw2-on-mac` through their own pull request
-  (`chore/sync-upstream-<short sha>`), with a GW2 session before and after.
+  (`chore/sync-upstream-<short sha>`), with a GW2 session before and after. The steps are in
+  [upstream-sync.md](../docs/agents/upstream-sync.md).
 
 ## Commits
 
@@ -66,7 +68,47 @@ If two sources conflict, report the conflict instead of silently choosing one.
 - **Review and merge.** Every PR gets an **independent agent review** (preferably
   GPT-6.1-Sol) by an agent that didn't write the change; its verdict goes into the PR. The PR is
   **squash-merged**, with the PR title as the commit subject and the description as its body,
-  once that verdict has no open `Blocker` or `High`. The maintainer doesn't review code by hand.
+  once that verdict has no open `Blocker` or `High`. An upstream sync is the exception: it merges
+  with a merge commit, so upstream's commits stay ancestors. I don't review code by hand.
+
+## The Mac run
+
+GitHub's runner has no Metal 4 and runs its jobs clamped to the utility band. Eight tests show
+something only on a Mac with Metal 4: `mtl4_bridge_test`, `mtl4_queue_test`,
+`mtl4_specialize_test`, `paired_replay_test`, `presenter_layer_set_test`, the Metal 4 halves of
+`chunk_submission_test` and `mtl4fx_test`, and `thread_priority_test`. The Mac run is
+`tests/gw2/run.zsh metal` on such a Mac. It runs those eight and the three Metal tests the runner
+passes too. The pure tests print on a Mac what they print on the runner, so the Mac run leaves them
+out.
+
+A pull request owes the Mac run only when it touches one of these paths:
+
+- `src/winemetal/`, but not `src/winemetal/unix/cache.c` or `src/winemetal/unix/visibility_slots.h`
+- `src/dxmt/dxmt_gw2_mtl4_*`
+- `src/dxmt/dxmt_gw2_submission.*`
+- `src/dxmt/dxmt_presenter.*`
+- `src/dxmt/dxmt_gw2_present.*`
+- `src/dxmt/dxmt_command.metal` and `src/dxmt/dxmt_command_constants.hpp`
+- `src/dxmt/dxmt_gw2_lifetime.*`
+- `src/dxmt/dxmt_gw2_residency.*`
+- the eight tests' own files in `tests/gw2/`
+- `tests/gw2/run.zsh`
+
+The present paths are there because of `presenter_layer_set_test`. It compiles the present
+shaders from `dxmt_command.metal` and its constants and checks the pixels they write, and it runs
+`DXMT_PRESENT_SKIP_NIL=1` on real Metal, where `dxmt_gw2_present.*` decides the skips. Pure tests
+compile `dxmt_gw2_present.*` too, but only with the switch unset. The two files left out of
+`src/winemetal/` are covered by pure tests the runner runs (`cache_dir_test`,
+`cache_enumerate_test`, `visibility_slots_test`).
+
+A pull request that owes the run starts with "Needs the Mac run: `tests/gw2/run.zsh metal`" and
+claims no result of it. It merges before the run, as
+[ADR 0007](../docs/gw2/adr/0007-metal-4-changes-merge-with-their-switch-off.md) says. Any other
+pull request owes no Mac run, whatever its issue says.
+
+A Mac run can't show anything about the PE-only code: `src/dxmt/dxmt_context.*`,
+`src/dxmt/dxmt_command_queue.*` and `src/d3d11/d3d11_*`. No native test compiles it. A change
+there owes a session in the game.
 
 ## Code review
 
@@ -88,13 +130,100 @@ If two sources conflict, report the conflict instead of silently choosing one.
   line and no off-switch**.
 - A finding describes one problem with one fix boundary. Findings stay in the PR.
 
+## Code rules
+
+These keep the fork mergeable with upstream. Every line of mine inside one of upstream's files
+is a place where the next sync can conflict, so most of the rules are about where code goes.
+
+1. **New code goes into fork-owned files.** `dxmt_gw2_*` files in `src/dxmt`, new files of the
+   fork elsewhere (`src/winemetal/unix/mtl4.c` is one), `tests/gw2/`, `tools/gw2/` and
+   `.github/gw2/`. Upstream has none of them, so they never conflict.
+2. **An upstream file gets a hook, not the feature.** One call, one include or one member per
+   feature, each marked `// gw2 (#N):` with the issue's number (`/* gw2 (#N): */` in C; a
+   council step names itself too, as in `gw2 (B2, #67)`). `git grep 'gw2 ('` then finds every
+   fork line.
+3. **Never rewrite an upstream line** for a diagnostic, a rename or a switch read. If a counter
+   needs to know why something happened, work it out inside the fork's function, not by
+   changing upstream's call sites or signatures.
+4. **Stay away from the ends.** Upstream appends at the end of its files, its lists (meson
+   sources, includes, tables) and its constructor bodies. Keep at least one untouched upstream
+   line between a fork addition and such an end. For a list, add the fork's entries from
+   outside it, after upstream's closing bracket. For a constructor, let a fork member's own
+   constructor do the work.
+5. **Never change upstream's final newline.** A file that upstream ends without a newline keeps
+   ending that way, with fork lines above its last line.
+6. **Moved upstream code is listed.** A PR that moves upstream code into another file adds a
+   row to "Moved upstream code" in [upstream-sync.md](../docs/agents/upstream-sync.md), so a
+   sync knows where an upstream fix to it has to go.
+7. **A switch is declared by its module.** `sw::Switch` at namespace scope in the file that
+   reads it, with its grammar, never a new `env::getEnvVar("DXMT_…")`
+   ([ADR 0004](../docs/gw2/adr/0004-switches-declared-by-their-module.md)). The bridge's unix
+   side is C and reads with `getenv`; its README row says so.
+8. **No `thread_local` on a per-call path.** The x86_64 and i386 DLLs are built with mingw-GCC,
+   whose `thread_local` is emulated TLS: several function calls per access, about 0.1 µs under
+   Rosetta. At 21,000 timing scopes a frame that cost the render thread 2.3 ms (#28, #37). Keep
+   per-thread state in an object the thread already holds, as `ApiThreadCache` does
+   (`src/dxmt/dxmt_gw2_stats.hpp`), or pass it in.
+9. **arm64-clean.** No x86 intrinsics and no inline assembly. The same source builds the ARM64X
+   DLLs for the arm64 engine.
+
+The `GW2` workflow prints the fork's footprint in upstream's files for every pull request: the
+files it changes, the lines it adds there, and the upstream lines it rewrites or deletes. A PR
+that raises the removed lines says why in its description.
+
+The decisions these rules rest on, and the ones a change must stay consistent with:
+
+- [ADR 0001](../docs/gw2/adr/0001-one-compile-job-per-key.md): one compile job per key; warming
+  and demand share it.
+- [ADR 0002](../docs/gw2/adr/0002-shared-submission-and-completion-semantics.md): Metal 3 and
+  Metal 4 share submission and completion semantics; encoding stays specific to each.
+- [ADR 0003](../docs/gw2/adr/0003-gpu-completion-authorizes-retirement.md): GPU completion
+  authorizes retirement.
+- [ADR 0004](../docs/gw2/adr/0004-switches-declared-by-their-module.md): switches are declared
+  by the module that reads them.
+- [ADR 0005](../docs/gw2/adr/0005-bridge-call-numbers-in-one-manifest.md): bridge call numbers
+  are explicit in one manifest.
+- [ADR 0006](../docs/gw2/adr/0006-nothing-goes-upstream.md): nothing from this fork goes
+  upstream, not a pull request, an issue, a comment or a finding.
+- [ADR 0007](../docs/gw2/adr/0007-metal-4-changes-merge-with-their-switch-off.md): Metal 4,
+  bridge and chunk-submission changes merge with their switch off; a default flips after the
+  Metal tests ran on a Mac ([The Mac run](#the-mac-run)).
+- [ADR 0008](../docs/gw2/adr/0008-0.2-presents-metal-4-frames-through-a-metal-3-command-buffer.md):
+  0.2 presents Metal 4 frames through a Metal 3 command buffer, and 0.1.x keeps the Metal 4
+  present.
+- [ADR 0009](../docs/gw2/adr/0009-the-shown-wait-sits-before-the-first-back-buffer-write.md):
+  with the Metal 3 present, the next frame waits for `shown` only before it writes the back
+  buffer.
+- [ADR 0010](../docs/gw2/adr/0010-a-tested-switch-is-deleted-or-becomes-the-default.md): a
+  switch whose test is over is deleted or becomes the default.
+- [ADR 0011](../docs/gw2/adr/0011-the-pso-archive-is-deleted.md): the PSO archive is deleted.
+- [ADR 0012](../docs/gw2/adr/0012-fork-code-stays-out-of-upstream-files-and-off-their-ends.md):
+  fork code stays out of upstream's files, and off the ends upstream appends to.
+- [ADR 0013](../docs/gw2/adr/0013-a-push-run-skips-tests-a-green-pull-request-ran.md): a push
+  run skips the native tests a green pull request ran on the same tree.
+- [ADR 0014](../docs/gw2/adr/0014-the-project-rules-that-bind-this-fork.md): the project's
+  rules that bind this fork, each pointing to the workspace ADR that holds it.
+- [ADR 0015](../docs/gw2/adr/0015-compile-service-tests-without-the-old-scheduler.md): the
+  compile service is tested on its own, without the old scheduler.
+- [ADR 0016](../docs/gw2/adr/0016-ccache-for-pull-request-builds.md): pull requests compile
+  through a ccache that only pushes save, and pushes don't read it.
+- [ADR 0017](../docs/gw2/adr/0017-the-shown-wait-before-the-first-back-buffer-write-is-the-default.md):
+  the shown wait before the first back-buffer write (ADR 0009) is the default.
+- [ADR 0018](../docs/gw2/adr/0018-a-metal-3-present-s-fences-go-to-the-metal-4-queue-behind-a-switch.md):
+  a Metal 3 present's fences go to the Metal 4 queue, behind `DXMT_MTL4_PRESENT_FENCES`.
+
 ## Definition of Done
 
-- [ ] **Clean build.** `scripts/build-dxmt.zsh` (GW2 on Mac) builds x86_64 and i386 from the
-      branch without new warnings, and installs it into the engine.
+- [ ] **Clean build.** The `GW2` workflow (`.github/workflows/gw2.yml`) is green on the pull
+      request. It builds x86_64 the way `scripts/build-dxmt.zsh` (GW2 on Mac) does (i386 too, on
+      the push after the merge), without new warnings, builds arm64 for Mach9's engine and runs
+      the native tests. That run is the build gate.
+      A local build is only for installing and playing, and the run's artifact can replace it
+      ([CI](../docs/gw2/README.md#ci)).
 - [ ] **Logged and switchable.** The change writes a log line when it acts (once, or on each
       state change, never per draw), and a behaviour change has a `DXMT_*` off-switch that
-      restores the base behaviour. Both are in [docs/gw2/README.md](../docs/gw2/README.md).
+      restores the base behaviour, declared with `sw::Switch` in its module
+      ([Code rules](#code-rules)). Both are in [docs/gw2/README.md](../docs/gw2/README.md).
 - [ ] **Measured in GW2.** STATS lines before and after, in the same place with the same
       settings (a quiet spot and Lion's Arch for anything on the frame path), alternating base
       and branch where the difference is small. Also the off-switch run. Never measure while
@@ -113,7 +242,8 @@ If two sources conflict, report the conflict instead of silently choosing one.
 ## Never do these things
 
 - Open anything in 3Shain/dxmt from this fork.
-- Push directly to `gw2-on-mac` or `main`.
-- Start Wine, Steam or GW2 while Jan may be playing, or without his go.
+- Push directly to `gw2-on-mac`, or to `main` anything but the fast-forward to a synced upstream
+  commit.
+- Start Wine, Steam or GW2 while I may be playing, or without my go.
 - Merge a change that renders differently without the issue asking for it.
 - Commit logs, captures or traces with account data.

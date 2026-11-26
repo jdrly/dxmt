@@ -4,7 +4,7 @@ Shader variants and pipelines are built only through the compile service. It cre
 per key (a stable content key, or a process-local key where no recipe schema exists), takes each job's
 dependencies when the job is created, and alone decides the order. Warming and live draws share jobs
 and results, because separate object-keyed caches would let an ordinary task rebuild a warmed pipeline.
-We chose this over adding demand to the old scheduler, which would have left dedupe to three tables
+I chose this over adding demand to the old scheduler, which would have left dedupe to three tables
 kept by convention. The pointer-keyed front-end lookup stays as the fast path into it.
 
 ## Consequences

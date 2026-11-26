@@ -5,17 +5,17 @@ The skills speak in terms of five canonical triage roles. This file maps them to
 
 ## Triage state (exactly one on an open issue)
 
-| Label in mattpocock/skills | Label in our tracker | Meaning                                                        |
+| Label in mattpocock/skills | Label in my tracker  | Meaning                                                        |
 | -------------------------- | -------------------- | -------------------------------------------------------------- |
-| `needs-triage`             | `needs-triage`       | Jan needs to evaluate this issue                               |
-| `needs-info`               | `needs-info`         | Waiting for information: a measurement, a trace, Jan's answer  |
+| `needs-triage`             | `needs-triage`       | I need to evaluate this issue                                  |
+| `needs-info`               | `needs-info`         | Waiting for information: a measurement, a trace, my answer     |
 | `ready-for-agent`          | `ready-for-agent`    | Fully specified: an agent can implement it                     |
-| `ready-for-human`          | `ready-for-human`    | Needs Jan first: a decision, or an experiment in the game      |
+| `ready-for-human`          | `ready-for-human`    | Needs me first: a decision, or an experiment in the game       |
 | `wontfix`                  | `wontfix`            | Will not be actioned                                           |
 
 A change to a GPU driver can't be checked without GW2 running. So here, unlike in SWTOR on Mac,
-`ready-for-agent` means an agent can implement the issue, and Jan plays its UAT afterwards.
-`ready-for-human` is for an issue that needs Jan's decision or his run in the game *before* the
+`ready-for-agent` means an agent can implement the issue, and I play its UAT afterwards.
+`ready-for-human` is for an issue that needs my decision or my run in the game *before* the
 code can be written.
 
 ## Type (exactly one)

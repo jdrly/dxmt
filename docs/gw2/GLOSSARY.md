@@ -112,8 +112,9 @@ present split's buffers always. The ledger decides it, not the call site.
 ### Bridge
 
 **Bridge call**:
-One named PE→unix call through Wine's unix-call interface: a thunk in `winemetal_thunks.c` on the
-PE side, a handler in `src/winemetal/unix/` on the unix side.
+One named PE→unix call through Wine's unix-call interface: a thunk in `winemetal_thunks.c` (or
+`winemetal_gw2_thunks.c`, which it includes) on the PE side, a handler in `src/winemetal/unix/` on
+the unix side.
 _Avoid_: thunk (that is the PE half), syscall
 
 **Call number**:
@@ -132,6 +133,40 @@ _Avoid_: call table (the generated `__wine_unix_call_funcs` and `__wine_unix_cal
 **Command packet**:
 An encoded graphics command that the unix side interprets (the Metal 3 and Metal 4 encoders'
 `encodeCommands`). Many packets travel in one bridge call; a packet is not a bridge call.
+
+### The arm64 build
+
+**Mach9**:
+athei's arm64 Wine, the engine of GW2 on Mac 0.2. Its unix side is arm64 and its 64-bit PE side
+is ARM64X. The `Build arm64` job builds my DXMT the way Mach9 builds its own, links it against
+the engine's files, and `.github/gw2/check-mach9.zsh` compares the result with the engine's DXMT.
+
+**FEX**:
+The x86_64 emulator of the arm64 engine. Only the game's own x86_64 code runs through it; my
+DLLs' code runs natively.
+
+**ARM64X DLL**:
+A DLL of the arm64 build that holds ARM64 code and ARM64EC code in one file. One meson tree
+with `build-arm64ec.txt` builds them. The i386 DLLs are a second tree.
+
+**ARM64EC**:
+The arm64 code of an ARM64X DLL that x86_64 code calls and that calls x86_64 code. The game is
+x86_64, so this is the half of my DLLs it runs.
+
+**Patchable entry**:
+The x64 entry of a `DXMT_HOTPATCHABLE` function or of an export in an ARM64X DLL: the address a
+hook such as the Steam overlay's patches. On ARM64EC a call to a patchable function enters its
+x64 entry even from inside the module, so one entry that calls another runs a hook on both.
+`DXMT_HOTPATCHABLE_SHARED` (`src/util/util_hotpatch.h`) gives such a pair a shared body, and
+`.github/gw2/patchable-calls.py` fails the build when an entry's ARM64EC code reaches another
+entry.
+
+**Exclusive pair**:
+A load-exclusive and store-exclusive loop (`ldxr`/`ldaxr` with `stxr`/`stlxr`) in an ARM64X
+DLL's ARM64 or ARM64EC code. Built for `armv8.4-a`, my code's atomics are LSE instructions
+instead, so the pairs left come from the static libraries built for ARMv8.0 (libc++, libc++abi,
+the mingw-w64 CRT, Mach9's winecrt0). `.github/gw2/exclusive-pairs.py` counts them, and
+`check-mach9.zsh` fails above a fixed ceiling per DLL.
 
 ### Submission
 
@@ -175,35 +210,3 @@ signals, encode, commit on the encode thread; wait (a completed chunk) and retir
 drain at teardown. One adapter per backend (`Metal3Submission`, `Metal4Submission`), chosen once per
 command queue; the encoding inside stays each backend's own.
 _Avoid_: backend (alone), submit path
-
-### PSO archives
-
-**Persisted key**:
-The stable key of a pipeline in a written archive, recorded next to it (a `.keys` sidecar, or a shard's
-entry in a manifest). A lookup miss whose key is persisted is **known**; otherwise **new**.
-_Avoid_: cached key
-
-**Generation**:
-One published state of a PSO archive store: a manifest naming the shards to look up and the excluded
-shapes. The index (`CURRENT`) names the current generation; the one before it is kept as the **last
-good generation**.
-_Avoid_: version, snapshot
-
-**Shard**:
-One immutable archive file of a generation, named by its content's SHA-256 and never rewritten. A
-session publishes a **delta** shard per flush (its pipelines since the last one) and may merge its
-shards into one.
-_Avoid_: archive file, chunk (that is the command queue's)
-
-**Manifest**:
-The checksummed list of one generation: each shard's session, size, SHA-256 and persisted keys, then the
-excluded shapes.
-
-**Excluded shape**:
-A pipeline key Metal's packer named while writing an archive never serialized before. Its pipelines are
-built and used, but never archived again. Only that exact key: never a class of pipelines.
-_Avoid_: blacklisted pipeline, skipped class
-
-**Archive policy**:
-The pure rules of the PSO archive (`pso_archive_policy.h`): what is kept, what a failed write skips, and
-how a miss is classified. It knows keys and record indices, never Metal's archive types.

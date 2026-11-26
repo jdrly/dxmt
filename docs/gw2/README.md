@@ -3,6 +3,9 @@
 Everything the fork adds on top of upstream DXMT. A pull request that adds or changes a switch
 or a log line updates this file in the same PR.
 
+[SERIES.md](SERIES.md) sorts every commit of the fork into topics, with each topic's switches,
+evidence and whether I keep it.
+
 GW2 on Mac sets `DXMT_LOG_PATH` to its `work/logs`, so the lines below land in
 `Gw2-64_d3d11.log` there. The file is rewritten each time the game creates its device.
 
@@ -13,53 +16,70 @@ because Wine raises `0x80000005` (`STATUS_BUFFER_OVERFLOW`) for a line over its 
 
 ## Switches
 
-| Variable | Default | What it does | Off restores |
-|---|---|---|---|
-| `DXMT_STATS` | on | The 2 s statistics lines (`STATS`, `STATS2`, `PACE`, `GPU`, the sections), `HITCH` lines, the startup line, and all their measuring (the fork's timers, the `nextDrawable` timer, the present-branch counts, the split-off command buffers' GPU timestamps) | none of it, and no measuring beyond upstream's frame statistics |
-| `DXMT_HITCH_MS` | 50 | A `HITCH` line for a Present-to-Present interval (game's render thread) at least this long; `0` turns them off | — |
-| `DXMT_PRESENT_SPLIT` | on | Commit the frame's command buffer before `nextDrawable` and present from a new one | the present in the frame's last buffer |
-| `DXMT_DISPLAY_SYNC` | on | A present with a sync interval uses `CAMetalLayer`'s vsync (`displaySyncEnabled`); a minimum duration only for intervals over one refresh, half a refresh short | DXMT's own pacing (minimum duration of exactly one refresh, display sync off) |
-| `DXMT_PRESENT_DEADLINE` | one refresh | A present without a minimum duration goes out with `presentDrawable:atTime:` now + the deadline, so macOS can raise the GPU clock; `=<ms>` sets it. The control file's `present_deadline` replaces it while the game runs ([Control file](#control-file)) | `=0`: a plain `presentDrawable:` |
-| `DXMT_STENCIL_PFV` | off | `=1` keeps `PixelFormatView` (no lossless compression) on typeless depth-stencil targets with a stencil plane | — |
-| `DXMT_BG_FPS` | 30 | Present sleeps to this rate while another process's window is in the foreground | `=0`: no throttle |
-| `DXMT_BG_FPS_MINIMIZED` | 10 | The same while GW2's window is minimized | `=0`: no throttle |
-| `DXMT_RENDER_THREAD_PRIORITY` | off | On the first Present of each thread that presents (GW2's render thread): `=1` sets the macOS QoS class user-interactive (`pthread_set_qos_class_self_np` through the bridge), `=2` calls `SetThreadPriority(THREAD_PRIORITY_HIGHEST)`, `=3` both; see [Render thread priority](#render-thread-priority) | unset or `=0`: the thread keeps the priority and QoS it had |
-| `DXMT_DEPTH_PFV` | off | `=1` keeps `PixelFormatView` (no lossless compression) on typeless single-plane depth targets (`R32_TYPELESS`, `R16_TYPELESS` bound as depth), the part `DXMT_STENCIL_PFV` doesn't cover (#2) | — |
-| `DXMT_BG_POLICY` | `focus` | What "in the background" means for `DXMT_BG_FPS`. `focus`: another process's window is in the foreground, or none is (pid 0, counted as another process). `occlusion`: GW2's window isn't visible on screen (`NSWindow.occlusionState` without `Visible`, read through the bridge at most 10 times a second) or is miniaturized (`DXMT_BG_FPS_MINIMIZED`), whoever has the focus, as d9mt does. A minimized window (`IsIconic`) throttles under both | `focus` |
-| `DXMT_PSO_BLEND_HASH` | on | The pipeline key's hash includes a fingerprint of the blend state (exactly what the key's equality compares: disabled fields left out, one render target without independent blend, else one per color attachment) and `RasterizationEnabled`; computed once per blend state object. The equality rejects keys whose fingerprints differ without reading both blend descriptions | `=0`: the upstream hash (no blend, no `RasterizationEnabled`) and equality |
-| `DXMT_PSO_MRU` | on | Each context keeps its last 4 plain (VS/PS) pipelines with their keys and checks them, with the cache's own equality, before the device's pipeline cache (its lock, hash and bucket) | `=0`: every pipeline change looks up the cache |
-| `DXMT_PSO_TOPOLOGY_KEEP` | on | `IASetPrimitiveTopology` keeps the current pipeline when the new topology has the same class (point, line, triangle) and the pipeline is a plain one (no GS, HS or DS bound); adjacency and patch lists always invalidate | `=0`: every topology change invalidates the pipeline |
-| `DXMT_CHUNKS` | unset (32) | The chunk ring's size, `32`, `64` or `128` (anything else: 32, with a warning). The render thread blocks in `CommitCurrentChunk` at size − 1 chunks in flight. Set (even to 32), the Metal queue's bound on uncompleted command buffers is the size + 16 (headroom for the present split's extra buffer, one per frame in flight); unset, it stays 32. An experiment (#8) | unset: upstream's ring of 32 and Metal bound of 32 |
-| `DXMT_MAX_FRAME_LATENCY` | unset | `=1`…`16` replaces the frame latency the game sets with `SetMaximumFrameLatency` (and the default of 3 before it calls); out of range: ignored, with a warning. At 15–16 the 16 per-frame statistics slots (STATS, HUD) can mix frames | unset: the game's value, 0 taken as 3 |
-| `DXMT_CAP_LIMITER` | on | With display sync, a frame cap (`d3d11.preferredMaxFrameRate`) below the refresh rate that isn't a whole number of refreshes (50 fps on 60 Hz) is kept by a frame limiter on the render thread: Present sleeps to a fixed cadence before it takes the device lock, and the present goes out with display sync and the deadline. Whole numbers (30, 20 fps on 60 Hz) keep the minimum duration, half a refresh short, as before | the cap is dropped (`vsync_duration` 0: uncapped to the refresh rate) |
-| `DXMT_AIR_READERS` | 1 | The AIR cache's read connections (#95; 1–16). `1`: one reader behind one lock, as upstream. `n > 1`: a pool of n read-only sqlite connections (each a bridge `CacheReader`), each behind its own lock; a variant build takes the first free one (try-lock from a rotating start) and waits only when all are busy. The writer keeps its own connection; the database is in WAL mode, so readers never block it or each other. Fewer connections if one can't be opened; the startup line shows the number open. Measure with COMPILE's `variant=lock` (W0) before raising it | unset, `1` or anything outside 1–16: the single reader |
-| `DXMT_COMPILE_DEMAND` | off | The compile service's `declared` policy (C2; see [COMPILE](#compile)). `=1` (exactly): a pipeline's shader variants are taken as its dependencies when it is submitted, and it waits for them unqueued instead of running and parking; a demand (the encode thread waiting in `GetPipeline`) moves the pipeline and its queued variants ahead of everything else, once each, and reaches what a demanded job parks on and dependencies submitted later; a speculative lane for warming (W2/W3) admits one job at a time and none while a demand waits, and a parked speculative job resumes through that admission again. Changes the order of compile jobs, not what is built. Parsed once per process | unset or anything but `1`: the `legacy` policy, the scheduler as before (C1) |
-| `DXMT_WARM` | off | Shader warming W2/W3 (see [WARM](#warm)). `functions`: at device creation a lowest-priority thread reads the recipes #57 recorded (`recipes_1.db`, first-use order, bridge call 193) and queues a speculative job per recorded vertex and pixel variant that makes its MTLFunction from the AIR in the shader cache (never a translation). `all`: also a job per recipe that builds its pipeline from those functions through the pipeline builder (C3). Results go into shared tables keyed by stable key (C4) that the live variant and pipeline jobs consult when they are created (a done result completes them without a job) and when they run: each key is built once per process, whoever comes first; a live job that finds a warm job building its key waits for it (a demand promotes it). Speculative jobs run one at a time and never while a demand waits. Turns on the declared compile policy (as `DXMT_COMPILE_DEMAND=1`). Pipelines are built with the device's `newRenderPipelineState` on both the Metal 3 and Metal 4 queue paths. Parsed once per process | unset, `off` or anything else: no thread, no tables, nothing read |
-| `DXMT_WARM_MAX` | 8192 | With `DXMT_WARM`: recipes planned at most (so at most this many pipelines and twice as many functions); the rest is counted as `capped`. #124 raised it from 2048: GW2 uses 2,700–4,800 pipelines a session, so 8192 is about two sessions (about 290 MB natively for today's 6,062 recipes) | — |
-| `DXMT_COMPILE_WAIT_MS` | 2 | A `COMPILE frame=…` line for a frame whose encode-thread pipeline waits add up to at least this many ms (at most 5 lines a second); `0` turns them off. Needs `DXMT_STATS` | — |
-| `DXMT_PSO_ARCHIVE` | off | `=1`: Metal binary archives for pipelines. Pipelines are looked up in the archives of the last 4 sessions, and every render and compute pipeline built is added to this session's archive (see [COMPILE](#compile)) | no archives: no lookup, no capture, no files |
-| `DXMT_PSO_ARCHIVE_DIR` | user cache dir | With `DXMT_PSO_ARCHIVE=1`: an absolute unix directory that replaces `$(getconf DARWIN_USER_CACHE_DIR)dxmt/pso` (or `<DXMT_CACHE_DIR>/dxmt/pso`, #134) | — |
-| `DXMT_PSO_FLUSH_EVERY` | 256 | With `DXMT_PSO_ARCHIVE=1`: serialize this session's archive every this many new pipelines (also every 30 s if any are new; never at exit) | — |
-| `DXMT_PROMOTE_FLUSH_MIN` | 0 | `=<n>`: a speculative commit of an occlusion or timestamp query `End` waits until `n` such requests have accumulated, with a progress guarantee (see [CMDS](#cmds)). `1` commits as upstream does | `=0`: upstream (commit at the next pass change) |
-| `DXMT_PROMOTE_FLUSH_MS` | 2 | With `DXMT_PROMOTE_FLUSH_MIN`: the longest a held commit waits (the timer at the next pass change, and the watchdog's period) | — |
-| `DXMT_TIMESTAMP_MODE` | `estimate` | How a timestamp query `End` (and a timestamp-disjoint one) is taken. `estimate`: the open pass stays open and nothing is committed; the value is interpolated between the GPU start and end of the command buffer the query lands in, by its position among the chunk's encoders. `boundary`: the pass stays open, but the commit still happens at the next pass change (as `exact`, so `DXMT_PROMOTE_FLUSH_MIN` applies); the value is interpolated the same way. Both keep the values monotonic and make a disjoint query ready only after its chunk's timestamps are resolved; see [TIMESTAMP](#timestamp) | `exact` (or `0`): upstream, a pass split and a commit per timestamp, the value the buffer's GPU end |
-| `DXMT_MAP_FAST` | on | The Map/Unmap fast path for buffers (see [MAP](#map)): the immediate context maps a dynamic or default-usage buffer from fields the buffer sets at creation (no virtual lookup, no reference count), `Unmap` of a buffer returns at once, the end of a page renames under one lock, a buffer that uses up its page within one chunk gets pages twice as large (up to 64 KB, at least two suballocations each), and a default-usage buffer's renames (`UpdateSubresource` of the whole buffer) come from CPU-visible suballocated pages, so an update is a `memcpy` instead of a new Metal buffer written through a unix call. `UpdateSubresource` of such a buffer skips its other virtual calls too. `PACE`'s `map` times one call in 16 and scales it, as `draw` does | `=0`: upstream's Map, Unmap and renames, `map` timed on every call |
-| `DXMT_SKIP_REBIND` | on | A draw's pipeline bind is left out when its render encoder already has that pipeline bound (see [REBIND](#rebind)). Each encoder tracks the pipeline its own command list bound last; a new encoder starts with none, and any other pipeline bind in it (an internal pass's, the tile barrier's) clears it, so the first draw after those always binds. Only the bind is dropped: depth-stencil, rasterizer, blend color, viewports and scissors are separate commands, emitted as before | `=0`: every pipeline change binds, as upstream |
-| `DXMT_CONTROL` | off | `=<path>`: the control file (see [Control file](#control-file)). A thread reads it once a second, never the render thread; its keys change settings while the game runs, for A/B minutes within one start. Today's key: `present_deadline`, which replaces `DXMT_PRESENT_DEADLINE` while the file sets it | unset: no thread, no file access, every setting from its variable |
-| `DXMT_RESIDENCY_SET` | on | One `MTLResidencySet` for the Metal device, attached to every DXMT command queue on it (macOS 15+; see [RESIDENCY](#residency)). Buffers and textures enter it when they are created and leave it when they are freed, which happens only after the last chunk that used them has retired; the set's changes are committed right before a command buffer commit, only when it changed. `makeResident` emits no `useResource` for them (`ENCODE useres` near 0). Left out, with `useResource` as before: heap-placed and shared (IOSurface) resources, CPU-placed memory (i386), DXMT's bare Metal buffers (dummy constant buffer, GS marshal). Drawables never enter it. Texture views and buffer views ride on their parent | `=0`: no set, a `useResource` per resource and encoder (upstream) |
-| `DXMT_UNRETAINED` | on | A chunk's command buffers (the frame's and the present split's) come from `commandBufferWithUnretainedReferences` (bridge call 154), so Metal retains nothing they use; DXMT holds it until the finish thread retires the chunk (see [LIFECHECK](#lifecheck)): the drawable, the presenter, events and MetalFX scalers are held in the retirement ledger until the chunk retires instead of being released after encoding, and device teardown waits for every committed chunk before the D3D11 device's pipeline, depth-stencil and sampler caches go (the same with `DXMT_LIFETIME_CHECK=1`). Metal 4 plan phase 1 (#31), groundwork for the Metal 4 queue (#32). On by default since the lifetime check (20+ min of busy Lion's Arch with a map change and alt-tabs) found 0 early releases | `=0`: `[queue commandBuffer]`, as upstream |
-| `DXMT_LIFETIME_CHECK` | off | **Diagnostic build only** (meson `-Dgw2_lifetime_check=true`; in any other build it is compiled out and `=1` is ignored with a warning). `=1`: as d9mt's `D9MT_LIFETIME_CHECK`. Every object a chunk's command buffers use is stamped with the chunk's sequence on the encode thread; releasing DXMT's last reference to one before the GPU completed that chunk logs a `LIFETIME` line (once per object type) and counts in [LIFECHECK](#lifecheck). Works with `DXMT_UNRETAINED` on or off (it checks DXMT's own bookkeeping, not Metal's retains). It also turns on the ledger's holds and teardown waits that `DXMT_UNRETAINED=1` uses. Costs a lock and a hash lookup per stamp, retain and release: for test runs only | `=0`: no stamps, no counting; a normal build has no code for them at all |
-| `DXMT_METAL4` | on | Metal 4 for this process's devices (Metal 4 plan phase 2, #32; see [Metal 4](#metal-4)): an `MTL4CommandQueue` with one `MTL4CommandAllocator` and one residency set per chunk slot, Metal 4 command buffers with commit feedback, today's packets replayed on Metal 4 encoders through argument tables, and present through `waitForDrawable`/`signalDrawable` and the drawable's own present (the same deadline, minimum-duration and present-split behaviour). Decided once per process at the first command queue. Stays on Metal 3, with a warning, on a device without Metal 4 (macOS before 26, or not `MTLGPUFamilyMetal4`), without the residency set (`DXMT_RESIDENCY_SET`), without `DXMT_UNRETAINED=1`, or with `DXMT_METALFX_SPATIAL_SWAPCHAIN=1`. **On by default since 2026-11-04** (#32's follow-up), after Jan's 10-minute in-game session on it: no device errors, no missed resources, no visual problems | `=0`: Metal 3, exactly as before; no bridge call, no log line |
-| `DXMT_SUBSAMPLE_METALFX` | off | GW2's Render Sampling: Subsample pass with MetalFX (#56; see [SUBSAMPLE](#subsample)). `log`: capture only, every candidate draw's shape is logged once and nothing changes. `1`: an accepted pass (the full-screen draw that samples the low-resolution 3D scene into a target of the swapchain's size) samples a MetalFX spatial upscale of its source instead, on Metal 3 (`MTLFXSpatialScaler`) and Metal 4 (`MTL4FXSpatialScaler`, bridge calls 190–192); the game's pixel shader still runs, and the UI drawn after it is untouched. Anything that doesn't match runs unchanged | unset or `=0`: no detection, no counting, no bridge call |
-| `DXMT_SUBSAMPLE_METALFX_PS` | unset | With `DXMT_SUBSAMPLE_METALFX`: only a pass whose pixel shader's SHA-1 (as the candidate line prints it) starts with this hex prefix is accepted (`no(pin)` otherwise) | any pixel shader that passes the other checks |
-| `DXMT_PSO_RECORD` | on | Shader warming W1 (#57; see [RECORD](#record)): records, durably, what each pipeline was built from, so later stages (W2/W3) can prepare shaders and pipelines before GW2 asks for them. Into `$(getconf DARWIN_USER_CACHE_DIR)dxmt/<exe>/recipes_1.db` (its own sqlite file, through the bridge's cache writer): each shader's DXBC by its SHA-1, each variant's translation inputs (VS, PS, plain) by shader SHA-1, variant digest and Metal target, and each plain graphics pipeline's recipe by the SHA-1 of an explicit serialization of the target, the vertex/pixel identities and every field of the descriptor Metal gets. Once per key and process. The callers never wait on the recorder: a fixed lock-free table of key fingerprints (2 MB) and a bounded lock-free queue (16,384 records or 128 MB), then counted drops. One lowest-priority writer thread skips rows the file already has and stops at a 256 MB file, or after 8 failed writes in a row; it never calls the logger (Present logs its lines). Changes nothing that is built or drawn | `=0`: no recording, no thread, no database opened |
-| `DXMT_PSO_GENERATIONS` | off | `=1` (exactly), with `DXMT_PSO_ARCHIVE=1` (#75; see [COMPILE](#compile), *Generations*): the archives are published as generations in `…/os-<OS build>-<GPU>/gen1/` instead of one file per session: each flush writes the pipelines added since the last one into an immutable shard of their own (never re-serializing an archive, which Metal fails at), a checksummed manifest lists the shards and their keys, and one index file (`CURRENT`) is replaced atomically, so a kill or a failed write leaves the last good generation. A pipeline Metal's packer names is excluded by its key from capture, in this and later sessions. One process writes a store; another gets lookup only | the session files of #52, unchanged (they and a store sit side by side; neither reads the other) |
-| `DXMT_RETIRE_RECOVERY` | on | A refused retirement (#113; never expected, a bug) recovers instead of holding every later chunk until teardown. The retirement ledger then retires by sequence with the completion the refused token proves: the finish thread waits for every chunk in order, so a token of the queue's submission for chunk `S` means every chunk up to `S` completed, and their holds go in sequence order (the ring resumes at `S + 1`); an empty or another queue's token proves nothing, and the next chunk's token recovers. A refused hold goes once the last chunk that may use it completed (its own chunk while unretired; for a retired sequence, every chunk the ring may still have in flight), not at teardown. A refused submission retirement retires the chunk the submission last waited for. One error line per failure (see *Other log lines*); the normal path is unchanged | `0`: refused holds and retirements are kept until the queue goes, as before |
-| `DXMT_WARM_ORDER` | use | (#124) With `DXMT_WARM`: which recipes the plan takes. `use`: the use rows first (`DXMT_PSO_RECORD_USE`), then every recipe of the target; ranked by the newest session that used it, then by the number of sessions, then rowid; the first `DXMT_WARM_MAX` are planned and submitted in first-use order (the character select first), recipes without use rows (recorded before #124, or unused since) after them in rowid order. A file without use rows plans exactly as `rowid` does. Parsed once per process | `rowid`: #88's plan, the oldest recipes first, streamed |
-| `DXMT_PSO_RECORD_USE` | on | (#124) With `DXMT_PSO_RECORD`: the recipes' use data, as d9mt's state cache keeps it. One row per recipe ever used, `U` + the recipe's SHA-1 → schema, lastSession, sessionsUsed, firstUseMs (u32 each), rewritten in place; and a session counter, `Ssession` → schema, the last session's number. When it opens the file, the writer reads both (bridge call 193), takes the counter + 1 as this session's number and writes it back. A newer session always has a larger number; no clock is involved. It then merges each recipe this session used (built when its recipe is recorded, or taken from warming's shared results through `warmPipelineHit`) into its row, once per recipe and session. Bounded by the number of recipes; about 3,000–5,000 merges a session on the writer thread (`RECORD uses=`). Warming's plan ranks by them | `=0`: no use data (`DXMT_WARM_ORDER=use` then plans by rowid, as for a file without it) |
-| `DXMT_DEPENDENCY_COMPRESSION` | off | `=1` (exactly), Metal 4 only (#132, after GameSir `3170d0349a`; see [DEPS](#deps)): encoder fences follow a **checkpoint chain** instead of the per-encoder weak window. About every 64 encoder IDs one encoder (the checkpoint) waits on every encoder from the previous checkpoint's coverage to 64 IDs back, and on the previous checkpoint; every other encoder depends on the latest checkpoint (simplification usually removes that wait). So when an encoder runs, everything 127+ IDs back has finished, and the trackers keep direct dependencies up to 127 IDs back (legacy: 63). The trackers stay bounded, so the dropped dependencies need this cover (GameSir instead tracks every reader and writer by explicit ID). It also records a pass's fragment read of something the same pass wrote at pre-raster, which the legacy trackers forget. Read once per device; on Metal 3 the startup line says `unsupported` and the legacy policy stays. Encoder merging (the flush-time relation scan) is unchanged | the legacy weak window (each encoder waits on the encoders 64-127 IDs back that simplification can't reach) |
-| `DXMT_CACHE_DIR` | unset | (#134) An absolute unix path that replaces `$(getconf DARWIN_USER_CACHE_DIR)` as the base of DXMT's caches, so each setup of the game on one Mac (the GW2 on Mac app's bottle, a development bottle) keeps its own: the AIR cache `<base>/dxmt/<exe>/shaders_*.db`, the recipes `<base>/dxmt/<exe>/recipes_1.db`, Metal's `<base>/dxmt/<exe>/com.apple.metal` (when Metal takes it), and the PSO archive's default `<base>/dxmt/pso/…`. The `dxmt/` level stays, so the layout under the base is unchanged. Read by the bridge's unix side on each cache open (`dxmt_cache_base`, `src/winemetal/unix/cache_dir.h`); an absolute `DXMT_SHADER_CACHE_PATH` or `DXMT_PSO_ARCHIVE_DIR` still wins for its cache. Empty or relative: ignored, with one warning (`Caches:` lines). A value longer than `PATH_MAX` makes the opens fail. The startup line shows the base in effect, `ignored` or `default`; the native PSO archive tool takes the same base | unset: `$(getconf DARWIN_USER_CACHE_DIR)`, byte for byte |
-| `DXMT_PIN_MODULE` | on | (#137) A DLL of DXMT (`d3d11.dll` for GW2) pins itself for the process (`GetModuleHandleExW`, `GET_MODULE_HANDLE_EX_FLAG_PIN`) just before it starts its first thread (`dxmt::ThreadFn`). Its threads run its own code and some never end (the recipe writer, the PSO archive's flusher, the control poller), so a `FreeLibrary` that unmapped it crashed them (GW2 at exit: the recipe writer returned from its `Sleep` into freed code). Pinned, `FreeLibrary` only drops a reference: the module and its threads stay until the process exits, and its static destructors run at process exit instead. Read once per DLL | `FreeLibrary` can unload the module while its threads run (upstream) |
+The Status column says where a switch stands, with the issue or note that says so. `default`: how my fork runs, at the Default column's value; the other value is the way back for a bisect. `experiment`: not decided; by default it stays at upstream's or the earlier behaviour, and my dev builds may turn it on. `diagnostic`: it measures, logs or pins something for a test run and changes nothing a player sees. `test`: it exists to answer one question and is meant to stay off. `settled`: the question is answered and the cell says how; a settled row is a removal ticket, and its code goes with it. A PR that adds a switch gives its row a status.
+
+| Variable | Default | What it does | Off restores | Status |
+|---|---|---|---|---|
+| `DXMT_STATS` | on | The 2 s statistics lines (`STATS`, `STATS2`, `PACE`, `GPU`, the sections), `HITCH` lines, the startup line, and all their measuring (the fork's timers, the `nextDrawable` timer, the present-branch counts, the split-off command buffers' GPU timestamps, the `WaitForVBlank` count) | none of it, and no measuring beyond upstream's frame statistics | `diagnostic`: on, the app's session report reads its lines |
+| `DXMT_HITCH_MS` | 50 | A `HITCH` line for a Present-to-Present interval (game's render thread) at least this long; `0` turns them off | — | `diagnostic` |
+| `DXMT_PRESENT_SPLIT` | on | Commit the frame's command buffer before `nextDrawable` and present from a new one | the present in the frame's last buffer | `default` |
+| `DXMT_DISPLAY_SYNC` | on | A present with a sync interval uses `CAMetalLayer`'s vsync (`displaySyncEnabled`); a minimum duration only for intervals over one refresh, half a refresh short | DXMT's own pacing (minimum duration of exactly one refresh, display sync off) | `default` |
+| `DXMT_PRESENT_DEADLINE` | one refresh | A present without a minimum duration goes out with `presentDrawable:atTime:` now + the deadline, so macOS can raise the GPU clock; `=<ms>` sets it. The control file's `present_deadline` replaces it while the game runs ([Control file](#control-file)). A value that isn't finite or is over 1000 ms (`inf`, `100000`) means one refresh, with one warning, since #314; a negative number or text that isn't a number means one refresh, as it always did | `=0`: a plain `presentDrawable:` | `default` |
+| `DXMT_STENCIL_PFV` | off | `=1` keeps `PixelFormatView` (no lossless compression) on typeless depth-stencil targets with a stencil plane | unset or not `1`: my fork's behaviour since `007a574`, not upstream's. These targets get no `PixelFormatView`, so Metal compresses them losslessly. Upstream sets the flag on every typeless format, so `=1` is upstream's behaviour. #2's A/B of 2026-10-28 found the fire and smoke smudges the same either way | `default`: off is my fork's behaviour (#2), `=1` is upstream's |
+| `DXMT_BG_FPS` | 30 | Present sleeps to this rate while another process's window is in the foreground | `=0`: no throttle | `default` |
+| `DXMT_BG_FPS_MINIMIZED` | 10 | The same while GW2's window is minimized | `=0`: no throttle | `default` |
+| `DXMT_RENDER_THREAD_PRIORITY` | off | On the first Present of each thread that presents (GW2's render thread): `=1` sets the macOS QoS class user-interactive (`pthread_set_qos_class_self_np` through the bridge), `=2` calls `SetThreadPriority(THREAD_PRIORITY_HIGHEST)`, `=3` both; see [Render thread priority](#render-thread-priority) | unset or `=0`: the thread keeps the priority and QoS it had | `experiment`: not decided (#9) |
+| `DXMT_THREAD_PRIORITY` | `critical` | (#151) The priority DXMT's `dxmt-encode-thread` and `dxmt-finish-thread` set at their start. `critical`: `THREAD_PRIORITY_TIME_CRITICAL`, as upstream. `normal`: `THREAD_PRIORITY_NORMAL`, timeshare and below GW2's game thread. `utility`: `normal`, then Mach base priority 20 (bridge call `WMTSetThreadBasePrioritySelf`), which macOS keeps on the P cores. Read at each queue's creation; anything else is `critical`, with a warning. The startup line shows `utility:ok`, `utility:failed` (a thread didn't get base priority 20) or `utility:pending` (no thread has tried yet); see [Queue thread priority](#queue-thread-priority) | unset or `critical`: `THREAD_PRIORITY_TIME_CRITICAL` | `experiment`: `critical` is upstream's; the other values have no result yet (#151) |
+| `DXMT_COMPILE_PRIORITY` | `critical` | (#152) The priority each compile worker sets at its start (the workers that build shader variants and pipelines, 2 at first and up to 2 × CPUs). The same values and mechanism as `DXMT_THREAD_PRIORITY`: `critical` (`THREAD_PRIORITY_TIME_CRITICAL`, as upstream), `normal` (`THREAD_PRIORITY_NORMAL`, below GW2's game thread) or `utility` (`normal`, then base priority 20). Read at each device's creation; anything else is `critical`, with a warning. The startup line shows `utility:ok`, `utility:failed` or `utility:pending` as for `DXMT_THREAD_PRIORITY`; see [Compile worker priority](#compile-worker-priority) | unset or `critical`: `THREAD_PRIORITY_TIME_CRITICAL` | `experiment`: `critical` is upstream's; the other values have no result yet (#152) |
+| `DXMT_DEPTH_PFV` | off | `=1` keeps `PixelFormatView` (no lossless compression) on typeless single-plane depth targets (`R32_TYPELESS`, `R16_TYPELESS` bound as depth), the part `DXMT_STENCIL_PFV` doesn't cover (#2) | unset or not `1`: my fork's behaviour since `9688571`, not upstream's. These targets get no `PixelFormatView`, so Metal compresses them losslessly, and `=1` is upstream's behaviour, as for `DXMT_STENCIL_PFV` above | `default`: off is my fork's behaviour (#2), `=1` is upstream's |
+| `DXMT_BG_POLICY` | `focus` | What "in the background" means for `DXMT_BG_FPS`. `focus`: another process's window is in the foreground, or none is (pid 0, counted as another process). `occlusion`: GW2's window isn't visible on screen (`NSWindow.occlusionState` without `Visible`, read through the bridge at most 10 times a second) or is miniaturized (`DXMT_BG_FPS_MINIMIZED`), whoever has the focus, as d9mt does. A minimized window (`IsIconic`) throttles under both | `focus` | `default` |
+| `DXMT_PSO_BLEND_HASH` | on | The pipeline key's hash includes a fingerprint of the blend state (exactly what the key's equality compares: disabled fields left out, one render target without independent blend, else one per color attachment) and `RasterizationEnabled`; computed once per blend state object. The equality rejects keys whose fingerprints differ without reading both blend descriptions | `=0`: the upstream hash (no blend, no `RasterizationEnabled`) and equality | `default` |
+| `DXMT_PSO_MRU` | on | Each context keeps its last 4 plain (VS/PS) pipelines with their keys and checks them, with the cache's own equality, before the device's pipeline cache (its lock, hash and bucket) | `=0`: every pipeline change looks up the cache | `default` |
+| `DXMT_PSO_TOPOLOGY_KEEP` | on | `IASetPrimitiveTopology` keeps the current pipeline when the new topology has the same class (point, line, triangle) and the pipeline is a plain one (no GS, HS or DS bound); adjacency and patch lists always invalidate | `=0`: every topology change invalidates the pipeline | `default` |
+| `DXMT_SKIP_SAME_STATE` | on | (#146) Setters that change nothing return before they invalidate the pipeline or emit a command: `IASetInputLayout` with the layout already bound (null included), `XXSetShader(NULL)` on a stage that has no shader (any stage, compute included; with class instances it still logs its error), a vertex buffer slot set again with the same buffer, stride and offset (no `bindVertexBufferOffset`), and `IASetIndexBuffer` with the same buffer, format and offset (no index buffer command). (#206) `XXSetShader` given the pointer the stage was last given, while the stage still holds the shader bound from it, returns before its `QueryInterface` (it returned after it before, so nothing else changes). The state, its references and the encode thread's bindings are what they were, so later draws bind the same. `IASetInputLayout` with another layout stores it without a `QueryInterface`. The `PSO` line counts these calls either way (`samelayout`, `nullshader`, `sameshader`, `samevb`, `sameib`) | `=0`: each of these calls invalidates or emits as upstream, and `XXSetShader` runs its `QueryInterface` first | `default` (#146) |
+| `DXMT_SKIP_SAME_SRV` | off | (#147) `=1`: `XXSetShaderResources` leaves a slot whose bound view is the incoming one and whose hazard bit is clear before it validates the view: no view load, no hazard check, no `bind()`. A clear bit means the bound view can't be an output (render target, depth-stencil, UAV or stream output), so validation would pass it at once; a view that can be an output is always validated. That holds only because the switch also sets the bit when a bound slot gets a view that can be an output where it held one that can't: upstream's `BindingSet::bind` sets the bit only when an empty slot is bound, so `ResolveSRVHazard` missed that slot when the texture was then bound as an output, and the view stayed bound until the game set it again (when `ValidateSRVHazard` unbound it). With the switch on, the output's bind unbinds it at once, as D3D11 specifies. Off by default because that changes what is bound in that case; the `PSO` line's `srv` field counts the case (its fifth number) either way. The sampler setters already compare the pointer first and only gain counters | off: the setters and the hazard bits as upstream | `experiment`: its counters are on, the skip waits for a visual check (#147) |
+| `DXMT_SKIP_EMPTY_SLOTS` | on | (#203) `XXSetShaderResources` and `XXSetSamplers` of 1 to 64 slots first collect the non-null entries and the slots the range already holds, and visit only those, in ascending order. A null entry for a slot that holds nothing is never visited: the full walk only finds the slot empty there, and no counter moves. A visited slot runs the setter's code as before (hazard check, `bind()`, `unbind()`, the counters). A visit changes only its own slot, so the slots collected before the first visit are still the right ones when their turn comes. On by default because the binds, unbinds and bits come out the same, which `slot_walk_test.cpp` checks; GW2 sets 32 SRV and 16 sampler slots a call and fills a few. Wider calls take the full walk | `=0`: every slot of the call is visited, as upstream | `default` (#203) |
+| `DXMT_CHUNKS` | unset (32) | The chunk ring's size, `32`, `64` or `128` (anything else: 32, with a warning). The render thread blocks in `CommitCurrentChunk` at size − 1 chunks in flight. Set (even to 32), the Metal queue's bound on uncompleted command buffers is the size + 16 (headroom for the present split's extra buffer, one per frame in flight); unset, it stays 32. An experiment (#8) | unset: upstream's ring of 32 and Metal bound of 32 | `experiment` (#8) |
+| `DXMT_MAX_FRAME_LATENCY` | unset | `=1`…`16` replaces the frame latency the game sets with `SetMaximumFrameLatency` (and the default of 3 before it calls); out of range: ignored, with a warning. At 15–16 the 16 per-frame statistics slots (STATS, HUD) can mix frames | unset: the game's value, 0 taken as 3 | `experiment` |
+| `DXMT_CAP_LIMITER` | on | With display sync, a frame cap (`d3d11.preferredMaxFrameRate`) below the refresh rate that isn't a whole number of refreshes (50 fps on 60 Hz) is kept by a frame limiter on the render thread: Present sleeps to a fixed cadence before it takes the device lock, and the present goes out with display sync and the deadline. Whole numbers (30, 20 fps on 60 Hz) keep the minimum duration, half a refresh short, as before | the cap is dropped (`vsync_duration` 0: uncapped to the refresh rate) | `default` |
+| `DXMT_REFRESH_REQUERY` | off | (#314) `=1` (exactly): when the game leaves exclusive fullscreen (`RestoreDisplayMode`), and when it enters a fullscreen mode of 0 Hz (`ChangeDisplayMode`), the swap chain reads the monitor's refresh rate again, as its constructor does, and logs the rate it got after leaving. Without it a 60 fps cap at sync interval 1 on a 120 Hz display counts as one frame per refresh after fullscreen, and the cap is dropped | unset: the rate is unknown after exclusive fullscreen and 60 Hz is assumed, and a 0 Hz mode is taken as it is | `experiment` (#314) |
+| `DXMT_STEADY_SLEEP` | off | (#314) `=1` (exactly): the frame limiter (`DXMT_CAP_LIMITER`) and the background throttle keep their deadlines on `QueryPerformanceCounter` (`gw2::nowNs`, `src/dxmt/dxmt_gw2_cadence.hpp`) and sleep for what is left with `sleep_for`, in the same steps as before. This matters for the mingw-GCC build (0.1.x), whose `std::chrono::high_resolution_clock` is the wall clock: if that clock steps back by S seconds, a Present sleeps S seconds longer on the render thread | unset: deadlines on that clock with `sleep_until`, as before | `experiment` (#314) |
+| `DXMT_AIR_READERS` | 1 | The AIR cache's read connections (#95; 1–16). `1`: one reader behind one lock, as upstream. `n > 1`: a pool of n read-only sqlite connections (each a bridge `CacheReader`), each behind its own lock; a variant build takes the first free one (try-lock from a rotating start) and waits only when all are busy. The writer keeps its own connection; the database is in WAL mode, so readers never block it or each other. Fewer connections if one can't be opened; the startup line shows the number open. Measure with COMPILE's `variant=lock` (W0) before raising it | unset, `1` or anything outside 1–16: the single reader | `experiment`: not decided, waits for #159 |
+| `DXMT_COMPILE_DEMAND` | off | The compile service's `declared` policy (C2; see [COMPILE](#compile)). `=1` (exactly): a pipeline's shader variants are taken as its dependencies when it is submitted, and it waits for them unqueued instead of running and parking; a demand (the encode thread waiting in `GetPipeline`) moves the pipeline and its queued variants ahead of everything else, once each, and reaches what a demanded job parks on and dependencies submitted later; a speculative lane for warming (W2/W3) admits one job at a time and none while a demand waits, and a parked speculative job resumes through that admission again. Changes the order of compile jobs, not what is built. Parsed once per process | unset or anything but `1`: the `legacy` policy, the scheduler as before (C1) | `experiment` (#73); shader warming turns it on |
+| `DXMT_WARM` | off | Shader warming W2/W3 (see [WARM](#warm)). `functions`: at device creation a lowest-priority thread reads the recipes #57 recorded (`recipes_1.db`, first-use order, bridge call 193) and queues a speculative job per recorded vertex and pixel variant that makes its MTLFunction from the AIR in the shader cache (never a translation). `all`: also a job per recipe that builds its pipeline from those functions through the pipeline builder (C3). Results go into shared tables keyed by stable key (C4) that the live variant and pipeline jobs consult when they are created (a done result completes them without a job) and when they run: each key is built once per process, whoever comes first; a live job that finds a warm job building its key waits for it (a demand promotes it). Speculative jobs run one at a time (more with `DXMT_WARM_JOBS`) and never while a demand waits. Turns on the declared compile policy (as `DXMT_COMPILE_DEMAND=1`). Pipelines are built with the device's `newRenderPipelineState` on both the Metal 3 and Metal 4 queue paths. Parsed once per process | unset, `off` or anything else: no thread, no tables, nothing read | `experiment`: the app's Shader warming setting sets `all`; judged in my normal play (#128) |
+| `DXMT_WARM_MAX` | 8192 | With `DXMT_WARM`: recipes planned at most (so at most this many pipelines and twice as many functions); the rest is counted as `capped`. #124 raised it from 2048: GW2 uses 2,700–4,800 pipelines a session, so 8192 is about two sessions (about 290 MB natively for today's 6,062 recipes) | — | `experiment`: only with `DXMT_WARM` |
+| `DXMT_COMPILE_WAIT_MS` | 2 | A `COMPILE frame=…` line for a frame whose encode-thread pipeline waits add up to at least this many ms (at most 5 lines a second); `0` turns them off. Needs `DXMT_STATS` | — | `diagnostic` |
+| `DXMT_TIMESTAMP_MODE` | `estimate` | How a timestamp query `End` (and a timestamp-disjoint one) is taken. `estimate`: the open pass stays open and nothing is committed; the value is interpolated between the GPU start and end of the command buffer the query lands in, by its position among the chunk's encoders. It keeps the values monotonic and makes a disjoint query ready only after its chunk's timestamps are resolved; see [TIMESTAMP](#timestamp) | `exact` (or `0`): upstream, a pass split and a commit per timestamp, the value the buffer's GPU end | `default`: `estimate` (#26) |
+| `DXMT_GETDATA_SKIP_FLUSH` | on | In `DXMT_TIMESTAMP_MODE=estimate`: a `GetData` without `DONOTFLUSH` that finds a timestamp or timestamp-disjoint query unresolved flushes only while the query's chunk is still the one being recorded. Once that chunk is committed, the query resolves without help (the GPU, then the finish thread), so the poll goes on as a `DONOTFLUSH` poll: no `Flush` and no `STATS stall`. The first poll of a query in the current chunk still flushes, which commits it, so a poll loop always ends. CMDS `getskip` counts the skipped flushes, `getflush` the ones left (see [CMDS](#cmds)). No effect in `exact` | `=0`: every unresolved poll without `DONOTFLUSH` flushes, as before #158 | `default` (#158) |
+| `DXMT_MAP_FAST` | on | The Map/Unmap fast path for buffers (see [MAP](#map)): the immediate context maps a dynamic or default-usage buffer from fields the buffer sets at creation (no virtual lookup, no reference count), `Unmap` of a buffer returns at once, the end of a page renames under one lock, a buffer that uses up its page within one chunk gets pages twice as large (up to 64 KB, at least two suballocations each), and a default-usage buffer's renames (`UpdateSubresource` of the whole buffer) come from CPU-visible suballocated pages, so an update is a `memcpy` instead of a new Metal buffer written through a unix call. `UpdateSubresource` of such a buffer (a discard or no-overwrite update) is handled by the immediate context in one call under one device lock, without its own `Map` and `Unmap` (#145; until #287 `DXMT_UPDATE_ONE_CALL=0` could turn that off). `PACE`'s `map` times one call in 64 and scales it (#150; `draw` one in 16) | `=0`: upstream's Map, Unmap and renames, `map` timed on every call | `default` (#25) |
+| `DXMT_RENAME_TRIM` | off | (#265) `=<age>`, in sequence ids (chunks): every 2 s, the `dxmt-rename-queues` thread gives back the allocations waiting in the rename queues of every live dynamic buffer and dynamic linear texture that the GPU finished with more than `<age>` ids ago. Per queue, from its front, until the first that is younger: an allocation goes when its `will_free_at` is at most the coherent id of the command queue the resource was last mapped through, and more than `<age>` ids behind it. A resource's current allocation is never touched, a chunk that used an allocation holds its own reference until it retires, and the thread frees the ones it took after dropping the list's lock and the resources' locks. The resources are listed with this switch on even with `DXMT_STATS=0`. Counted in `MAP`'s `swept` and `swept.mb` ([MAP](#map)). 600 is jakeliu's default, about 10 s at the 55 ids a second my sessions show. A queue in use hands out its oldest page first, so its spare pages don't get old and the sweep doesn't shrink it; it reaches queues that `Map` no longer touches. Read once per process. Port of jakeliu's idle sweep ([`bcc382f5`](https://github.com/jakeliu/dxmt/commit/bcc382f5b412b145fb71bc9928f4590325610e0e)), run on the walk's thread instead of the finish thread | unset or `=0`: the queues keep their allocations until the resource is destroyed; nothing is listed and no thread starts without `DXMT_STATS` | `experiment` (#265) |
+| `DXMT_SKIP_REBIND` | on | A draw's pipeline bind is left out when its render encoder already has that pipeline bound (see [REBIND](#rebind)). Each encoder tracks the pipeline its own command list bound last; a new encoder starts with none, and any other pipeline bind in it (an internal pass's, the tile barrier's) clears it, so the first draw after those always binds. Only the bind is dropped: depth-stencil, rasterizer, blend color, viewports and scissors are separate commands, emitted as before | `=0`: every pipeline change binds, as upstream | `default` |
+| `DXMT_CONTROL` | off | `=<path>`: the control file (see [Control file](#control-file)). A thread reads it once a second, never the render thread; its keys change settings while the game runs, for A/B minutes within one start. Today's key: `present_deadline`, which replaces `DXMT_PRESENT_DEADLINE` while the file sets it | unset: no thread, no file access, every setting from its variable | `experiment`: not decided (#7) |
+| `DXMT_RESIDENCY_SET` | on | One `MTLResidencySet` for the Metal device, attached to every DXMT command queue on it (macOS 15+; see [RESIDENCY](#residency)). Buffers and textures enter it when they are created and leave it when they are freed, which happens only after the last chunk that used them has retired; the set's changes are committed right before a command buffer commit, only when it changed. `makeResident` emits no `useResource` for them (`ENCODE useres` near 0). Left out, with `useResource` as before: heap-placed and shared (IOSurface) resources, CPU-placed memory (i386), DXMT's bare Metal buffers (dummy constant buffer, GS marshal). Drawables never enter it. Texture views and buffer views ride on their parent | `=0`: no set, a `useResource` per resource and encoder (upstream) | `default` |
+| `DXMT_RELEASE_POOL` | on | (#269) A release through the bridge (`NSObject_release`, call 1) that frees its object drains an autorelease pool of its own around it. Apple's drivers autorelease their device whenever a buffer, texture or view is freed (the M1's `AGXG13GDevice`, the runner's `AppleParavirtDevice`), and GW2's render thread, its other threads, `dxmt-finish-thread` and `dxmt-rename-queues` have no pool, so each freed resource used to leave one entry on that thread's pool page until the thread exits. A release that only drops a reference (`retainCount` above 1, such as an indirect GS or tessellation draw's arguments buffer) pushes none, and neither does the release of an `NSAutoreleasePool`. `dxmt-finish-thread` also drains one around each chunk's retirement, which covers what a Metal 4 chunk's residency set frees when its allocations leave it. The unix side reads the switch from the process environment, once per process (as `DXMT_CACHE_DIR` is); the queue reads it at its creation, and the startup line shows that value | `=0`: a bare `release` and no pool on the finish thread, as upstream | `default` (#269) |
+| `DXMT_UNRETAINED` | on | A chunk's command buffers (the frame's and the present split's) come from `commandBufferWithUnretainedReferences` (bridge call 154), so Metal retains nothing they use; DXMT holds it until the finish thread retires the chunk (see [LIFECHECK](#lifecheck)): the drawable, the presenter, events and MetalFX scalers are held in the retirement ledger until the chunk retires instead of being released after encoding, and device teardown waits for every committed chunk before the D3D11 device's pipeline, depth-stencil and sampler caches go. Since #316 the device waits for its committed chunks with `=0` too: the encode thread may otherwise still wait on a compile job in `GetPipeline` while the pipeline cache and its compile service go. Metal 4 plan phase 1 (#31), groundwork for the Metal 4 queue (#32). On by default since the lifetime check (20+ min of busy Lion's Arch with a map change and alt-tabs) found 0 early releases | `=0`: `[queue commandBuffer]`, as upstream | `default` |
+| `DXMT_LIFETIME_CHECK` | off | **Diagnostic build only** (meson `-Dgw2_lifetime_check=true`; in any other build it is compiled out and `=1` is ignored with a warning). `=1`: as d9mt's `D9MT_LIFETIME_CHECK`. Every object a chunk's command buffers use is stamped with the chunk's sequence on the encode thread; releasing DXMT's last reference to one before the GPU completed that chunk logs a `LIFETIME` line (once per object type) and counts in [LIFECHECK](#lifecheck). Works with `DXMT_UNRETAINED` on or off (it checks DXMT's own bookkeeping, not Metal's retains). It also turns on the ledger's holds and the Metal 3 drain's teardown waits that `DXMT_UNRETAINED=1` uses. Costs a lock and a hash lookup per stamp, retain and release: for test runs only | `=0`: no stamps, no counting; a normal build has no code for them at all | `diagnostic`: a diagnostic build only |
+| `DXMT_METAL4` | on | Metal 4 for this process's devices (Metal 4 plan phase 2, #32; see [Metal 4](#metal-4)): an `MTL4CommandQueue` with a pool of `MTL4CommandAllocator`s (one per chunk slot with `DXMT_MTL4_ALLOCATOR_POOL=0`) and one residency set per chunk slot, Metal 4 command buffers with commit feedback, today's packets replayed on Metal 4 encoders through argument tables, and present through `waitForDrawable`/`signalDrawable` and the drawable's own present (the same deadline, minimum-duration and present-split behaviour). Decided once per process at the first command queue. Stays on Metal 3, with a warning, on a device without Metal 4 (macOS before 26, or not `MTLGPUFamilyMetal4`), without the residency set (`DXMT_RESIDENCY_SET`), without `DXMT_UNRETAINED=1`, or with `DXMT_METALFX_SPATIAL_SWAPCHAIN=1`. **On by default since 2026-11-04** (#32's follow-up), after my 10-minute in-game session on it: no device errors, no missed resources, no visual problems | `=0`: Metal 3, exactly as before; no bridge call, no log line | `default` (#54) |
+| `DXMT_MTL4_ALLOCATOR_POOL` | on | (#204) On unless exactly `0`; the default since #301, after a 2.6-hour session with it on showed `METAL4 allocators=4` and `errors` and `slow` at 0. Until then it was on only for exactly `1`, so unset and any text but `0` and `1` changed meaning. A Metal 4 queue's chunk slots have no command allocator of their own. A chunk takes one from the queue's pool at its first command buffer (all its command buffers use it, as before) and gives it back when it retires, after the finish thread reset it (every command buffer that took memory from it has completed by then). The pool makes an allocator only when none is idle and keeps at most 8 idle: one given back beyond that is released. A reset keeps an allocator's memory, so with one allocator per slot every slot the ring went through holds the largest chunk's command memory (`allocmb`, up to 14.3 MB measured), 32 slots by default, while the ring holds 1.6 chunks on average. The pool holds as many allocators as chunks were in flight at once, plus up to 8 idle. `METAL4 allocators` and `allocheld` show what is alive (with or without it). Read once per command queue; the queue's `Metal 4: on` line says which policy it has. The ring (`DXMT_CHUNKS`) and the residency sets per slot are unchanged | `=0`: one allocator per chunk slot, made with the queue, as before #204 | `default` (#204) |
+| `DXMT_MTL4_DEVICE_RESIDENCY` | on | (#153) On unless exactly `0`; the default since #301, after a 2.6-hour session with it on showed `METAL4 missed`, `unsupported` and `errors` at 0. Until then it was on only for exactly `1`, so unset and any text but `0` and `1` changed meaning. On Metal 4, what the device's residency set holds stays out of each chunk's own set: d3d11's graphics and compute pipelines enter the device's set when they are built (and leave it when the device destroys them, after its last chunk retired), the argument-buffer ring's blocks when the ring makes them (and leave when it frees them), and the packets that name what the set holds say so (`WMT_CMD_RESIDENT`: pipeline binds, argument-buffer binds, indexed draws, which also carry the index buffer's address and length so the replay doesn't ask Metal; the bytes arena and a pass's attachments through the binding state). The chunk's set is committed, used and emptied only when it has allocations (bridge call `MTLResidencySet_allocationCount`, manifest line 201). It adds no residency set to the queue: the queue keeps only the device's set (with #184's layer sets on the present passes' command buffers, not the queue), however many swap chains a program makes. Still added per chunk: `UseResource`, blit operands, the visibility buffer, set textures, internal pipelines (clears, the present pass, GS/TS emulation) and whatever the device's set leaves out. `METAL4 resadds` counts them. A hole here (an allocation marked but in no set) is a GPU read of memory nobody keeps resident; see [Metal 4](#metal-4) for what Metal's validation does and doesn't catch. Read once per process | `=0`: every allocation a packet names goes into the chunk's set, and the set is committed, used and emptied with every command buffer, as before | `default` (#153) |
+| `DXMT_MTL4_PRESENT` | `mtl4` | (#227) `mtl4` is my fork's default and what 0.1.x runs. The GW2 on Mac app sets `mtl3` for the arm64 engine on Metal 4, where a moving pointer makes the native order lose a refresh (#223). `mtl3` (exactly): a device on Metal 4 presents the way Metal 3 does, and keeps everything else on Metal 4. The frame's work stays on the Metal 4 queue. The present pass, the drawable's wait and the present call go into a command buffer of the command queue's `MTLCommandQueue` (`Presenter::encodeCommands`, `presentDrawable:atTime:` and the other two branches), so Metal waits for the drawable and calls its present when it schedules the buffer. Two shared events order the queues: the Metal 4 queue signals `frame` after the frame's commits and the Metal 3 buffer waits for it; the Metal 3 buffer signals `shown` after the pass and the Metal 4 queue waits for it before its first commit that writes the back buffer (`DXMT_MTL4_SHOWN_WAIT`, #271; with `=next`, before its next commit), so the next frame can't write the back buffer under the pass. The pass's fences aren't encoded (they belong to the Metal 4 queue; `DXMT_MTL4_PRESENT_FENCES=1` puts them on it, #353) and the layer's residency set isn't named (Metal 3 keeps the drawable resident). The Metal 3 buffer is the chunk's last commit record: the finish thread waits for it before the chunk retires, and the `GPU` line and `PRESENT aftergpu` read it as on Metal 3. With it the frame's work is committed before `nextDrawable` even with `DXMT_PRESENT_SPLIT=0`. A failed Metal 3 buffer counts in `METAL4 errors`, gets its `Device error` line, and the CPU signals `shown` in its place so the Metal 4 queue goes on. Logs `Metal 4: present through a Metal 3 command buffer (DXMT_MTL4_PRESENT=mtl3)` once per device; `METAL4 present` says which present is in use. Read once per process | unset, `mtl4` or anything else: the Metal 4 present (`waitForDrawable`, `signalDrawable`, the drawable's present from the encode thread), as before; no event, no new bridge call, no new line | `default`: `mtl4`, which 0.1.x runs; the app sets `mtl3` for the arm64 engine (#227) |
+| `DXMT_MTL4_PRESENT_FENCES` | off | (#353, ADR 0018) `=1` (exactly), with `DXMT_MTL4_PRESENT=mtl3` on Metal 4: the present's fence waits and its fence update go to the Metal 4 queue, in an empty encoder of their own at the end of the frame's commit (ahead of the present split), where the Metal 3 present pass encodes none. A present is an encoder of the fence chain (`ArgumentEncodingContext::present`): it gets an ID and a fence, and it can be a checkpoint. Without its fences on the queue, a Metal 4 wait on its slot waits for that slot's update 256 IDs earlier, and the waits simplification dropped through it order nothing: the checkpoint whose window covers it (64 to 127 IDs later) and, when it is a checkpoint itself, every encoder up to the next one, can run while the passes the present waited for still run. With `DXMT_MTL4_SHOWN_WAIT=write` the next frame's work before its first back-buffer write waits for no event that would cover it either. `tests/gw2/dependency_compression_test.cpp` shows the misses against its fence oracle and none with the switch. The encoder's fence says that what the present waited for has finished, not that the pass ran: the back buffer's writers still wait for `shown`. Logs `Metal 4: a present's fence waits and update go to the Metal 4 queue, in an encoder of their own before the frame's commit (DXMT_MTL4_PRESENT_FENCES=1)` once per device. Read once per process. The startup line shows `unused` for `1` without `mtl3` on Metal 4 | unset, or anything but `1`: no fence-only encoder; the present's fences don't reach the Metal 4 queue, as before | `experiment` (#353): off in my fork, on in my dev builds for the aerodrome A/B |
+| `DXMT_MTL4_SHOWN_WAIT` | `write` | (#271) The default since #332 (ADR 0017): with it, dev.18 and dev.20 held 60 in combat where dev.17 dipped. Until then only exactly `write` turned it on, so unset, empty and any text but `write` and `next` changed meaning. With `DXMT_MTL4_PRESENT=mtl3` on Metal 4, the Metal 4 queue waits for a present's `shown` only before the next encoder that writes the texture the present read (the back buffer), not right after the present. The Metal 3 present buffer waits on the GPU for its drawable, which on 0.2 comes back a refresh late (`PRESENT drawwait` 16.3 ms), so with the wait right after the present the next frame's GPU work waited for the drawable too and each frame's work had one refresh; with `write` the work before its first write to the back buffer runs while the pass waits. A write is found where the encoders track every texture they use: both texture overloads of `ArgumentEncodingContext::access` flag the encoder when it names the presented texture with `ResourceAccess::Write`, whatever the command (render target, clear, UAV clear, CopyResource, CopySubresourceRegion, UpdateSubresource, a compute or pixel UAV, a resolve, a MetalFX output; Map can't write the back buffer, which is `D3D11_USAGE_DEFAULT`). The optimizer's merges hand the flag on. One texture at a time: a present that reads another texture than the present before it (a second swap chain, a resize) waits right after it, as before, and a present that finds no Metal 3 command buffer (it presents the Metal 4 way) places a deferred wait at once. Logs `Metal 4: the next frame waits for a Metal 3 present only before it writes the presented texture (DXMT_MTL4_SHOWN_WAIT=write)` once per device; `METAL4 shown` counts it. Read once per process. Without `DXMT_MTL4_PRESENT=mtl3` on Metal 4 it does nothing, and the startup line shows `unused`: since #332 that is what 0.1.x's line shows, where it showed `next` | `next` (exactly): the wait right after the present, as before #332; no flag is set and no line or field is added | `default`: `write`, which acts only with `mtl3`, and only the app's 0.2 sets that (#332) |
+| `DXMT_MTL4_TIMESTAMP_REUSE` | on | (#154) On unless exactly `0`; the default since #301, after a 2.6-hour session with it on showed `METAL4 buffers=2`, `errors` at 0 and `STATS stall=0`. Until then it was on only for exactly `1`, so unset and any text but `0` and `1` changed meaning. On Metal 4, a chunk's timestamp queries read its last command buffer: after a present, the present pass's, so queries after the present read its times (exact: its GPU end; estimate: the end of its span). The chunk opens a command buffer for its queries only when it has none, or when a queue-level wait (`ID3D11Fence` or the context's barrier) came after its last one, so the queries read a time after the wait. Until #154 a chunk whose last buffer was already committed (the present's, in every GW2 frame, which always has queries pending) began an empty one for them, which the chunk's completion signal committed: three commits a frame. `METAL4 commits` and `buffers` show the difference. Read once per process | `=0`: that empty command buffer after the present, as before #154 | `default` (#154) |
+| `DXMT_SUBSAMPLE_METALFX` | off | GW2's Render Sampling: Subsample pass with MetalFX (#56; see [SUBSAMPLE](#subsample)). `log`: capture only, every candidate draw's shape is logged once and nothing changes. `1`: an accepted pass (the full-screen draw that samples the low-resolution 3D scene into a target of the swapchain's size) samples a MetalFX spatial upscale of its source instead, on Metal 3 (`MTLFXSpatialScaler`) and Metal 4 (`MTL4FXSpatialScaler`, bridge calls 190–192); the game's pixel shader still runs, and the UI drawn after it is untouched. Anything that doesn't match runs unchanged | unset or `=0`: no detection, no counting, no bridge call | `experiment`: the app's MetalFX setting sets it; needs an in-game capture of the pass (#56) |
+| `DXMT_SUBSAMPLE_METALFX_PS` | unset | With `DXMT_SUBSAMPLE_METALFX`: only a pass whose pixel shader's SHA-1 (as the candidate line prints it) starts with this hex prefix is accepted (`no(pin)` otherwise) | any pixel shader that passes the other checks | `diagnostic`: pins one shader for a capture |
+| `DXMT_PSO_RECORD` | on | Shader warming W1 (#57; see [RECORD](#record)): records, durably, what each pipeline was built from, so later stages (W2/W3) can prepare shaders and pipelines before GW2 asks for them. Into `$(getconf DARWIN_USER_CACHE_DIR)dxmt/<exe>/recipes_1.db` (its own sqlite file, through the bridge's cache writer): each shader's DXBC by its SHA-1, each variant's translation inputs (VS, PS, plain) by shader SHA-1, variant digest and Metal target, and each plain graphics pipeline's recipe by the SHA-1 of an explicit serialization of the target, the vertex/pixel identities and every field of the descriptor Metal gets. Once per key and process. The callers never wait on the recorder: a fixed lock-free table of key fingerprints (2 MB) and a bounded lock-free queue (16,384 records or 128 MB), then counted drops. One lowest-priority writer thread skips rows the file already has and stops at a 256 MB file, or after 8 failed writes in a row; it never calls the logger (Present logs its lines). Changes nothing that is built or drawn | `=0`: no recording, no thread, no database opened | `default` (#57) |
+| `DXMT_RETIRE_RECOVERY` | on | A refused retirement (#113; never expected, a bug) recovers instead of holding every later chunk until teardown. The retirement ledger then retires by sequence with the completion the refused token proves: the finish thread waits for every chunk in order, so a token of the queue's submission for chunk `S` means every chunk up to `S` completed, and their holds go in sequence order (the ring resumes at `S + 1`); an empty or another queue's token proves nothing, and the next chunk's token recovers. A refused hold goes once the last chunk that may use it completed (its own chunk while unretired; for a retired sequence, every chunk the ring may still have in flight), not at teardown. A refused submission retirement retires the chunk the submission last waited for. One error line per failure (see *Other log lines*); the normal path is unchanged | `0`: refused holds and retirements are kept until the queue goes, as before | `default` (#113) |
+| `DXMT_DRAIN_SPLITS` | off | (#316) `=1` (exactly): at teardown on Metal 3, when the drain waits at all (the residency set, `DXMT_UNRETAINED=1` or the lifetime check), it also waits for the split-off command buffers the retirement ledger still holds (the present split's, of chunks committed and not retired), before each chunk's last command buffer. Metal runs a queue's buffers in commit order but doesn't promise they complete in that order, so a split buffer can still run when its chunk's last one completed, and the teardown would then free what it uses. One info line when it had to wait (see *Other log lines*). Not the splits a refused hold kept aside (a logged error, #113). Read at each command queue's creation. Off by default until it has run in my Metal 3 sessions; a valid program can see it as a slower exit | off: the drain waits for each chunk's last command buffer only, as before | `experiment` (#316) |
+| `DXMT_WARM_JOBS` | 1 | (#159) With `DXMT_WARM`: speculative jobs the compile service runs at once while the warm builds are slow, 1 to 8. Slow is how a cold Metal cache shows: the moving average (1/8) of the completed speculative runs' time is 1 ms or more (a warm cache builds a pipeline in 0.03–0.12 ms, a cold one in 6–17 ms). Below that, and before the first speculative job completes, one at a time; never while a demand waits; a demanded speculative job runs at once, as before. Above 1 the service starts this many workers plus one, so speculative jobs never hold every worker, and reads the clock around each speculative run. Whether more than one is worth having is the cold-cache benchmark's to decide (`tests/gw2/stagecache_bench.m`). Parsed once per process | `1`, unset or anything outside 1–8: one at a time, today's rule, no clock read | `experiment` (#159) |
+| `DXMT_PSO_RECORD_USE` | on | (#124) With `DXMT_PSO_RECORD`: the recipes' use data, as d9mt's state cache keeps it. One row per recipe ever used, `U` + the recipe's SHA-1 → schema, lastSession, sessionsUsed, firstUseMs (u32 each), rewritten in place; and a session counter, `Ssession` → schema, the last session's number. When it opens the file, the writer reads both (bridge call 193), takes the counter + 1 as this session's number and writes it back. A newer session always has a larger number; no clock is involved. It then merges each recipe this session used (built when its recipe is recorded, or taken from warming's shared results through `warmPipelineHit`) into its row, once per recipe and session. Bounded by the number of recipes; about 3,000–5,000 merges a session on the writer thread (`RECORD uses=`). Warming's plan ranks by them | `=0`: no new use data. Warming still ranks by the use rows already in the file, and plans by rowid when there are none | `default` (#124) |
+| `DXMT_DEPENDENCY_COMPRESSION` | off | `=1` (exactly), Metal 4 only (#132, after GameSir `3170d0349a`; see [DEPS](#deps)): encoder fences follow a **checkpoint chain** instead of the per-encoder weak window. About every 64 encoder IDs one encoder (the checkpoint) waits on every encoder from the previous checkpoint's coverage to 64 IDs back, and on the previous checkpoint; every other encoder depends on the latest checkpoint (simplification usually removes that wait). So when an encoder runs, everything 127+ IDs back has finished, and the trackers keep direct dependencies up to 127 IDs back (legacy: 63). The trackers stay bounded, so the dropped dependencies need this cover (GameSir instead tracks every reader and writer by explicit ID). It also records a pass's fragment read of something the same pass wrote at pre-raster, which the legacy trackers forget. Read once per device; on Metal 3 the startup line says `unsupported` and the legacy policy stays. Encoder merging (the flush-time relation scan) is unchanged | the legacy weak window (each encoder waits on the encoders 64-127 IDs back that simplification can't reach) | `experiment`: off in my fork, the app sets it in every build (#133) |
+| `DXMT_CACHE_DIR` | unset | (#134) An absolute unix path that replaces `$(getconf DARWIN_USER_CACHE_DIR)` as the base of DXMT's caches, so each setup of the game on one Mac (the GW2 on Mac app's bottle, a development bottle) keeps its own: the AIR cache `<base>/dxmt/<exe>/shaders_*.db`, the recipes `<base>/dxmt/<exe>/recipes_1.db`, and Metal's `<base>/dxmt/<exe>/com.apple.metal` (when Metal takes it). The `dxmt/` level stays, so the layout under the base is unchanged. Read by the bridge's unix side on each cache open (`dxmt_cache_base`, `src/winemetal/unix/cache_dir.h`); an absolute `DXMT_SHADER_CACHE_PATH` still wins for its cache. Empty or relative: ignored, with one warning (`Caches:` lines). A value longer than `PATH_MAX` makes the opens fail. The startup line shows the base in effect, `ignored` or `default` | unset: `$(getconf DARWIN_USER_CACHE_DIR)`, byte for byte | `default`: unset in my fork, the app sets it (#134) |
+| `DXMT_PIN_MODULE` | on | (#137) A DLL of DXMT (`d3d11.dll` for GW2) pins itself for the process (`GetModuleHandleExW`, `GET_MODULE_HANDLE_EX_FLAG_PIN`) just before it starts its first thread (`dxmt::ThreadFn`). Its threads run its own code and some never end (the recipe writer, the control poller), so a `FreeLibrary` that unmapped it crashed them (GW2 at exit: the recipe writer returned from its `Sleep` into freed code). Pinned, `FreeLibrary` only drops a reference: the module and its threads stay until the process exits, and its static destructors run at process exit instead. Read once per DLL | `FreeLibrary` can unload the module while its threads run (upstream) | `default` (#137) |
+| `DXMT_VIEW_KEY_ARRAY_BIT` | on | (#155) For every texture a shader reads, the encode thread checks whether the bound view's type is an array type, as the shader wants it. A texture view's key carries the answer in one bit (taken from the view index, which keeps 27 bits: 134,217,728 views per texture, and creating one more ends the process with an error line), set from the view's type wherever a key is built, so a match returns without the texture's lock. A mismatch still reads the view's descriptor under the lock and binds the array or non-array view of it, as before. Read once per process | `=0`: every check takes the texture's lock and reads the view's descriptor (upstream); the key keeps the bit | `default` (#155) |
+| `DXMT_LAYER_PROPS_POLL_MS` | 250 | (#156) How often Present asks the bridge for the layer's screen values (`WMTQueryDisplaySettingForLayer`: the display setting's version, colour space and HDR metadata, and the screen's two EDR values), in ms. Between asks the last answer stands; a resize (`ResizeBuffers`) asks again at the next Present. The call walks the layer's view, window and screen and builds the screen's device description, about 28 µs under Rosetta, under the device mutex. A display, colour space or EDR change reaches the present pass within one interval | `=0`: every Present asks, as before | `default` (#156) |
+| `DXMT_PRESENTER_FREE` | off | (#185) `=1` (exactly): a presenter (one per swap chain) is deleted when its last reference goes, and its gamma texture and its two present pipelines go with it. That reference is either the swap chain's, after `~MTLD3D11SwapChain` waited for every chunk to retire, or the retirement ledger's, on the finish thread once the chunk that presented with it retired, so the GPU is done with them either way. Each deletion logs `Presenter: freed, N alive`. Off by default until it has run in my sessions. Steam's browser is where it shows: it makes 45 to 47 swap chains per process on the arm64 engine, GW2 one | off: every presenter stays until the process ends, as upstream (`Rc` doesn't delete, and `Presenter` had no `decRef` of its own) | `experiment` (#185) |
+| `DXMT_PRESENT_SKIP_NIL` | off | (#324) `=1` (exactly): a present whose layer gave no drawable (`nextDrawable` returned nil: its one-second timeout, or a drawable size of zero) is skipped. The presenter encodes no pass, and nothing is waited for, signalled or presented: on Metal 4 no `waitForDrawable:` or `signalDrawable:`, no present call on either path, and no presented handler (`PRESENT` has no record for it). The pass's fences still pass, through an empty blit encoder; with `DXMT_MTL4_PRESENT=mtl3` the Metal 3 buffer has no pass and no present but still signals `shown`, with the same `DXMT_MTL4_SHOWN_WAIT` bookkeeping as a present. The first nil drawable of a process logs one warning, and `PRESENT nodrawable` counts them with the switch on or off. Off by default until it has run in my sessions | unset, or anything but `1`: the nil drawable goes to Metal as before (upstream's behaviour on Metal 3) | `experiment` (#324) |
 
 Not switchable: `SetMaximumFrameLatency(0)` means the default, 3 (DXGI's definition; only
 `DXMT_MAX_FRAME_LATENCY` replaces the result). Typeless depth targets without stencil
@@ -68,9 +88,9 @@ Not switchable: `SetMaximumFrameLatency(0)` means the default, 3 (DXGI's definit
 ## The STATS line
 
 `STATS fps= ms=avg/max cb= rp=(+ merged) clear= split= drawable=avg/max commit=avg/max
-sync=Nx avg/max stall= encode=prepare+flush/max latency=avg/max maxlatency= interval= deadline=`
+sync=Nx avg/max stall= encode=prepare+flush/max latency=avg/max maxlatency= interval= deadline= vblank=`
 
-Averages are per frame over the 2 s window; times are ms.
+Averages are per frame over the 2 s window, except `vblank`; times are ms.
 
 | Field | Meaning |
 |---|---|
@@ -82,12 +102,13 @@ Averages are per frame over the 2 s window; times are ms.
 | `drawable` | All of `Presenter::encodeCommands`: `nextDrawable` **and** the present copy's encoding |
 | `commit` | The render thread waiting for a free chunk (ring backpressure), **not** the cost of `commit` |
 | `sync` | CPU waits for the GPU (Map, GetData) per frame, and their time |
-| `stall` | Event stalls in the window |
+| `stall` | Event stalls in the window: `GetData` calls that found their query unresolved and flushed (CMDS `getflush` breaks them down by query) |
 | `encode` | Encode-thread time per frame: preparing + flushing (drawable excluded), and the flush's max |
 | `latency` | The render thread waiting in `PresentBoundary` for frame N − `maxlatency` to finish on the GPU |
 | `maxlatency` | The frame latency in effect |
 | `interval` | The sync interval of the last Present |
 | `deadline` | The deadline requested (ms); a present that takes the minimum-duration branch ignores it |
+| `vblank` | `IDXGIOutput::WaitForVBlank` calls a second over the window, from every thread and output in the process (#250). The call returns at once, without waiting for a refresh |
 
 ## The other 2 s lines
 
@@ -100,8 +121,16 @@ All are written right after `STATS`, from the same window.
 | | `wait` | The render thread's waits per frame, `commit` + `sync` + `latency`, avg/max (per frame-statistics slot, as `STATS`) |
 | `PACE` | `app` | The **game's** Present-to-Present interval on its render thread: p50/p95/p99/max ms (p99 over ~100 frames is noisy). An interval runs from the top of one Present to the top of the next |
 | | `slow33`, `slow50`, `n` | Intervals over 33.4 and 50 ms, and how many intervals |
-| | `dxmt` | The **presenting thread's** time inside DXMT's entry points within those same intervals (each interval is stored with its own time, so calls and durations can't fall into different windows), ms per frame, then per category `ms/calls` per frame: `present` (Present's own work, without the background throttle's and the frame limiter's sleeps and the latency wait), `presentwait` (Present's wait in `PresentBoundary` for frame N − `maxlatency`, the same wait as `STATS`' `latency`; `present` + `presentwait` is the whole Present, they don't overlap), `map` (Map and Unmap, **their waits included**; with `DXMT_MAP_FAST`, the default, it times one in 16 of its calls and scales it, as `draw`), `flush`, `create` (`Create*` on this thread), `draw` and `dispatch` (each times one in 16 of its **own** calls and scales it: an estimate; all calls are counted. The 1 in 16 is a per-thread pseudo-random draw, so it doesn't alias with call sequences that repeat; the per-thread state is found without `thread_local`, #28). Nested calls count once. A Present is counted in the interval its own work and wait fall into, so a frame's interval holds the previous Present |
+| | `dxmt` | The **presenting thread's** time inside DXMT's entry points within those same intervals (each interval is stored with its own time, so calls and durations can't fall into different windows), ms per frame, then per category `ms/calls` per frame: `present` (Present's own work, without the background throttle's and the frame limiter's sleeps and the latency wait), `presentwait` (Present's wait in `PresentBoundary` for frame N − `maxlatency`, the same wait as `STATS`' `latency`; `present` + `presentwait` is the whole Present, they don't overlap), `map` (Map and Unmap, **their waits included**; with `DXMT_MAP_FAST`, the default, it times one in 64 of its calls and scales it, #150), `flush`, `create` (`Create*` on this thread; by kind in `CREATE`), `draw` and `dispatch` (each times one in 16 of its **own** calls and scales it: an estimate; all calls are counted. The sample is a per-thread pseudo-random draw, so it doesn't alias with call sequences that repeat; the per-thread state is found without `thread_local`, #28). Nested calls count once. Every interval an entry point's scope times (all but `present` and `presentwait`, which Present times itself over milliseconds) loses the clock's own cost, the startup line's `clockfloor` (#150), so an empty call reads 0 on average and a category can read a hair below 0. A Present is counted in the interval its own work and wait fall into, so a frame's interval holds the previous Present |
 | | `other` | Every other thread's time inside DXMT (worker threads' `Create*`, deferred contexts' draws, …), ms per frame of the window, then the non-zero categories `ms/calls` per frame. Not part of `dxmt`, and not paired with intervals: it is drained when the line is written |
+| `CREATE` | | PACE's `create` by what the call made (#202), written right after `PACE` from the same window and frames, only in a window with a create. The presenting thread's fields come first and hold the same calls and time as `dxmt`'s `create`. The other threads' follow with an `other.` prefix (only if they had a create) and match `other`'s `create`, except a create in flight on another thread when the line is written, which can fall into the next window. A nested `Create*` (`CreateTexture2D` calling `CreateTexture2D1`) counts once, under the outer call. With `DXMT_STATS=0` nothing is counted and no clock is read |
+| | `calls`, `ms`, `total` | All creates per frame, their time (ms per frame), and the window's count of creates |
+| | `<kind>` | A kind that had a create: calls/ms per frame. Kinds: `buffer`, `texture` (1D, 2D, 3D), `view` (shader-resource, unordered-access, render-target, depth-stencil), `shader` (every stage, stream output included), `state` (blend, depth-stencil, rasterizer, sampler, input layout), `query` (queries and predicates) |
+| | `buffer.kb`, `texture.kb` | KB (1024 bytes) created per frame: a buffer's `ByteWidth`; a texture estimated from its description, as `RESIDENCY`'s `mb` (every mip, layer and sample, uncompressed; BC by 4×4 block), except that the depth-stencil formats count at Metal's size (8 bytes a texel for D24S8 and D32S8), where `RESIDENCY` counts them as 0 |
+| | `buffer.init`, `texture.init` | Creates per frame with initial data |
+| | `buffer.size`, `texture.size` | Creates per frame by size: `<64k`, `<1m` (64 KB to 1 MB), `<=16m` (1 to 16 MB), `>16m` |
+| | `buffer.usage` | Buffer creates per frame by usage: `default`, `immutable`, `dynamic`, `staging` |
+| | `texture.rt`, `texture.ds` | Texture creates per frame bound as a render target, as a depth-stencil target (one with both counts in both) |
 | `GPU` | `gpuspan` | Per frame, the union of the GPU execution spans (`GPUStartTime`..`GPUEndTime`) of **all** of the frame's command buffers on this device's queue, the ones the present split committed included, avg/max ms over the complete frames. A span union, not the GPU's active time; never compare it with Instruments' fragment/vertex busy time. `unavailable` when no frame in the window was complete |
 | | `gpugap` | The gap between one complete frame's last GPU end and the next complete frame's first GPU start, avg/max ms over the positive gaps (frames that overlap count as no gap); `0.00/0.0` if every pair overlapped, `unavailable` without two consecutive complete frames. Gaps are taken on the finish thread, so the one across two windows counts too |
 | | `frames`, `incomplete` | Complete frames (every buffer had timestamps) and frames with a buffer without timestamps; incomplete frames are left out of `gpuspan` and `gpugap` |
@@ -114,13 +143,16 @@ Sections: a feature registers a function with `gw2::SectionRegistrar` (`src/dxmt
 
 | Line | When |
 |---|---|
-| `GW2 fork <commit>: DXMT_STATS=1 DXMT_HITCH_MS=… DXMT_PRESENT_SPLIT=… DXMT_DISPLAY_SYNC=… DXMT_PRESENT_DEADLINE=… DXMT_CAP_LIMITER=… DXMT_STENCIL_PFV=… DXMT_DEPTH_PFV=… DXMT_BG_FPS=… DXMT_BG_FPS_MINIMIZED=… DXMT_BG_POLICY=… DXMT_RENDER_THREAD_PRIORITY=… DXMT_PSO_BLEND_HASH=… DXMT_PSO_MRU=… DXMT_PSO_TOPOLOGY_KEEP=… DXMT_CHUNKS=… DXMT_MAX_FRAME_LATENCY=… DXMT_COMPILE_WAIT_MS=… DXMT_PSO_ARCHIVE=… DXMT_PSO_ARCHIVE_DIR=… DXMT_PSO_FLUSH_EVERY=… DXMT_PROMOTE_FLUSH_MIN=… DXMT_PROMOTE_FLUSH_MS=… DXMT_TIMESTAMP_MODE=… DXMT_MAP_FAST=… DXMT_SKIP_REBIND=… DXMT_CONTROL=… DXMT_RESIDENCY_SET=… DXMT_UNRETAINED=… DXMT_LIFETIME_CHECK=… DXMT_METAL4=… DXMT_SUBSAMPLE_METALFX=… DXMT_PSO_RECORD=… DXMT_AIR_READERS=… DXMT_CACHE_DIR=… DXMT_COMPILE_DEMAND=… DXMT_PSO_GENERATIONS=… DXMT_PSO_RECORD_USE=… DXMT_RETIRE_RECOVERY=… DXMT_WARM=… DXMT_WARM_MAX=… DXMT_WARM_ORDER=… cpus=… refresh=…` then `GW2 fork <commit> set: …` | Two lines (#43; one before), once per process, at the first Present: the build, the **effective** value of every switch above (defaults included; `DXMT_PRESENT_DEADLINE=refresh` is one refresh, `DXMT_CHUNKS` is the ring size in effect, `DXMT_MAX_FRAME_LATENCY=unset` leaves the game's value, `DXMT_PSO_ARCHIVE` is `1` when the archives are on, `0` when not asked for, `failed` when asked for but they couldn't start, `DXMT_PSO_ARCHIVE_DIR=default` is the user cache dir, `DXMT_PROMOTE_FLUSH_MIN`/`_MS` as the immediate context parsed them: `MS` is at least 1 and is shown even when `MIN=0` turns it off, `DXMT_TIMESTAMP_MODE` is `exact`, `estimate` or `boundary`, `DXMT_MAP_FAST` and `DXMT_SKIP_REBIND` are `1` or `0`, `DXMT_CONTROL` is the path or `off`, `DXMT_RESIDENCY_SET` is `1` when the set is on, `0` when switched off, `failed` when asked for but unavailable, `DXMT_UNRETAINED` is `1` or `0`, `DXMT_LIFETIME_CHECK` is `1`, `0` or `unbuilt` (asked for in a build without it), `DXMT_METAL4` is `1` (Metal 4 in use, the default), `0` (`DXMT_METAL4=0`), or `unsupported` (on, but the device, macOS or another setting keeps Metal 3; a warning says which), `DXMT_SUBSAMPLE_METALFX` is `0`, `log` or `1`, `DXMT_PSO_RECORD` is `1` or `0`, `DXMT_AIR_READERS` the AIR read connections open (`0` with the shader cache off or its reader not opened, `unopened` before any device), `DXMT_CACHE_DIR` the cache base in effect, `ignored` (empty or relative) or `default` (#134), `DXMT_COMPILE_DEMAND` is `1` or `0`, `DXMT_PSO_GENERATIONS` is `1` (in use), `lookup` (another process writes the store), `unused` (asked for, but the archives are off or failed) or `0`, `DXMT_RETIRE_RECOVERY` is `1` or `0`, `DXMT_WARM` is `off`, `functions` or `all`, `DXMT_WARM_MAX` the cap, `DXMT_PSO_RECORD_USE` is `1` or `0`, `DXMT_WARM_ORDER` is `use` or `rowid` (anything but `rowid` plans by use)), the CPUs the game sees, the refresh rate (0 if unknown); the second line lists every `DXMT_*`, `WINENCPU` and `WINEMSYNC` variable set (`set: none` if none). Since #60 the line is generated from the switch registry (`src/dxmt/dxmt_gw2_switches.hpp`) in this order, unchanged: a PR that adds a switch declares it with `sw::Switch` (its effective value through `sw::provideEffective` if it differs from the parsed one) and doesn't edit `LogStartup`; such switches follow `DXMT_PSO_RECORD`, sorted by name, before `cpus` and `refresh`. It adds the name here |
+| `GW2 fork <commit>: DXMT_STATS=1 DXMT_HITCH_MS=… DXMT_PRESENT_SPLIT=… DXMT_DISPLAY_SYNC=… DXMT_PRESENT_DEADLINE=… DXMT_CAP_LIMITER=… DXMT_STENCIL_PFV=… DXMT_DEPTH_PFV=… DXMT_BG_FPS=… DXMT_BG_FPS_MINIMIZED=… DXMT_BG_POLICY=… DXMT_RENDER_THREAD_PRIORITY=… DXMT_PSO_BLEND_HASH=… DXMT_PSO_MRU=… DXMT_PSO_TOPOLOGY_KEEP=… DXMT_CHUNKS=… DXMT_MAX_FRAME_LATENCY=… DXMT_COMPILE_WAIT_MS=… DXMT_TIMESTAMP_MODE=… DXMT_MAP_FAST=… DXMT_SKIP_REBIND=… DXMT_CONTROL=… DXMT_RESIDENCY_SET=… DXMT_UNRETAINED=… DXMT_LIFETIME_CHECK=… DXMT_METAL4=… DXMT_SUBSAMPLE_METALFX=… DXMT_PSO_RECORD=… DXMT_AIR_READERS=… DXMT_CACHE_DIR=… DXMT_COMPILE_DEMAND=… DXMT_COMPILE_PRIORITY=… DXMT_DRAIN_SPLITS=… DXMT_GETDATA_SKIP_FLUSH=… DXMT_LAYER_PROPS_POLL_MS=… DXMT_MTL4_ALLOCATOR_POOL=… DXMT_MTL4_DEVICE_RESIDENCY=… DXMT_MTL4_PRESENT=… DXMT_MTL4_PRESENT_FENCES=… DXMT_MTL4_SHOWN_WAIT=… DXMT_MTL4_TIMESTAMP_REUSE=… DXMT_PRESENTER_FREE=… DXMT_PRESENT_SKIP_NIL=… DXMT_PSO_RECORD_USE=… DXMT_REFRESH_REQUERY=… DXMT_RELEASE_POOL=… DXMT_RENAME_TRIM=… DXMT_RETIRE_RECOVERY=… DXMT_SKIP_EMPTY_SLOTS=… DXMT_SKIP_SAME_SRV=… DXMT_SKIP_SAME_STATE=… DXMT_STEADY_SLEEP=… DXMT_THREAD_PRIORITY=… DXMT_VIEW_KEY_ARRAY_BIT=… DXMT_WARM=… DXMT_WARM_JOBS=… DXMT_WARM_MAX=… cpus=… refresh=… clockfloor=…` then `GW2 fork <commit> set: …` | Two lines (#43; one before), once per process, at the first Present: the build, the **effective** value of every switch above (defaults included; `DXMT_PRESENT_DEADLINE=refresh` is one refresh, `DXMT_CHUNKS` is the ring size in effect, `DXMT_MAX_FRAME_LATENCY=unset` leaves the game's value, `DXMT_TIMESTAMP_MODE` is `exact` or `estimate`, `DXMT_MAP_FAST` and `DXMT_SKIP_REBIND` are `1` or `0`, `DXMT_CONTROL` is the path or `off`, `DXMT_RESIDENCY_SET` is `1` when the set is on, `0` when switched off, `failed` when asked for but unavailable, `DXMT_UNRETAINED` is `1` or `0`, `DXMT_LIFETIME_CHECK` is `1`, `0` or `unbuilt` (asked for in a build without it), `DXMT_METAL4` is `1` (Metal 4 in use, the default), `0` (`DXMT_METAL4=0`), or `unsupported` (on, but the device, macOS or another setting keeps Metal 3; a warning says which), `DXMT_SUBSAMPLE_METALFX` is `0`, `log` or `1`, `DXMT_PSO_RECORD` is `1` or `0`, `DXMT_AIR_READERS` the AIR read connections open (`0` with the shader cache off or its reader not opened, `unopened` before any device), `DXMT_CACHE_DIR` the cache base in effect, `ignored` (empty or relative) or `default` (#134), `DXMT_COMPILE_DEMAND` is `1` or `0`, `DXMT_COMPILE_PRIORITY` and `DXMT_THREAD_PRIORITY` are `critical`, `normal`, `utility:ok`, `utility:failed` or `utility:pending`, `DXMT_DRAIN_SPLITS` is `1` or `0`, `DXMT_GETDATA_SKIP_FLUSH` is `1` or `0`, `DXMT_LAYER_PROPS_POLL_MS` the interval in ms, `DXMT_MTL4_ALLOCATOR_POOL`, `DXMT_MTL4_DEVICE_RESIDENCY` and `DXMT_MTL4_TIMESTAMP_REUSE` are `1` or `0`, `DXMT_MTL4_PRESENT` is `mtl4` or `mtl3`, `DXMT_MTL4_PRESENT_FENCES` is `1`, `0` or `unused` (`1` without `DXMT_MTL4_PRESENT=mtl3` on Metal 4), `DXMT_MTL4_SHOWN_WAIT` is `next`, `write` or `unused` (`write` without `DXMT_MTL4_PRESENT=mtl3` on Metal 4), `DXMT_PRESENTER_FREE` and `DXMT_PRESENT_SKIP_NIL` are `1` or `0`, `DXMT_REFRESH_REQUERY` is `1` or `0`, `DXMT_RELEASE_POOL` is `1` or `0`, `DXMT_RENAME_TRIM` the sweep's age in sequence ids (`0`: off), `DXMT_RETIRE_RECOVERY` is `1` or `0`, `DXMT_SKIP_EMPTY_SLOTS`, `DXMT_SKIP_SAME_SRV` and `DXMT_SKIP_SAME_STATE` are `1` or `0`, `DXMT_STEADY_SLEEP` is `1` or `0`, `DXMT_VIEW_KEY_ARRAY_BIT` is `1` or `0`, `DXMT_WARM` is `off`, `functions` or `all`, `DXMT_WARM_JOBS` the speculative jobs at most (1 to 8), `DXMT_WARM_MAX` the cap, `DXMT_PSO_RECORD_USE` is `1` or `0`), the CPUs the game sees, the refresh rate (0 if unknown), the clock's own cost in ns (#150: the median of 9 batches' mean of 256 back-to-back `QueryPerformanceCounter` reads, measured once; every `MAP` interval and every `PACE` interval but `present`'s and `presentwait`'s loses it); the second line lists every `DXMT_*`, `WINENCPU` and `WINEMSYNC` variable set (`set: none` if none). Since #60 the line is generated from the switch registry (`src/dxmt/dxmt_gw2_switches.hpp`) in this order, unchanged: a PR that adds a switch declares it with `sw::Switch` (its effective value through `sw::provideEffective` if it differs from the parsed one) and doesn't edit `LogStartup`; such switches follow `DXMT_PSO_RECORD`, sorted by name, before `cpus`, `refresh` and `clockfloor`. It adds the name here |
 | `HITCH frame=… ms=… commit=…x… sync=…x… bgsleep=… dxmt(ms/calls): …` | A Present-to-Present interval of at least `DXMT_HITCH_MS`, logged at the top of the Present that ends it. `frame` is the frame that Present presents (1-based, as the latency fence counts); the interval holds the previous Present and the game's work on this frame. `commit` (waits for a free chunk) and `sync` (Map's waits for the GPU) are ms × count, from the same interval; they overlap the categories they happen in. `bgsleep` is whether the background throttle was on. The categories are as `PACE`'s `dxmt` (`presentwait` is the latency wait) |
 | `SetMaximumFrameLatency(n)` | Every call; 0 is taken as 3 |
 | `SetMaximumFrameLatency(n): DXMT_MAX_FRAME_LATENCY keeps m` | Every call while `DXMT_MAX_FRAME_LATENCY` is set: the game asked for `n`, `m` stays in effect |
 | `CommandQueue: chunks=N (default\|DXMT_CHUNKS) metalbuffers=M maxlatency=L (…)` | Once per device: the ring's size, the Metal queue's bound on command buffers, and the frame latency it starts with (`DXMT_MAX_FRAME_LATENCY`, or 3 until the game sets it) |
+| `CommandQueue: teardown waited for N split-off command buffers (DXMT_DRAIN_SPLITS)` | Info, with `DXMT_DRAIN_SPLITS=1` (#316), at most once per command queue, at its teardown on Metal 3: the drain found `N` split-off command buffers of unretired chunks still committed or scheduled and waited for them. No line when every one had completed |
 | `DXMT_CHUNKS=… is not 32, 64 or 128; using 32`, `DXMT_MAX_FRAME_LATENCY=… is not 1-16; ignored` | Once, at device creation, for a value out of range (warnings) |
 | `Presenter: display sync on/off` | When `DXMT_DISPLAY_SYNC` switches the layer's vsync |
+| `Presenter: display setting version=V colorspace=C edr=E potential=P` | (#156) When an ask (`DXMT_LAYER_PROPS_POLL_MS`) returns a display setting version, colour space or EDR value other than the last ask's, and once at the first ask. `V` is the HDR setting's version (0: none set), `C` the `WMTColorSpace` number, `E` the screen's current EDR headroom (1 unless the layer wants EDR), `P` its potential headroom |
+| `Presenter: freed, N alive` | (#185) `DXMT_PRESENTER_FREE=1`: a presenter was deleted (its swap chain was released and its chunks retired); `N` of this process's presenters are still alive, one per swap chain not yet released |
 | `Present: background throttle policy P (DXMT_BG_POLICY), N fps in the background (DXMT_BG_FPS), M fps minimized (DXMT_BG_FPS_MINIMIZED)` | Once, at the first Present (a warning before it if `DXMT_BG_POLICY` is neither `focus` nor `occlusion`) |
 | `Present: <reason>, throttling to N fps (policy …, <details>)` | The background throttle engages, or its rate or reason changes. Reasons: `window minimized` (details `IsIconic`); `another process in the foreground` (focus: `foreground window H pid N, ours M`, or `no foreground window (pid 0), counted as another process; ours M`); `window not visible (occluded)` and `window miniaturized` (occlusion: `visibility 0x…: visible= miniaturized= activeSpace=`) |
 | `Present: presenting normally again (was: …)` | It lets go |
@@ -128,15 +160,23 @@ Sections: a feature registers a function with `gw2::SectionRegistrar` (`src/dxmt
 | `RenderThreadPriority: thread T QoS OLD -> NEW (pthread_set_qos_class_self_np user-interactive: ok\|error E, left unchanged)` | `DXMT_RENDER_THREAD_PRIORITY` 1 or 3, once per presenting thread: its Win32 thread id, `qos_class_self()` before and after, and the call's result (an errno) |
 | `RenderThreadPriority: thread T priority OLD -> NEW (SetThreadPriority THREAD_PRIORITY_HIGHEST: ok\|error E, left unchanged)` | `DXMT_RENDER_THREAD_PRIORITY` 2 or 3, once per presenting thread: `GetThreadPriority` before and after, and `GetLastError` on failure |
 | `RenderThreadPriority: thread T: DXMT_RENDER_THREAD_PRIORITY=N isn't 1, 2 or 3, left unchanged` | Any other value |
+| `ThreadPriority: NAME normal (SetThreadPriority THREAD_PRIORITY_NORMAL: ok\|error E)` | `DXMT_THREAD_PRIORITY=normal`, once per queue thread at its start (`NAME` is `dxmt-encode-thread` or `dxmt-finish-thread`), or `DXMT_COMPILE_PRIORITY=normal`, once per compile worker at its start (`NAME` is `dxmt-compile-worker`); `E` is `GetLastError` |
+| `ThreadPriority: NAME utility, base priority OLD -> NEW (SetThreadPriority THREAD_PRIORITY_NORMAL: ok\|error E; thread_policy_set: ok\|error K)` | `DXMT_THREAD_PRIORITY=utility`, once per queue thread at its start, or `DXMT_COMPILE_PRIORITY=utility`, once per compile worker: the thread's Mach base priority after `THREAD_PRIORITY_NORMAL` and after the precedence call (`-1`: unreadable). `K` is the `kern_return_t`, or `-1` if the task's priority couldn't be read and nothing was set |
+| `DXMT_THREAD_PRIORITY=… is not critical, normal or utility; using critical` | Warning, once per queue, for any other value; `DXMT_COMPILE_PRIORITY=…` the same, once per device |
 | `DXMT_DEPTH_PFV=1: keeping PixelFormatView on typeless single-plane depth targets (first: format F bind B WxH)` | Once, the first time `DXMT_DEPTH_PFV` keeps the flag (the `PixelFormatView` line above then follows per format and bind flags) |
-| `DEPTHVIEW base=… view=… swizzle=… type=… size=… usage=… pfv=… aspect=… nil=…` | Once per distinct view of a depth/stencil texture, and for any view that came back nil (a warning then); at most 64, then `DEPTHVIEW: more than 64 distinct views, the rest are suppressed`. Replaces the old stencil-only `TextureView` warning. Fields below |
+| `DEPTHVIEW base=… view=… swizzle=… type=… size=… usage=… pfv=… aspect=… nil=… d24=…` | Once per distinct view of a depth/stencil texture, and for any view that came back nil (a warning then); at most 64, then `DEPTHVIEW: more than 64 distinct views, the rest are suppressed`. Replaces the old stencil-only `TextureView` warning. Fields below |
 | `DEPTHSRV format=… size=… pfv=… readonly=… stage=… slot=… view=… swizzled=… aspect=…` | Once per texture (with `DXMT_STATS` on) that is a render pass's depth-stencil attachment and is read by a shader of the same pass as a shader resource; at most 64, then `DEPTHSRV: more than 64 textures, the rest are suppressed`. Fields below |
-| `PSO: blend hash on/off (DXMT_PSO_BLEND_HASH), MRU on, 4 entries/off (DXMT_PSO_MRU), topology keep on/off (DXMT_PSO_TOPOLOGY_KEEP)` | Once per device: the effective pipeline lookup settings |
+| `RASTER bias=… slope=… clamp=… fill=… cull=…` | (#266) Once per distinct rasterizer state created with a nonzero `DepthBias` or `SlopeScaledDepthBias`, with `DXMT_STATS` on: `DepthBias`, `SlopeScaledDepthBias`, `DepthBiasClamp`, the fill mode (`solid`, `wireframe`) and the cull mode (`none`, `front`, `back`). The device's state cache makes each distinct description once, so a state the game creates again isn't logged again; two states that differ only outside these five fields (scissor, winding, …) give two equal lines. Never for a state with both values 0 |
+| `PSO: blend hash on/off (DXMT_PSO_BLEND_HASH), MRU on, 4 entries/off (DXMT_PSO_MRU), topology keep on/off (DXMT_PSO_TOPOLOGY_KEEP), skip same state on/off (DXMT_SKIP_SAME_STATE), skip same srv on/off (DXMT_SKIP_SAME_SRV), skip empty slots on/off (DXMT_SKIP_EMPTY_SLOTS)` | Once per device: the effective pipeline lookup settings |
 | `Present pacing: mode=… rate=… refresh=… cap=… interval=… duration=… ms limiter=… ms deadline=…` | At the first Present and whenever one of its values changes. `mode`: `vsync` (display sync alone), `vsync+after` (display sync and a minimum duration of `duration`), `vsync+limiter` (display sync and the frame limiter at `limiter`, `DXMT_CAP_LIMITER`), `vsync (cap dropped)` (`DXMT_CAP_LIMITER=0` and a cap that isn't a whole number of refreshes), `after` and `plain` (display sync off: DXMT's own minimum duration, or none). `rate`: the frame rate the pacing aims for (`uncapped` without a limit). `refresh`: the display's rate, `(assumed)` when DXMT didn't get one and uses 60. `cap`: `d3d11.preferredMaxFrameRate` (0 = none). `interval`: the game's sync interval. `deadline`: what a present without a minimum duration asks `presentDrawable:atTime:` for (`DXMT_PRESENT_DEADLINE`: one refresh by default, `=8` → `8.0 ms`, `=12` → `12.0 ms`, `=0` → `off`); `- (minimum duration)` when the minimum-duration branch ignores it |
-| `Promote flush: a speculative commit (occlusion/timestamp query End) waits for N requests, at most M ms (a watchdog thread under the device lock, now always on) …` | Once per device, when `DXMT_PROMOTE_FLUSH_MIN` is on |
-| `Timestamp queries: exact\|estimate\|boundary (DXMT_TIMESTAMP_MODE): …` | Once per process, when the first immediate context is created: the mode in effect and what it does (a warning before it for a value that isn't `exact`, `estimate`, `boundary` or `0`) |
-| `Timestamp queries: the first query End in M mode kept its pass open[ and requested no commit]` | Once per process, the first time `estimate` or `boundary` handles a timestamp or timestamp-disjoint `End` |
+| `Present: refresh rate after leaving fullscreen: <Hz> (DXMT_REFRESH_REQUERY)` | (#314) With `DXMT_REFRESH_REQUERY=1`, each time the game leaves exclusive fullscreen: the rate the monitor reports right after the mode is restored (six decimals), or `unknown, 60 assumed` when the query fails or reports 0 Hz |
+| `Present: frame limiter and background throttle sleep on QueryPerformanceCounter (DXMT_STEADY_SLEEP=1)` | (#314) Once per process, at the first swap chain, with `DXMT_STEADY_SLEEP=1` |
+| `Present deadline: DXMT_PRESENT_DEADLINE=<value> isn't 0 or a number of ms up to 1000; one refresh is used` | (#314) Warning, once per process, at the first swap chain whose `DXMT_PRESENT_DEADLINE` is a number that isn't finite or is over 1000 ms. The startup line then shows `DXMT_PRESENT_DEADLINE=refresh` |
+| `Timestamp queries: exact\|estimate (DXMT_TIMESTAMP_MODE): …` | Once per process, when the first immediate context is created: the mode in effect and what it does (a warning before it for a value that isn't `exact`, `estimate` or `0`) |
+| `Timestamp queries: the first query End in M mode kept its pass open[ and requested no commit]` | Once per process, the first time `estimate` handles a timestamp or timestamp-disjoint `End` |
 | `Map fast path: on (DXMT_MAP_FAST): …` | Once per device, when `DXMT_MAP_FAST` is on (the default) |
+| `UpdateSubresource one call: on (with DXMT_MAP_FAST): …` | (#145) Once per device, when `DXMT_MAP_FAST` is on (the default) |
+| `Rename trim: on (DXMT_RENAME_TRIM=<age>): every 2 s, dxmt-rename-queues gives back …` | (#265) Once per process, when the first dynamic buffer or linear texture is listed with `DXMT_RENAME_TRIM` on |
 | `Metal shader cache: <path> (Metal fixed it before DXMT loaded: …)` | Once per process (`dxgi.dll` load), unless `DXMT_USE_DEFAULT_METAL_CACHE=1` (#46). Replaces upstream's `Failed to set Metal cache path, fallback to system default`. Metal fixes its shader cache path at its first device creation, and Wine's display code (winemac's GPU enumeration) creates Metal devices in every GUI process before `dxgi.dll` loads, so DXMT's own `dxmt/<exe>/com.apple.metal` can't take. The line gives the path Metal really uses (bridge call 152, `MTLGetShaderCachePath`): for GW2 on Mac, `$(getconf DARWIN_USER_CACHE_DIR)com.codeweavers.CrossOver.wineloader/com.apple.metal`, keyed by the Wine loader's bundle ID and shared by every process of the engine. That cache persists across sessions and grows. A build without the private Metal API (`DXMT_NO_PRIVATE_API`) can neither set nor read the path and logs `Metal shader cache: Metal's default (dxmt/<exe>/com.apple.metal didn't take, and this build can't read Metal's path: no private Metal API)` |
 | `Pipeline binds: skip rebind on (DXMT_SKIP_REBIND): …`, `Pipeline binds: skip rebind off (DXMT_SKIP_REBIND=0): …` | Once per process, when the first encoding context is created |
 | `Pipeline binds: skipped the first bind of a pipeline already bound in its encoder` | Once per process, the first time `DXMT_SKIP_REBIND` leaves a bind out |
@@ -154,10 +194,21 @@ Sections: a feature registers a function with `gw2::SectionRegistrar` (`src/dxmt
 | `Metal 4: <what> isn't supported on the Metal 4 path; skipped (its fences still pass)` | An error, once per kind (`MetalFX temporal upscale`, `MetalFX spatial upscale`): the Metal 4 path met a MetalFX encoder from DXMT's context extension, which it can't encode; it draws wrong |
 | `Metal 4: geometry shader emulation \| tessellation emulation \| deferred command lists (ExecuteCommandList) run on the Metal 4 path through the packet replay, untested there` | Warning, once per kind, the first time a Metal 4 device encodes a GS or tessellation draw or executes a deferred command list (#32: the coordinator's scope decision of 2026-11-04) |
 | `Metal 4: the layer has no residency set; drawables may not be resident` | Warning, on the Metal 4 path, at a presenter's first present, if `CAMetalLayer.residencySet` is nil |
-| `Metal 4: unavailable (<what> failed), staying on Metal 3` | Warning, once: the Metal 4 queue, its event or allocators couldn't be created, or the residency set couldn't be attached to it |
-| `Metal 4: on (DXMT_METAL4=1, the default): this device's chunks go to an MTL4CommandQueue, with N command allocators (one per chunk slot) and commit feedback` | Once per device (command queue), when it takes the Metal 4 path |
+| `Metal 4: unavailable (<what> failed), staying on Metal 3` | Warning, once: the Metal 4 queue, its event or allocators couldn't be created, the residency set couldn't be attached to it, or (#227) `DXMT_MTL4_PRESENT=mtl3`'s two events couldn't be created |
+| `Metal 4: on (DXMT_METAL4=1, the default): this device's chunks go to an MTL4CommandQueue, with command allocators from a pool (made when none is idle, at most 8 kept idle; DXMT_MTL4_ALLOCATOR_POOL=1) and commit feedback` | Once per device (command queue), when it takes the Metal 4 path (#204). With `DXMT_MTL4_ALLOCATOR_POOL=0` it says `with N command allocators (one per chunk slot; DXMT_MTL4_ALLOCATOR_POOL=0)` instead of `with command allocators from a pool (made when none is idle, at most 8 kept idle; DXMT_MTL4_ALLOCATOR_POOL=1)` |
+| `Metal 4: drawables stay resident through their layer's residency set, used by each present's command buffer; the queue holds no layer's set` | Once per device, right after it (#184). A Metal 4 queue takes at most 32 residency sets; the queue holds only the device's (`Residency:`), so a program may make any number of swap chains. Until #184 each presenter added its layer's set to the queue for the rest of the process, and Steam's browser hit the limit at its 32nd swap chain |
+| `Metal 4: timestamp queries read the chunk's last command buffer, the present's after a present (DXMT_MTL4_TIMESTAMP_REUSE=1)` | Once per device, after it (#154). With `DXMT_MTL4_TIMESTAMP_REUSE=0` it is `Metal 4: a chunk with timestamp queries commits an empty command buffer for them after its last one (DXMT_MTL4_TIMESTAMP_REUSE=0)` |
+| `Metal 4: present through a Metal 3 command buffer (DXMT_MTL4_PRESENT=mtl3)` | Once per device, after it, only with `DXMT_MTL4_PRESENT=mtl3` (#227) |
+| `Metal 4: the next frame waits for a Metal 3 present only before it writes the presented texture (DXMT_MTL4_SHOWN_WAIT=write)` | Once per device, after it, with `DXMT_MTL4_PRESENT=mtl3` unless `DXMT_MTL4_SHOWN_WAIT=next` (#271; the default since #332) |
+| `Metal 4: a present's fence waits and update go to the Metal 4 queue, in an encoder of their own before the frame's commit (DXMT_MTL4_PRESENT_FENCES=1)` | Once per device, after it, with `DXMT_MTL4_PRESENT=mtl3` and `DXMT_MTL4_PRESENT_FENCES=1` (#353) |
+| `Present fences at a device error: chunk S (frame F): <record>; the chunk before, chunk S-1 (frame F-1): <record> (DXMT_MTL4_PRESENT_FENCES=0\|1\|unused; the first 8 are logged)` | An error, on Metal 4, after the `Device error` lines of a chunk with a failed commit (#353): what ordered that chunk and the one before it. `the chunk before, not recorded` when the finish thread didn't report it just before. The first 8 such chunks get the line. `<record>` is `encoders=N commits=P,… shown=P:V present=ID:KIND[,checkpoint],reached\|unreached [frame=V] stale=K[:ID]`: `encoders`, the chunk's encoder list (merged-away encoders included; every position below is in it); `commits`, the position each of its first four Metal 4 command buffers began at (`-`: none); `shown`, the position the chunk's first wait of the queue for a Metal 3 present's `shown` event went before, and its value (`-`: no wait in the chunk; the chunk may still start behind an earlier chunk's wait); `present`, the chunk's present encoder's ID, `mtl3` (its pass in a Metal 3 buffer) or `mtl4`, `checkpoint` if it was one, and whether its fences reached the Metal 4 queue (`DXMT_MTL4_PRESENT_FENCES`), `-` for none; `frame`, with `mtl3`, the value the Metal 3 buffer waits for (`frame`, signalled after the chunk's commits before it) and signals (`shown`); `stale`, the encoders that waited on the fence of a present whose fences didn't reach the queue while no shown wait ordered them behind it, with the latest such present's ID. With mtl3 and the switch off a stale wait is the normal case (about a third of GW2's frames, by my estimate; `DEPS presentstale` counts them): the line says what ordered the chunk, not that a race happened |
+| `Present fences after the device error in chunk S: chunk S+1 (frame F): <record>` | An error, on Metal 4, at the chunk after one that got the line above (#353): the same record for the next chunk that completes |
+| `Metal 4: the Metal 3 present command buffer V failed before signalling; signalled it from the CPU so the Metal 4 queue goes on (DXMT_MTL4_PRESENT=mtl3; only the first 8 are logged)` | Error, with `DXMT_MTL4_PRESENT=mtl3` (#227): a present's Metal 3 command buffer completed with an error and left the `shown` event short of its value `V`, which the Metal 4 queue waits for. The buffer's own `Device error` line follows from the chunk's report |
+| `Metal 4: the shown event was below the completed Metal 3 present V: a CPU signal for an earlier failed present overtook the GPU's; raised it (DXMT_MTL4_PRESENT=mtl3; only the first 8 are logged)` | Error, with `DXMT_MTL4_PRESENT=mtl3` (#316), only after the line above: the event's setter assigns, so the CPU's signal for a failed present can land after the GPU signalled a later present `V` and lower `shown` again. From the first CPU signal on, every completed present checks `shown` and raises it to its own value if it is below it, so the Metal 4 queue doesn't wait for a value that already passed. Shares the line above's count of 8. A process without a failed present makes no extra bridge call |
+| `Metal 4: no Metal 3 command buffer for a present; it presents the Metal 4 way (DXMT_MTL4_PRESENT=mtl3; logged once)` | Error, once, with `DXMT_MTL4_PRESENT=mtl3` (#227): the command queue's `MTLCommandQueue` gave no command buffer for a present. That present goes the Metal 4 way, so nothing waits for an event no buffer will signal |
+| `Present: the layer gave no drawable (nextDrawable timed out, or its drawable size is zero); the present is skipped (DXMT_PRESENT_SKIP_NIL; logged once, PRESENT nodrawable counts them)` | Warning (#324), once per process, at the first present whose layer gave no drawable. Without `DXMT_PRESENT_SKIP_NIL=1` it ends `the nil goes to Metal as before (…)` instead |
 | `Metal 4: newCommandBuffer failed after N command buffers; DXMT can't continue on Metal 4, aborting` | Error, on the Metal 4 path, when Metal returns no command buffer after the queue's first ones (one per slot and two spares, made with the queue): the process aborts, since earlier chunks may still be on the GPU |
-| `Residency: the residency set is attached to this device's Metal 4 queue too (DXMT_METAL4)` | Once per device, on the Metal 4 path, after the usual `Residency:` line |
+| `Residency: the residency set is attached to this device's Metal 4 queue too (DXMT_METAL4); pipelines and argument buffers enter it, and what it holds stays out of each chunk's set (DXMT_MTL4_DEVICE_RESIDENCY=1)` | Once per device, on the Metal 4 path, after the usual `Residency:` line (#153). With `DXMT_MTL4_DEVICE_RESIDENCY=0` it ends `; every allocation a packet names also goes into its chunk's set (DXMT_MTL4_DEVICE_RESIDENCY=0)` instead |
 | `Metal 4: chunk S's completion event not signalled after 1 s; still waiting` | Warning, on the Metal 4 path: the finish thread waits for a chunk's completion event (after its commits) over a second |
 | `Metal 4: chunk S not complete after 1 s (its command buffer's value V, the queue event at E); still waiting` | Warning, on the Metal 4 path, the first 8 times the finish thread waits over a second for a chunk (a GPU hang or a very long frame); counted in [METAL4](#metal4)'s `slow`. Metal 3's `waitUntilCompleted` blocks the same way without a line |
 | `RetirementLedger: refused a hold\|split hold\|retirement\|drain for chunk S (ring slot R, retired up to N, refusal K; only the first 8 are logged)`, `ChunkSubmission: refused a retirement for chunk S (…)` | An error, never expected (a bug), the first 8 per command queue. The retirement ledger (#66) refused a hold (its ring slot belongs to an unretired chunk, or chunk `S` already retired: the object is kept until teardown, never released early; with `DXMT_RETIRE_RECOVERY`, #113, until the last chunk that may use it completed), a retirement (#91: not the next sequence, or not the token of this queue's submission's wait), or teardown's drain (#91: not the submission's drained token; the holds then go with the queue, `S` is 0); or the chunk submission refused to take back a token it didn't issue for its last wait. A refused retirement releases nothing. With `DXMT_RETIRE_RECOVERY=0` the retirement lines are these; with it on (the default), the lines below |
@@ -177,7 +228,7 @@ Sections: a feature registers a function with `gw2::SectionRegistrar` (`src/dxmt
 `DXMT_RENDER_THREAD_PRIORITY` (#9) is an experiment: in Lion's Arch GW2's render thread ran 22% of
 its time on Performance cores while the main thread and DXMT's encode thread stayed on Super cores.
 It acts on the first Present of each thread that presents, which in GW2 is the bgfx render thread,
-and never on DXMT's own threads (the encode thread keeps `THREAD_PRIORITY_TIME_CRITICAL`).
+and never on DXMT's own threads (those follow [`DXMT_THREAD_PRIORITY`](#queue-thread-priority)).
 
 - `=1`, **QoS class.** Bridge call 153 (`WMTSetThreadQoSClassSelf`) runs on the calling thread and
   calls `pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0)`. The QoS class is what
@@ -196,6 +247,61 @@ set its QoS class. Not verified in GW2 yet: whether macOS accepts the QoS class 
 wineserver has already given Mach policies (every Wine thread gets them at start; the log line
 shows the errno if not), and whether a later `SetThreadPriority` by the game undoes it.
 
+### Queue thread priority
+
+`DXMT_THREAD_PRIORITY` (#151) is for watts. Upstream starts DXMT's encode and finish threads at
+`THREAD_PRIORITY_TIME_CRITICAL`, which this engine's wineserver turns into timeshare off and Mach
+importance 32. That puts both above every GW2 thread (the game thread is `HIGHEST`, base priority 35
+in GW2's task, whose priority is 26), and they always get S cores. Neither is on the critical path:
+at 60 FPS on Metal 4 the encode thread uses 18 to 25% of a core and blocks 13 ms a frame in
+`nextDrawable`, and the finish thread is blocked 98% of the time.
+
+- `critical`, the default: as upstream.
+- `normal`: `THREAD_PRIORITY_NORMAL`, Mach importance 0 and timeshare on, so base priority 26 in
+  GW2's task, below the game thread and its workers.
+- `utility`: `normal` first, then bridge call `WMTSetThreadBasePrioritySelf(20)`. It sets the
+  thread's `THREAD_PRECEDENCE_POLICY` importance to 20 less the task's priority (`proc_pidinfo`
+  `pti_priority`), so the thread's base priority is 20, the utility band, which macOS keeps on the
+  P cores. This is how the heat `ntdll.so` places threads for `HEAT_QOS=1=utility`, except that it
+  reads the task's priority directly instead of from the thread's base priority less its
+  importance, which a waiter's QoS override would inflate. `pthread_set_qos_class_self_np` is no
+  use here: macOS refuses it once the wineserver has set Mach policies on a thread. The native test
+  `thread_priority_test` checks that the call leaves base priority 20 from the normal, highest and
+  time-critical states.
+
+What to read in a session: the two `ThreadPriority:` lines (base priority `26 -> 20` for `utility`),
+the startup line's `DXMT_THREAD_PRIORITY`, and, with the heat ntdll's `HEAT_COUNT=on`, the two
+threads' base priority. `STATS encode=` may rise (the P cores run slower); `RING stalls`,
+`STATS latency` and `commit` should stay 0, and `PACE` p50 and p99 shouldn't rise. A pipeline wait
+blocks the encode thread whatever its priority, so hitches shouldn't change. Below 60 FPS the
+queue runs empty, so a slower encode adds to `PRESENT presented`.
+
+### Compile worker priority
+
+`DXMT_COMPILE_PRIORITY` (#152) takes the compile workers off time-critical priority, with the
+mechanism of [`DXMT_THREAD_PRIORITY`](#queue-thread-priority) and the same three values. Upstream
+starts every compile worker at `THREAD_PRIORITY_TIME_CRITICAL`, and the pool grows to 2 × CPUs (16
+workers in a session of 2026-11-08). On an AIR miss each runs airconv, about 2 ms of translated x86
+code a variant, so a burst of new shaders puts up to 16 threads above the game thread on the S cores.
+With `normal` they are timeshare at base priority 26 in GW2's task, below the game thread (35); with
+`utility` at 20. Metal's own compile doesn't slow down off time-critical: natively, a thread without a
+QoS class, as Wine's are, builds a new pipeline in 9 to 11 ms, as fast as at user-initiated (only
+background is slower). airconv runs on the worker itself, though, and a worker on an E core
+translates slower.
+
+What a worker does while the encode thread waits for its job: it runs at its own priority, and the
+wait doesn't raise it. The encode thread blocks in `GetPipeline` on the job's done flag (a
+`std::atomic` wait), which names no thread, so neither Wine nor macOS can pass the waiter's priority
+to the worker that will set it; a Mach priority push needs a lock whose owner the kernel knows. With
+the declared policy (`DXMT_COMPILE_DEMAND=1`, or warming on) the demand moves the job and its
+unfinished variants to the front of the queue, so the next free worker takes it, but a job already
+running finishes at the worker's priority. With the legacy policy the demand changes nothing.
+
+What to read in a session: one `ThreadPriority: dxmt-compile-worker` line per worker, the startup
+line's `DXMT_COMPILE_PRIORITY`, and `COMPILE` `wait=` (count, total, max) and `threads=`. A longer wait
+or more `slow=` frames than usual means the workers lost time on the slower cores while the encode
+thread waited; the game thread's FPS in a busy spot while shaders compile shows what it gained.
+
 ### DEPTHVIEW and DEPTHSRV (#2)
 
 They look for what makes fire and smoke draw dark smudges since `007a574`: GW2's soft particles read
@@ -203,7 +309,7 @@ the depth buffer, which no longer has `PixelFormatView` (so Metal compresses it)
 
 `DEPTHVIEW` is written where DXMT makes a Metal texture view (`TextureView`, `src/dxmt/dxmt_texture.cpp`),
 which happens once per view and allocation, never per draw. A tuple is (base format, view format,
-texture type, size, usage, nil).
+texture type, size, usage, nil, d24).
 
 | Field | Meaning |
 |---|---|
@@ -215,6 +321,7 @@ texture type, size, usage, nil).
 | `usage`, `pfv` | The texture's `MTLTextureUsage` bits (1 read, 2 write, 4 render target, 16 pixel format view, 32 atomic), and whether `PixelFormatView` is among them (0: Metal may compress it losslessly) |
 | `aspect` | The planes the view covers: `depth`, `stencil`, `depth+stencil`, `none` (not a depth/stencil view) |
 | `nil` | 1 if `newTextureView` returned nil: the shader then reads nothing from that view |
+| `d24` | (#266) 1 if the texture was created with an emulated D24 format (`R24G8_TYPELESS` or `D24_UNORM_S8_UINT`, whose `MTL_DXGI_FORMAT_EMULATED_D24` flag the views' formats share), which DXMT stores as `Depth32Float_Stencil8` like a D32S8 one. Set when the texture is created (with `DXMT_STATS` on or off, as the line is); a shared texture imported from another process shows 0 |
 
 `DEPTHSRV` is checked where DXMT encodes a shader's resources into the argument buffer
 (`encodeShaderResources`, `src/dxmt/dxmt_context.cpp`): each new render pass marks every SRV dirty,
@@ -253,10 +360,12 @@ Present falls into the window in which its sleep ended.
 
 ### PSO
 
-`PSO builds= mru= lookups= equal= depth=avg/max new= topokept= lock=wait/held` (jdrly/dxmt #6):
+`PSO builds= mru= lookups= equal= depth=avg/max new= topokept= lock=wait/held samelayout= nullshader= sameshader= samevb= sameib= srv=calls/slots/same/set/missed smp=calls/slots/set` (jdrly/dxmt #6, #146, #147, #206):
 the pipeline lookup on the render thread. Counts are per frame (encode-thread frames of the
 window) unless noted; all contexts and all three pipeline caches (plain, geometry,
-tessellation) together. Omitted when nothing was looked up.
+tessellation) together. Omitted when the window had no builds, lookups, `topokept`, `same…`
+counts, shader resource or sampler calls. Each context counts `builds`, `mru`, `topokept`, the
+`same…` fields of #146 and #206 and #147's `srv` and `smp` with plain increments and hands them over once per chunk, a deferred context at `FinishCommandList` (#149).
 
 | Field | Meaning |
 |---|---|
@@ -268,9 +377,28 @@ tessellation) together. Omitted when nothing was looked up.
 | `new` | Pipelines created in the window (a total, not per frame) |
 | `topokept` | Topology changes that kept the pipeline (`DXMT_PSO_TOPOLOGY_KEEP`) |
 | `lock` | The caches' lock: time waiting for it / holding it (unlock included), ms per frame, one lookup in 16 timed and scaled |
+| `samelayout` | (#146) `IASetInputLayout` calls with the layout already bound (null on null included) |
+| `nullshader` | (#146) `XXSetShader(NULL)` calls on a stage that has no shader, all stages |
+| `sameshader` | (#206) `XXSetShader` calls given the pointer the stage was last given while it still holds the shader bound from it, all stages |
+| `samevb` | (#146) Vertex buffer slots set again with the same buffer, stride and offset (one per slot) |
+| `sameib` | (#146) `IASetIndexBuffer` calls with the same buffer, format and offset (null on null included) |
+| `srv` | (#147) `XXSetShaderResources`, all stages: calls, slots (the sum of their `NumViews`), slots whose bound view was the incoming one with a clear hazard bit, the ones the switch leaves (`same`; with the switch off, a slot in `missed`'s case set again counts too), slots that emitted a bind or an unbind (`set`), each per frame; then `missed`, a **window total**: bound slots given a view that can be an output while the slot's hazard bit was clear (the case `DXMT_SKIP_SAME_SRV` corrects) |
+| `smp` | (#147) `XXSetSamplers`, all stages: calls, slots, slots that emitted a bind or an unbind, per frame |
 
 With all three switches off the numbers measure the upstream lookup: `mru=0`, `topokept=0`,
-`lookups` = `builds`.
+`lookups` = `builds` (give or take the chunk in flight at the window's edge).
+
+The `same…` fields count with `DXMT_SKIP_SAME_STATE` on or off. With it on, the calls
+`samelayout` and `nullshader` count no longer invalidate the pipeline, so `builds` and `REBIND same`
+fall by the share of them that a draw followed; with it off, they say how many there are to save.
+The calls `sameshader` counts never invalidated the pipeline: the switch only saves their
+`QueryInterface`, so `builds`, `samelayout` and `REBIND` read as before #206.
+
+`srv` and `smp` count with `DXMT_SKIP_SAME_SRV` on or off. Slots a call is `slots` / `calls`. Wide
+calls with `same` close to `slots` are what the switch saves; narrow calls that mostly `set` leave it
+little to do. `missed` at 0 through play says the hazard-bit correction never acts in GW2. `DXMT_SKIP_EMPTY_SLOTS`
+changes none of these numbers: `slots` still adds each call's `NumViews` and `NumSamplers`, and the
+slots it doesn't visit would have moved no counter.
 
 ### RING
 
@@ -291,12 +419,14 @@ holds, not STATS' `frames`. No line in a window without commits.
 
 ### PRESENT
 
-`PRESENT presented=avg/p95/max aftergpu=avg/max nogpu= missed= starved= target=NxR n= dropped= lost=`
+`PRESENT presented=avg/p95/max aftergpu=avg/max nogpu= missed= starved= target=NxR n= dropped= lost= drawwait=avg/max early= inuse= nodrawable=`
 
 When the drawables reached the screen (#7). Just before each present the encode thread adds a
 presented handler to the drawable (unix call 148, `MTLDrawable_trackPresented`); the handler
 records the drawable's `presentedTime` together with the time the present was encoded (the unix
 side's `CACurrentMediaTime()` right before `presentDrawable*`), in a ring of 64 on the unix side.
+Since #224 the record also carries the drawable texture's IOSurface id and whether the surface was
+in use, read in the same call (no bridge call more, and none without `DXMT_STATS`).
 The encode thread collects the finished records at the next present, without waiting (a trylock;
 if a handler holds the ring, they come next time). The line covers the records collected in the
 window, so it trails the frames by a present or two. Off with `DXMT_STATS=0` (no handlers then).
@@ -304,13 +434,17 @@ window, so it trails the frames by a present or two. Off with `DXMT_STATS=0` (no
 | Field | Meaning |
 |---|---|
 | `presented` | `presentedTime` minus the present's encode time, avg/p95/max ms over the shown frames: the queue to the screen. With `vsync+after` it includes the minimum duration |
-| `aftergpu` | `presentedTime` minus the frame's last GPU end that DXMT records (its frame command buffers; the split present buffer's copy isn't among them), avg/max ms: the wait for the vsync and the compositor after the GPU finished. The GPU ends are kept per frame until the frame's record is joined (up to 2048 frames). A record whose frame the finish thread hasn't finished yet is joined in the next window, so a few frames can count in the window after the one they were shown in |
+| `aftergpu` | `presentedTime` minus the frame's last GPU end that DXMT records, avg/max ms: the wait for the vsync and the compositor after the GPU finished. Each chunk records its last command buffer's end. On Metal 3 with the present split that is the present buffer's (#224 corrected this text, which said the opposite). On Metal 4 it is the chunk's last commit's: after a present, the present's, or with `DXMT_MTL4_TIMESTAMP_REUSE=0` the empty command buffer for timestamp queries. With `DXMT_MTL4_PRESENT=mtl3` it is the Metal 3 present buffer's, whose record follows the chunk's commits (#227). The GPU ends are kept per frame until the frame's record is joined (up to 2048 frames). A record whose frame the finish thread hasn't finished yet is joined in the next window, so a few frames can count in the window after the one they were shown in |
 | `nogpu` | Shown frames left out of `aftergpu`: no GPU end recorded for the frame (or only `GPUEndTime` 0), still unfinished a window later, or a GPU end that isn't before `presentedTime` (should stay near 0) |
 | `missed` | Refreshes skipped between two consecutive shown frames beyond the `target`, when the later frame had been encoded **before** the earlier one reached the screen: it was queued and still missed the vsync (the GPU or the compositor was late) |
 | `starved` | The same skipped refreshes when the later frame was encoded **after** the earlier one reached the screen: the game or the encode thread delivered it late, or its deadline (encode time + `DXMT_PRESENT_DEADLINE`) lay past the next vsync |
 | `target` | `N`x`R`: the refreshes a frame is meant to stay on screen times the refresh period in ms. `N` is 1 at a plain vsync and 2 or 3 for a 30 or 20 fps cap on 60 Hz. With the frame limiter (`vsync+limiter`) it is the limiter interval in refreshes, such as `1.20` for a 50 fps cap on 60 Hz, whose frames alternate between one and two refreshes. `missed=- starved=- target=-` with display sync off, where there is no vsync grid |
 | `n`, `dropped` | Records collected, and drawables with `presentedTime` 0 (never shown). A dropped frame isn't paired with its neighbours |
 | `lost` | Records the ring or the collector dropped because they weren't collected in time (should stay 0) |
+| `drawwait` | (#224) The present pass's GPU start minus the present's encode time, avg/max ms over the shown frames whose pass time is known: how long the pass waited before it drew into the drawable. The finish thread gives each frame's present pass its own span: on Metal 3 the present buffer (with `DXMT_PRESENT_SPLIT=0`, the chunk's whole last buffer), on Metal 4 the pass's commit (with the split off, the frame's work is in it too), and with `DXMT_MTL4_PRESENT=mtl3` the Metal 3 present buffer. `drawwait=-` when no shown frame had one |
+| `early` | (#224) Shown frames whose present pass ended on the GPU before the surface's previous frame left the screen. The surface is the drawable texture's IOSurface id. Its previous frame left the screen when the next shown frame after it was presented, by the layer's own `presentedTime`. So the pass drew into a surface the display may still have been showing. A frame is left out when a time is unknown and when its surface is seen for the first time. A gap in the frame numbers (a lost record) starts every surface's history over, since the missing frame may have shown on any of them. With three drawables at a locked 60, a frame's surface last showed the frame three before it |
+| `inuse` | (#224) Drawables, shown or dropped, whose surface `IOSurfaceIsInUse` reported in use when the present was tracked (after `nextDrawable`, and on Metal 4 after `waitForDrawable`, before the pass's commit) |
+| `nodrawable` | (#324) Presents since the last `PRESENT` line whose `nextDrawable` returned nil (its timeout, or a drawable size of zero), counted with `DXMT_PRESENT_SKIP_NIL` on or off. 0 in a normal session. A window that prints no line (no record came) leaves its count to the next line |
 
 With a whole `N`, each gap is rounded to whole refreshes and whatever lies beyond `N` counts. With the
 frame limiter, the gaps are counted against its cadence instead: each gap's lateness against the
@@ -331,10 +465,10 @@ thread waits in `GetPipeline` when the draw that needs a pipeline is encoded bef
 pipeline is built. A frame with such waits is a hitch DXMT causes.
 
 `COMPILE variants= air=hit/miss pso=hit/miss built= failed= build=shader:ms/max pipeline:ms/max
-queue=now/max threads= wait=Nx ms/max slow= [waitcause=queued:N/ms,variantq:N/ms,variant:N/ms,building:N/ms[,other:N/ms]
-[archbusy=N]] [variant=lock:N/ms/max,air:…,lib:…,fn:…,xlate:…,store:…] [promoted=N] [archive=hit/miss miss=new:N,known:N added= queued= unflushed= addfailed= capped= skipped= rebuilt= [gen= published= excluded= missexcl=]]`
+queue=now/max threads= wait=Nx ms/max slow= [waitcause=queued:N/ms,variantq:N/ms,variant:N/ms,building:N/ms[,other:N/ms]]
+[variant=lock:N/ms/max,air:…,lib:…,fn:…,xlate:…,store:…] [promoted=N]`
 
-Counts are **totals in the 2 s window**; the `COMPILE frame=` line below has them per frame. Times are ms. Without `DXMT_STATS` nothing is counted or timed (no clock reads), except the count of built pipelines that `DXMT_PSO_FLUSH_EVERY` needs.
+Counts are **totals in the 2 s window**; the `COMPILE frame=` line below has them per frame. Times are ms. Without `DXMT_STATS` nothing is counted or timed (no clock reads).
 
 | Field | Meaning |
 |---|---|
@@ -350,15 +484,10 @@ Counts are **totals in the 2 s window**; the `COMPILE frame=` line below has the
 | `variant` | (W0) Only in a window with variant builds: their stages, each count / total ms / max ms, elapsed on the compile workers (waits and compiler services included; not CPU time). `lock`: waiting for the AIR cache reader's lock (one reader, shared by all workers); `air`: the AIR read; `lib`: `newLibrary`; `fn`: `newFunction`; `xlate`: airconv's translation, on an AIR miss; `store`: writing the new AIR (its lock included). Warm jobs (#88) aren't counted here |
 | `promoted` | (C2) Only with `DXMT_COMPILE_DEMAND=1`: compile jobs a demand moved ahead (a waited-for pipeline and its unfinished variants, each once). Under the declared policy `queued` waits also include a pipeline waiting for its variants, unqueued (its state stays `queued` until a worker starts it) |
 | `waitcause` | (#46) Only in a window with waits: the same waits by what the waited-for pipeline task was doing when the wait started, count / total ms. `queued`: submitted, no worker had started it (behind other compile tasks). `variantq`: started, parked on its vertex or pixel shader variant, and that variant was still queued. `variant`: parked on a variant that was compiling (or between the two). `building`: inside Metal's pipeline build (`newRenderPipelineState`/`newComputePipelineState`). `other`: not classified (submitted while `DXMT_STATS` was off, or done but not yet flagged); shown only when non-zero. The counts add up to `wait`: both come from one drain of the per-cause counters, so a wait finishing during the drain lands in one window for both |
-| `archbusy` | (#46) Only with `DXMT_PSO_ARCHIVE=1`: waits that began while PSO archive adds were still queued on the unix side (each add compiles the pipeline again for the archive) |
-| `archive` | Only with `DXMT_PSO_ARCHIVE=1`: pipelines found in earlier sessions' archives / built without a hit in the window, pipelines added to this session's archive in the window, adds still queued, adds not yet serialized, adds that failed and pipelines not added because the session reached 8192 (both since start) |
-| `miss` | (#52) With `DXMT_PSO_ARCHIVE=1`: the window's lookup misses, `new` (never in an earlier session's archive) and `known` (an earlier session's `.keys` has the pipeline's key, yet Metal missed it: keying, or a pipeline lost before a flush) |
-| `skipped`, `rebuilt` | (#52) Since start: pipelines left out of the archive after Metal's packer named them in a failed flush, and flushes that succeeded only after rebuilding the archive without them |
-| `gen`, `published`, `excluded`, `missexcl` | (#75) Only with `DXMT_PSO_GENERATIONS=1`: the generation loaded at start, then the last one published; pipelines in this session's shard of that publish; adds refused since start because their key is an excluded failing shape; the window's lookup misses of an excluded shape (not counted in `new` or `known`) |
 
 **`COMPILE frame=N wait=Nx ms/max queue=Q variants= air=hit/miss pso=hit/miss built= failed=
-build=shader:ms pipeline:ms cause=queued:N,variantq:N,variant:N,building:N,other:N longest=<cause>
-lead:ms queue:ms parked:ms build:ms varq:ms varc:ms depth:N archq:N [dropped=D]`** (with
+build=shader:ms pipeline:ms created=N/min/max cause=queued:N,variantq:N,variant:N,building:N,other:N longest=<cause>
+lead:ms queue:ms parked:ms build:ms varq:ms varc:ms depth:N [dropped=D]`** (with
 `DXMT_STATS`): a frame whose encode-thread
 waits in `GetPipeline` added up to at least `DXMT_COMPILE_WAIT_MS` (2 ms): their count, total
 and longest wait, and the compile queue when the next frame's encoding started. `variants` to
@@ -369,6 +498,15 @@ game; the counts say what was compiling during the hitch, not which draw asked f
 most one line per 200 ms; `dropped` = qualifying frames since the last line that weren't logged
 (`slow` in the section counts them all). The line is written when the encode thread starts the
 next frame. Nothing is skipped: the draw still waits for its pipeline.
+
+`created` (#160): the shaders whose first variant was made while the encode thread was on this
+frame (counted like `variants`), and the shortest and longest time, ms, from each one's creation to
+that first variant: how much earlier its compile could have started if it began at `CreateShader`
+instead of at the first draw that needs it. A shader is created once per device and bytecode (a
+later `CreateShader` of the same bytecode gets the same shader), after DXBC parsing. A variant
+taken from the shared results (`DXMT_WARM`) counts too. `created=0` when there were none. The
+other half of that question, what a Metal 4 specialization of a pipeline built without its color
+state costs, is `tests/gw2/mtl4_specialize_test.m`'s benchmark.
 
 `cause` and `longest` (#46): the frame's waits by cause (as `waitcause`), and the timeline of its
 longest wait's pipeline task, ms, `-` where not known:
@@ -381,111 +519,19 @@ longest wait's pipeline task, ms, `-` where not known:
 | `build` | Metal's pipeline build (0 or close to it when Metal's own shader cache has it) |
 | `varq`, `varc` | The variant it was last parked on: its time in the queue, and its compile (AIR cache lookup or airconv, `newLibrary`, `newFunction`) |
 | `depth` | Compile tasks submitted and not finished when the wait started |
-| `archq` | PSO archive adds queued when the wait started (`DXMT_PSO_ARCHIVE=1` only) |
 
 The stamps (#46) cost one clock read per task submission, start, park, build and completion, and
-only with `DXMT_STATS`; a wait also reads the archive's counters once (a unix call) when the
-archives are on. Since C1 the compile service (`src/dxmt/dxmt_compile_service.hpp`) owns the tasks'
+only with `DXMT_STATS`. Since C1 the compile service (`src/dxmt/dxmt_compile_service.hpp`) owns the tasks'
 records: their state (queued, running, parked, building, complete, and what a task is parked on) is
 kept with `DXMT_STATS` off too, a few atomic stores per task; the timestamps and the classification
 above are unchanged and still need `DXMT_STATS` from the task's submission.
 
-**PSO archives** (`DXMT_PSO_ARCHIVE=1`, off by default). Metal binary archives
-(`MTLBinaryArchive`), managed on the unix side of the bridge (`src/winemetal/unix/pso_archive.c`,
-bridge calls 149–151):
-
-- Files (with #52 also a `<file>.keys` sidecar per archive: the keys of the pipelines in it, written after each successful flush and removed with the archive): `$(getconf DARWIN_USER_CACHE_DIR)dxmt/pso/<exe>/os-<OS build>-<GPU>/` (#134: `DXMT_CACHE_DIR` replaces `$(getconf DARWIN_USER_CACHE_DIR)`)
-  (`DXMT_PSO_ARCHIVE_DIR` replaces `…/dxmt/pso`), one `<unix time>-<pid>.mtlarchive` per session
-  with a `.sum` next to it (size and SHA-256). Another OS build or GPU gets a new directory, and
-  the old one is removed.
-- At device creation (once per process) the newest 4 sessions whose `.sum` matches are loaded for
-  lookup. An archive without a matching `.sum` (an interrupted write), one Metal refuses, and
-  older sessions are deleted; `newBinaryArchiveWithDescriptor:` can crash on a bad file, so
-  nothing is loaded unchecked.
-- Each render and compute pipeline is first built with `MTLPipelineOptionFailOnBinaryArchiveMiss`
-  against those archives (a hit), and on a miss built again normally. Then it is added to this
-  session's archive on a background queue (utility QoS), hits included, so a session's archive
-  holds every pipeline it used. Geometry and tessellation emulation (mesh pipelines) and DXMT's
-  tile pipelines are not archived.
-- The archive is serialized by a low-priority thread (`dxmt-pso-archive`) every
-  `DXMT_PSO_FLUSH_EVERY` (256) new pipelines, every 30 s if any are new, and soon after a
-  device is released. Exit never flushes (serializing can take long, and Metal's threads may be
-  gone): a session loses at most the pipelines added since the last flush. `MTLBinaryArchive` writes all its contents each
-  time: the session's file grows and is rewritten (`.tmp`, then renamed; the `.sum` last).
-- Not covered: the archive saves Metal's backend compile only. AIR translation is DXMT's own AIR
-  cache, and the draw-time pipeline lookup still happens; the state-cache prewarm (building last
-  session's pipelines at startup) is not implemented.
-
-| Line | When |
-|---|---|
-| `PSO archive: on: N archives for lookup (X MB) in <dir>; this session writes <file> (keep 4 sessions, at most 8192 pipelines each)` | Once, at the first device creation |
-| `PSO archive: loaded <file> (X MB)` | Each archive loaded for lookup |
-| `PSO archive: deleted <file>: <reason>` | An archive skipped and removed: `no .sum`, `.sum does not match …`, `unreadable`, `Metal refused it: …`, `older than the newest 4 sessions` |
-| `PSO archive: removed <os-dir> (another OS build or GPU)`, `… leftover .tmp/.sum files` | Cleanup at start |
-| `PSO archive: off: <reason>` | The archives couldn't start (no cache dir, a relative `DXMT_PSO_ARCHIVE_DIR`, …) |
-| `PSO archive: flushing every N new pipelines, every 30 s if any are new (not at exit)` | Once, when on |
-| `PSO archive: flushed <file>: N pipelines (+M), X MB in T ms` | Each flush; `(session cap reached …)` once 8192 pipelines are in it |
-| `PSO archive: flush of <file> failed after T ms: <reason>` | A failed flush, also after the rebuild below; the next one tries again |
-| `PSO archive: flush of <file> failed: <Metal's error>` | (#52) The first try of a flush failed; the archive is rebuilt and written once more in the same flush |
-| `PSO archive: Metal names pipeline no. N: <shape> (left out of the archive from now on)` | (#52) The failed flush's error named a pipeline (`pipeline no. 'N'`, counted in that archive's own order): its shape (`render vs=… fs=…\|none colors=[…] depth= stencil= samples= raster= topology=` or `compute cs=…`; a function made with constant values shows as `<name>#c<hash>`). That pipeline is left out of every later flush (`skipped`); it is still built and used |
-| `PSO archive: rebuilding <file> without the pipelines left out after an earlier failure` | (#52) A flush after a failed retry: the current archive still holds skipped pipelines, so it is rebuilt before it is written |
-| `PSO archive: the rebuilt archive's pipeline no. N failed too: <shape> (left out from the next flush)` | (#52) The retry failed on another pipeline: it is skipped as well, the current archive is kept unchanged (a partial rebuild never replaces it), and the next flush rebuilds again before writing |
-| `PSO archive: flushed <file>: … (rebuilt with N pipelines after a failed flush)` | (#52) The retry into a fresh archive (every recorded pipeline but the skipped ones) succeeded |
-| `PSO archive: N pipeline keys from M of the loaded archives classify lookup misses (known/new)` | (#52) Once, at start: the keys read from the loaded archives' `.keys` sidecars |
-| `dxmt: PSO archive: about N pipelines added since the last flush are not saved (no flush at exit)` | At exit, on Wine's stderr (DXMT's log is gone by then), if the last completed flush missed some: adds not in it plus adds still queued (a flush still running counts as not done; an add in progress can count twice) |
-| `PSO archive: N pipelines could not be added so far; first error: …` | At the next flush after an add failed |
-
-**Generations** (#75, `DXMT_PSO_GENERATIONS=1` with `DXMT_PSO_ARCHIVE=1`, off by default). The same
-archives, published by the generation publisher (`src/winemetal/unix/pso_archive_publish.c`) instead of
-one rewritten file per session, from the instance's pure policy (`pso_archive_policy.c`):
-
-- Files in `…/os-<OS build>-<GPU>/gen1/`: shards `<sha256>.shard` (an `MTLBinaryArchive`'s
-  serialization, named by its content, never rewritten); one manifest per generation,
-  `g<16 hex>.manifest` (each shard's session, size, SHA-256 and pipeline keys, newest session first,
-  then the excluded shapes, then a SHA-256 over all of it); the index `CURRENT` (the generation and its
-  manifest's SHA-256), the only file ever replaced; `LOCK`.
-- A flush publishes the pipelines added since the last publish as a new shard (a delta); a session's
-  ninth publish merges its eight shards into one. The archive written is always one never serialized
-  before: Metal fails to serialize an archive again after more pipelines were added to it, naming a
-  good pipeline (`missing 'vertex' stage in pipeline no. N`, reproduced natively by
-  `tests/gw2/pso_archive_test.m`), which the session-file mode then leaves out. The shard is written,
-  synced and renamed into place, then the manifest, then `CURRENT`; a failure at any step leaves the last
-  good generation, and the next flush tries again.
-- At start the generation `CURRENT` names is loaded if its manifest verifies, else the newest older
-  one that does (the last good one); a shard whose size or SHA-256 doesn't match is dropped. The
-  newest 4 sessions' shards are used for lookup. Only the store's writer (an exclusive `flock` on
-  `LOCK`) publishes and removes files: everything but the current and the previous generation's.
-  Another process at the same time gets lookup only and captures nothing.
-- Exact-shape failure policy: a pipeline Metal's packer names in an archive never serialized before is
-  a failing shape. Every pipeline of its full key is left out, the shard is rebuilt without them and
-  written again (at most 3 tries a flush), and the key is excluded from capture, recorded in the
-  manifest for later sessions. Nothing broader is excluded: no class of pipelines (fragment-less or
-  any other) is skipped. Excluded shapes are still built and used, only not archived. A flush whose
-  new pipelines are all excluded publishes an exclusion-only generation (no new shard, every shard
-  carried); until that succeeds the flush counts as failed and the next one tries again.
-
-| Line | When |
-|---|---|
-| `PSO archive: on (generations[, lookup only]): generation G, N shards for lookup (X MB) in <dir>; this session publishes new generations\|captures nothing (keep 4 sessions, at most 8192 pipelines each)` | Once, at the first device creation |
-| `PSO archive: N pipeline keys classify lookup misses (known/new), M failing shapes are excluded from capture` | Once, at start |
-| `PSO archive: loaded shard <sha256 prefix> (session <time>-<pid>, X MB, N pipeline keys)` | Each shard used for lookup |
-| `PSO archive: shard <prefix> (session …) not used: Metal refused it: …` | A verified shard Metal won't open; left out of the next generation |
-| `PSO archive: dropped shard <prefix> (session …) of generation G: <reason>` | At start: `missing or unreadable`, `size or SHA-256 does not match`, `older than the newest sessions kept` |
-| `PSO archive: generation G failed verification: <reason>; using the last good generation` (or `…; no earlier generation verifies, starting empty`), `PSO archive: no valid index (CURRENT); using generation G, the newest that verifies` | At start, when the index or its manifest is bad |
-| `PSO archive: another process (pid P) writes <dir>: lookup only, this session captures nothing` | At start, when another process holds the store |
-| `PSO archive: removed N files no generation since the previous one uses (or leftovers)` | At start (writer only) |
-| `PSO archive: published generation G: N pipelines (+M) in shard <prefix>, X MB, S shards, E excluded shapes, in T ms` | Each successful flush: N pipelines in the new shard, M added since the last publish; `(merged this session's 8 shards into one)`, `(after excluding K failing shapes)`, `(session cap reached …)` when they apply |
-| `PSO archive: publish of generation G failed: <reason>` | One try of a flush failed (Metal's error, or the step: `cannot write the manifest`, `cannot replace the index`, …) |
-| `PSO archive: Metal names pipeline no. N of an archive never serialized before: <shape> (its key is excluded from capture from now on)` | That failure named a pipeline: its shape (as in #52's line); the next try rebuilds without it |
-| `PSO archive: publish of generation G failed after T ms: <reason> (generation P stays)` | The flush gave up; `CURRENT` still names generation P |
-| `PSO archive: published generation G: no shard, the N new pipelines are all excluded shapes; S shards, E excluded shapes, in T ms` | A flush whose new pipelines were all excluded, with an exclusion the store didn't record yet: the exclusion-only generation |
-| `PSO archive: nothing to publish: the N new pipelines are all excluded shapes` | The same, when the store already records every one of those exclusions |
-
 ### CMDS
 
-`CMDS cb= cbwhy=k:v,… close=k:v,… promote=off|min:N,k:v,…` (jdrly/dxmt #4). Why the game's render
+`CMDS cb= cbwhy=k:v,… close=k:v,… getflush=k:v,… getskip=k:v,…` (jdrly/dxmt #4). Why the game's render
 thread commits chunks (command buffers) and closes encoder passes. Counted with plain increments in
-the immediate context and handed over once per chunk; with `DXMT_STATS=0` nothing is counted. `cb`
+the immediate context and handed over once per chunk (`getflush` and `getskip`: a relaxed atomic add
+per poll); with `DXMT_STATS=0` nothing is counted. `cb`
 and `cbwhy` come from one drain of the totals, so they always agree.
 
 | Field | Meaning |
@@ -493,7 +539,8 @@ and `cbwhy` come from one drain of the totals, so they always agree.
 | `cb` | Chunks committed per frame, the sum of `cbwhy` (should match STATS `cb`) |
 | `cbwhy` | Commits per frame by reason; reasons that didn't occur are left out, `other` is always shown and should stay 0 |
 | `close` | Encoder passes (render, compute, blit) closed per frame, by what closed them |
-| `promote` | `off`, or with `DXMT_PROMOTE_FLUSH_MIN`: `min` and what happened at speculative commits, **window totals** |
+| `getflush` | `GetData` calls per frame that found their query unresolved and flushed (without `DONOTFLUSH`, or a stalled poll), by query: `event`, `occlusion`, `timestamp`, `disjoint` (#158). The same polls STATS `stall` counts as a window total; a flush commits only when the chunk has work, and those commits are `cbwhy` `getdata` |
+| `getskip` | The same polls whose flush `DXMT_GETDATA_SKIP_FLUSH` skipped because the query's chunk was already committed (`timestamp`, `disjoint`) |
 
 `cbwhy` reasons. The issue's `query` is `occlusion` + `timestamp`. A commit counts once, under the
 outermost reason (a staging `Map` that waits commits through `Flush()` as `map`).
@@ -501,53 +548,25 @@ outermost reason (a staging `Map` that waits commits through `Flush()` as `map`)
 | Key | The commit |
 |---|---|
 | `flush` | The game's `Flush`/`Flush1` (and D3D10's) |
-| `getdata` | `GetData` without `DONOTFLUSH` on a query that isn't ready, or an event query that stalls (after 64 polls `DONOTFLUSH` is ignored), or a timestamp query that stalls the same way in `DXMT_TIMESTAMP_MODE` `estimate`/`boundary` (see [TIMESTAMP](#timestamp)) |
+| `getdata` | `GetData` without `DONOTFLUSH` on a query that isn't ready (except the polls `DXMT_GETDATA_SKIP_FLUSH` lets go: CMDS `getskip`), or an event query that stalls (after 64 polls `DONOTFLUSH` is ignored), or a timestamp query that stalls the same way in `DXMT_TIMESTAMP_MODE` `estimate` (see [TIMESTAMP](#timestamp)) |
 | `map` | `Map` of a staging resource that has to wait for the GPU |
 | `occlusion`, `timestamp`, `event` | Speculative (`promote_flush`): the next pass change after an occlusion, timestamp (or timestamp-disjoint), event query `End` |
 | `staging`, `readback` | Speculative: after a staging → staging copy, after a device → staging copy (readback) |
 | `cmdlist` | Speculative: after `ExecuteCommandList` of a list that ended a query or copied to staging |
 | `present` | Present (an occluded one too) |
 | `fence`, `keyedmutex`, `idle` | `ID3D11Fence` Signal/Wait; `AcquireSync`/`ReleaseSync`; `WaitUntilGPUIdle` (resize, fullscreen switch) |
-| `poll`, `timer`, `watchdog` | `DXMT_PROMOTE_FLUSH_MIN` only: a held commit, committed at a poll that isn't ready, at a pass change after `DXMT_PROMOTE_FLUSH_MS`, by the watchdog |
 | `other` | None of these: a commit path nobody attributed (a bug in the counting) |
 
 `close` keys: `render` (a draw needs a render pass), `compute` (a dispatch or a UAV clear), `blit`
 (a copy or update), `targets` (`OMSetRenderTargets*`), `clear`, `resolve`, `query` (event/timestamp
-`End`), `flush` (Flush, fences, keyed mutex, `WaitUntilGPUIdle`, a held commit's commit), `present`,
+`End`), `flush` (Flush, fences, keyed mutex, `WaitUntilGPUIdle`), `present`,
 `state` (`ExecuteCommandList`, `SwapDeviceContextState`), `upscale` (MetalFX through the context
 extension), `copy` (depth-stencil copy to or from staging), `other`.
-
-`promote` keys (with `DXMT_PROMOTE_FLUSH_MIN=<n>`), totals in the 2 s window:
-
-| Key | Meaning |
-|---|---|
-| `skip` | Pass changes where a speculative commit was held back |
-| `reached` | Speculative commits made because `n` requests had accumulated (with `n=1`: all of them) |
-| `nodefer` | Speculative commits made at once because a request that is never held joined: event query, staging copy, readback, command list |
-| `gpuidle` | Speculative commits made at once because no earlier chunk was still on the GPU (it would idle) |
-| `present`, `explicit`, `poll`, `timer`, `watchdog` | Held commits ended by Present, by an explicit commit (Flush, fences, keyed mutex, waiting `Map`/`GetData`, `WaitUntilGPUIdle`), by a poll that wasn't ready, by the timer, by the watchdog |
-
-**The rule.** Only an occlusion or timestamp query `End` can be held. Explicit Flush, fences, keyed
-mutex, event queries, staging copies, readbacks, and a `Map`/`GetData` that waits are never held. A
-held commit is committed at the latest:
-- by **Present**, so a chunk never spans frames;
-- by **any way the game can see a result**: a waiting `Map`/`GetData` and `Flush` commit as upstream;
-  a `GetData(DONOTFLUSH)` that returns `S_FALSE` and a `Map(DO_NOT_WAIT)` that would wait for the
-  held chunk commit it first (upstream would already have committed it), so a game that only polls
-  still makes progress;
-- by the **timer**: the next pass change at least `DXMT_PROMOTE_FLUSH_MS` after the first hold;
-- by the **watchdog**, even if the game never calls the context again: a thread waits
-  `DXMT_PROMOTE_FLUSH_MS` after a hold and, if it is still pending, commits under the device lock
-  every context entry point takes. Upstream's lock is a no-op unless the game turns on multithread
-  protection (`ID3D11Multithread`), so `DXMT_PROMOTE_FLUSH_MIN` forces it on for the device's life:
-  it then excludes the game's threads whatever the game asks, and `SetMultithreadProtected(FALSE)`
-  neither disables it nor drops its owner. The cost of the switch: an uncontended lock and unlock per
-  context call, and a game call that meets the watchdog's commit spins until it ends.
 
 ### ENCODE
 
 `ENCODE draws= dispatches= tile= pso= useres= blitcmds= enc=k:v,… perchunk=avg/max loadMB=… storeMB=…
-refuse=k:v,…` (jdrly/dxmt #4). What the encode thread encodes, per frame. The command counts are
+refuse=k:v,… d24bias= d24slope=` (jdrly/dxmt #4, #266). What the encode thread encodes, per frame. The command counts are
 plain increments decided at compile time; the encode thread hands its totals over once per chunk.
 With `DXMT_STATS=0` nothing is counted.
 
@@ -562,6 +581,7 @@ With `DXMT_STATS=0` nothing is counted.
 | `perchunk` | Encoders per chunk: average, and the most in one chunk |
 | `loadMB`, `storeMB` | Attachment bytes per frame (MB = 10⁶) loaded (`Load` action) and stored (`Store`, plus resolved targets), by aspect `color`/`depth`/`stencil`: render area × layers × texel size × samples. Uncompressed, an upper bound (lossless compression moves less); clear and resolve passes included, the present pass not |
 | `refuse` | Why the encoder optimizer (`checkEncoderRelation`) didn't merge, per frame. Per render → render pair it tried: `target` (different targets, planes, read-only flags, array length: the usual case), `argbuf` (argument buffers in different blocks), `load` (the later pass clears or doesn't load), `store` (the earlier pass doesn't store), `vfence` (the later pass's vertex stage waits for the earlier one's fragments). For any pair: `dep` (a data dependency ends the search) and `sync` (an event or timestamp encoder ends it) |
+| `d24bias`, `d24slope` | (#266) Per frame, the game's triangle draws into an emulated D24 depth target (`DEPTHVIEW`'s `d24=1`) with a rasterizer state that has a nonzero `DepthBias` (`d24bias`, whatever its slope), or only a `SlopeScaledDepthBias` (`d24slope`). DXMT hands the bias to Metal unchanged, and Metal scales the constant bias of such a target, stored as `Depth32Float_Stencil8`, by the primitive's depth exponent instead of D3D's 1/(2²⁴−1): athei's `7429bb9` puts it at 0.25, 0.5 and 2 times D3D's at depths 0.125, 0.25 and 1.0. These two fields say whether GW2 reaches that case at all. Counted by the immediate context, not the encode thread: when it applies the rasterizer state (at each new render pass and each `RSSetState`) it notes whether the pass's draws get such a bias, and each draw then costs one branch on that note. Triangles are judged by the topology the game set (triangle lists and strips, with or without adjacency, and patch lists), not by a geometry or domain shader's output. Internal draws (clears, emulation) and deferred contexts' draws aren't counted |
 
 ### TIMESTAMP
 
@@ -572,7 +592,7 @@ frames of the window). No line in a window without timestamp queries.
 DXMT samples no GPU counter for a timestamp: the value is a command buffer's GPU end time. In `exact`
 mode (upstream) each `End` therefore closes the open encoder pass and asks for a commit at the next
 pass change, so each query gets a buffer of its own (in busy Lion's Arch, CMDS showed
-`cbwhy=timestamp:34 close=query:30`). `estimate` and `boundary` leave the pass open and mark the
+`cbwhy=timestamp:34 close=query:30`). `estimate` leaves the pass open and marks the
 query at its position in the chunk's encoder list (2 × the encoders closed before it, + 1 inside an
 open pass). When the chunk's command buffer completes, the finish thread sets the query to the
 buffer's GPU start + (end − start) × the query's share of the buffer's positions, as if each encoder
@@ -583,13 +603,15 @@ monotonic. `estimate` asks for no commit: a frame's queries resolve when its las
 (at Present, a Flush, or a GetData that flushes), about a frame later than `exact`'s.
 
 Progress for a game that only polls: in `exact` the draw after a timestamp opens a new pass, which
-commits the query's chunk. `estimate` and `boundary` keep the pass, so a timestamp query counts its
+commits the query's chunk. `estimate` keeps the pass, so a timestamp query counts its
 unresolved `GetData(DONOTFLUSH)` polls while its chunk is still the one being recorded, and after 64
 of them (the stall rule event queries already have) such a poll flushes: the chunk is committed and
-CMDS counts it as `getdata`. Polls of a query whose chunk is already committed never flush.
+CMDS counts it as `getdata`. `DONOTFLUSH` polls of a query whose chunk is already committed never
+flush, and with `DXMT_GETDATA_SKIP_FLUSH` (#158) neither do polls without it: a game that polls without
+`DONOTFLUSH` flushes once, at its first unresolved poll while the query's chunk is being recorded.
 
 A timestamp-disjoint query (`Frequency` 1 GHz, `Disjoint` FALSE, as upstream) signals no event in
-`estimate` and `boundary`. It becomes ready when the chunk it ended in has finished on the finish
+`estimate`. It becomes ready when the chunk it ended in has finished on the finish
 thread, which resolves that chunk's timestamps first, so the game never sees a frame's disjoint data
 before its timestamps. A Flush commits that chunk even without other work in it, and the event
 queries' stall rule (64 unresolved polls) makes a polling `GetData` flush.
@@ -598,38 +620,56 @@ queries' stall rule (64 unresolved polls) makes a polling `GetData` flush.
 |---|---|
 | `mode` | `DXMT_TIMESTAMP_MODE` in effect |
 | `ends`, `disjoint` | Timestamp and timestamp-disjoint query `End`s (all modes) |
-| `kept` | `End`s that found an encoder pass open and left it open (`estimate`, `boundary`; `exact` closes it and CMDS counts `close=query`). A disjoint `End` counts only where `exact` would signal an event (work since the last one) |
+| `kept` | `End`s that found an encoder pass open and left it open (`estimate`; `exact` closes it and CMDS counts `close=query`). A disjoint `End` counts only where `exact` would signal an event (work since the last one) |
 | `saved` | `estimate` only: pass changes at which `exact` would have committed for a timestamp and nothing was committed, i.e. command buffers saved. A pass change inside an explicit commit (Flush, Map, GetData, fence, `WaitUntilGPUIdle`) isn't counted, since that commit follows. An estimate: CMDS `cb` in `exact` against `estimate` is the measurement |
 | `clamped` | Queries whose value was raised to an earlier one to stay monotonic (finish thread) |
 | `tsspan` | Per frame, the last timestamp value minus the first (what the game sees from its first timestamp of the frame to its last), avg/max ms over the frames whose queries resolved in the window, in every mode; `unavailable` if none. Compare with `GPU gpuspan`: `exact` and `estimate` should be close |
 
-Not covered: a deferred context's command list with timestamp queries still commits in `boundary`
-and `exact` (as upstream); in `estimate` it no longer asks for a commit for them.
+Not covered: a deferred context's command list with timestamp queries still commits in `exact`
+(as upstream); in `estimate` it no longer asks for a commit for them.
 
 ### MAP
 
-`MAP fast= calls= ms= renames= created= grown= dropped= <kind>.<op>=calls/ms …` (jdrly/dxmt #25).
+`MAP fast= calls= ms= renames= created= grown= dropped= queued= queued.mb= queued.age= [swept= swept.mb=] <kind>.<op>=calls/ms …` (jdrly/dxmt #25, #251, #265).
 The game's `Map` and `Unmap` calls on the immediate context, per frame, by what they map and how.
-Every call is counted. A call on a buffer (dynamic or default usage) is timed one in 16 and scaled
-by 16, every other call (textures, staging, unmappable) always, because a timed call costs two clock
-reads and in Wine each is a crossing into its unix side (`QueryPerformanceCounter`, about 52 ns
-headless under the engine; #28). The 1 in 16 is pseudo-random, so
-repeating sequences (Map/Unmap pairs, kinds in turn, a rename every n maps) are sampled evenly; it
-reuses the draw `PACE`'s `map` made for the same call with another value, so the two never time the
-same call and neither's clock reads land in the other's window. Counted with
-plain increments in the immediate context and handed over once per chunk; with `DXMT_STATS=0`
-nothing is counted. Deferred contexts' maps aren't in it.
+Every call is counted. A call on a buffer (dynamic or default usage) is timed when `PACE`'s `map`
+times it, one in 64 with `DXMT_MAP_FAST` and scaled by 64, every other call (textures, staging,
+unmappable) always, because a timed call costs two clock reads and in Wine each is a crossing into its
+unix side (`QueryPerformanceCounter`, about 52 ns headless under the engine; #28). The 1 in 64 is
+pseudo-random, so repeating sequences (Map/Unmap pairs, kinds in turn, a rename every n maps) are
+sampled evenly. Since #150 the two lines time the same calls: when `PACE` times a call, `MAP` takes
+that interval instead of reading the clock again, so it starts before the device lock is taken. Only a
+call `PACE` doesn't time (a texture's or staging map the sampler skipped) is timed by `MAP` alone, from
+after the lock. Every interval loses the clock's own cost (`clockfloor` on the startup line), so an
+empty `Unmap` reads near 0 ms instead of one clock read, and a bucket can read a hair below 0. Counted
+with plain increments in the immediate context and handed over once per chunk; with `DXMT_STATS=0`
+nothing is counted. Deferred contexts' maps aren't in it. The `queued` fields (#251) come from a list of
+the live dynamic buffers and linear textures that DXMT keeps with `DXMT_STATS` or `DXMT_RENAME_TRIM` on
+(a resource enters it when it is created and leaves when it is destroyed). A thread of their own, `dxmt-rename-queues`,
+started with the first listed resource, sleeps 2 s between walks. A walk takes each resource's lock in
+turn, sweeps its queue with `DXMT_RENAME_TRIM` on (#265), adds up what stays, and holds the list's lock for 256 resources at a time, which is what
+creating or destroying a resource can wait for. The `MAP` line shows the last finished walk's totals;
+the presenting thread does no walking. A resource destroyed during a walk can make that walk miss one other resource. `Map`
+itself does nothing new for them; the immediate context stores its sequence id once per chunk.
 
 | Field | Meaning |
 |---|---|
 | `fast` | `DXMT_MAP_FAST` (1 or 0) |
-| `calls`, `ms` | All of `MAP`'s calls per frame, and their summed time (ms per frame, an estimate where sampled). The same calls as `PACE`'s `map`, timed after the device lock is taken and without `PACE`'s own timer, so a little lower |
+| `calls`, `ms` | All of `MAP`'s calls per frame, and their summed time (ms per frame, an estimate where sampled). The same calls as `PACE`'s `map`, and for buffers the same interval (#150), so `ms` and `PACE`'s `map` read the same time for them |
 | `renames` | Map(`WRITE_DISCARD`)s per frame that used up the buffer's page and took a new allocation (the others step to the next suballocation of the page) |
 | `created` | Of those, the ones that found no free allocation and made a new Metal buffer, per frame (should be near 0 after the first seconds) |
 | `grown`, `dropped` | Window totals: renames that doubled a buffer's page (`DXMT_MAP_FAST`), and renames that dropped free allocations instead of reusing them (smaller pages after growth, a default-usage buffer's first allocation) |
+| `queued`, `queued.mb`, `queued.age` | (#251) At the last walk (walks are 2 s apart), not per frame: the allocations waiting in the rename queues of every live dynamic buffer (dynamic textures that `Map` through a buffer included) and dynamic linear texture, their bytes in MB (10⁶ bytes, as `RESIDENCY`'s `mb`: a buffer's whole page, a linear texture's image), and the oldest one's age in sequence ids (chunks): the immediate context's sequence id at its last commit before the walk ended, minus the id the allocation was given back in. 0 when nothing is queued. Reuse doesn't shrink a queue: a rename takes one allocation for each it gives back, and drops others only when they no longer fit (`dropped`), so a buffer keeps the queue of its busiest moment until it's destroyed. Counted are the allocations the GPU may still use too (given back within the last few chunks) and the ones a deferred context's command list gave back; a resource's current allocation isn't. Read next to `RESIDENCY`'s `mb`: `queued.mb` is the memory a trim of the queues could give back at most, and a large `queued.age` means queues no `Map` reaches any more |
+| `swept`, `swept.mb` | (#265) Only with `DXMT_RENAME_TRIM` on, so with it off the line is as before. Window totals: the allocations the sweeps gave back, and their bytes in MB (as `queued.mb`). `queued` counts what stays after them |
 | `<kind>.<op>` | A bucket that had calls: calls per frame / ms per frame. Kinds: `cb`, `vb`, `ib`, `buf` (dynamic-usage buffers by bind flag: constant, else vertex, else index, else other), `dcb`, `dvb`, `dib`, `dbuf` (default-usage buffers by the same flags: their maps are `UpdateSubresource`'s, a whole-buffer update is a `discard`), `tex` (dynamic texture), `lintex` (dynamic linear texture), `staging` (staging buffer or texture), `other` (nothing `Map` maps). Ops: `discard` (`WRITE_DISCARD`), `nooverwrite`, `read`, `write`, `readwrite`, `invalid` (another map type), `unmap` |
 
-`UpdateSubresource` of a buffer counts as one `Map` and one `Unmap`, as in `PACE`. Reading it: the
+`UpdateSubresource` of a buffer counts as one `Map` and one `Unmap`, as in `PACE`. With
+`DXMT_MAP_FAST` an update on the fast path makes neither call (#145), and the
+immediate context counts the two itself. It times the update once, on `PACE`'s draw (one in 64): both
+lines take that one interval, from after the device lock to before the copy (the copy was never in
+either, and the lock is taken once for the update). `MAP` puts it on the `Map`'s bucket (`dcb.discard`, `dcb.nooverwrite`), so
+`dcb.unmap` keeps its count and reads 0 ms for those updates. Its calls and the `discard` counts are
+the ones the nested `Map` and `Unmap` gave. Reading it: the
 bucket with the most calls is the path to look at. `dcb.discard` + `dcb.unmap` would be bgfx's
 uniform upload (`UpdateSubresource` of a default-usage constant buffer per draw); `cb.discard` the
 game's own `Map(WRITE_DISCARD)` of a dynamic constant buffer; `staging.read` readbacks, whose GPU waits are in
@@ -706,7 +746,7 @@ aren't estimated either.
 
 | Field | Meaning |
 |---|---|
-| `resident` | DXMT allocations in the set now (a linear texture and its buffer count once) |
+| `resident` | DXMT allocations in the set now (a linear texture and its buffer count once); on Metal 4 (#153) also d3d11's pipelines and the argument-buffer ring's blocks, unless `DXMT_MTL4_DEVICE_RESIDENCY=0` |
 | `mb` | Their bytes (MB = 10⁶): buffers by length (a suballocated page whole), linear textures by their buffer, other textures estimated from the descriptor (all mips, layers and samples, uncompressed; BC by block) |
 | `adds`, `removes` | Allocations that entered and left the set in the window |
 | `commits` | Set commits in the window: at most one per command buffer commit, only when the set changed |
@@ -770,8 +810,8 @@ its inputs; a warm stage skips such a recipe.
 ### WARM
 
 `WARM functions= pipelines= skipped= airmiss= failed= nofunctions= live=variants:N,pipelines:N joins=
-[planned=recipes:N,functions:N,pipelines:N read=ms capped= othertarget= malformed= readerror= busy= oversized=
-buffer=KB order=use used=N/M newest= oldest= useerror=|order=rowid]` (W2/W3), with
+jobs=N/M [planned=recipes:N,functions:N,pipelines:N read=ms capped= othertarget= malformed= readerror= busy= oversized=
+buffer=KB order=use used=N/M newest= oldest= useerror=]` (W2/W3), with
 `DXMT_WARM` on, every 2 s window.
 
 | Field | Meaning |
@@ -783,12 +823,13 @@ buffer=KB order=use used=N/M newest= oldest= useerror=|order=rowid]` (W2/W3), wi
 | `nofunctions` | Warm pipelines whose functions couldn't be warmed: left to their first use |
 | `live` | Live variant and pipeline jobs that found their result done in the shared tables (each one a build saved): when they were created (then they aren't submitted, and a demand needs no worker), or when they ran |
 | `joins` | Live jobs that found a warm job building their key and waited for it instead of building it again |
-| `planned` | Once, after the warm thread's read: recipes planned (by use, #124, or rowid order with `DXMT_WARM_ORDER=rowid`; up to `DXMT_WARM_MAX`), functions and pipelines queued, the read's time, and records skipped (`capped`: every recipe over `DXMT_WARM_MAX`, since the read goes on to the end of the file; before, only the rest of the 1 MiB batch that reached the cap was counted, so the 2026-11-04 UAT's `capped=575` was really 1,624 of 3,672; another Metal target; malformed) |
+| `jobs` | (#159) The most speculative jobs that ran at once in the window (a job still running from the window before counts) / `DXMT_WARM_JOBS`. Above 1 only with `DXMT_WARM_JOBS` above 1 and warm builds averaging 1 ms or more: the cold cache's sign. `0/1` once the plan is done |
+| `planned` | Once, after the warm thread's read: recipes planned (by use, #124; up to `DXMT_WARM_MAX`), functions and pipelines queued, the read's time, and records skipped (`capped`: every recipe over `DXMT_WARM_MAX`, since the read goes on to the end of the file; before, only the rest of the 1 MiB batch that reached the cap was counted, so the 2026-11-04 UAT's `capped=575` was really 1,624 of 3,672; another Metal target; malformed) |
 | `readerror` | With `planned` (#114): 0 when the recipes were read to the end; else SQLite's result code of the batch that failed, e.g. `5` (`SQLITE_BUSY`, still locked after the retries), and the read stopped there: the recipes before it are planned, the rest are left to their first use. `1` also when the bridge gave an answer the read couldn't step past. #117: a recipe file that exists but won't open or prepare is reported too, e.g. `26` (`SQLITE_NOTADB`: damaged or not a database), `11` (`SQLITE_CORRUPT`), `14` (`SQLITE_CANTOPEN`); `0` with an empty plan means no recipe file or no recipe table yet (a new or empty file) |
 | `busy` | With `planned` (#114): `SQLITE_BUSY` retries bridge call 193 made (2 ms apart, at most 50 per batch) before it read on or gave up |
 | `oversized` | With `planned` (#114): rows larger than 16 MiB, skipped (a recipe is about 420 B); the rows after them are still read |
 | `buffer` | With `planned` (#114): the read buffer's final size: 1024 KB, or larger when a row didn't fit in 1 MiB (the buffer grows to it, up to 16 MiB) |
-| `order` | With `planned` (#124): `use` or `rowid` (`DXMT_WARM_ORDER`) |
+| `order` | With `planned` (#124): always `use`. The plan takes the use rows first (`DXMT_PSO_RECORD_USE`), then every recipe of the target; ranked by the newest session that used it, then by the number of sessions, then rowid; the first `DXMT_WARM_MAX` are planned and submitted in first-use order (the character select first), recipes without use rows (recorded before #124, or unused since) after them in rowid order. A file without use rows plans the oldest recipes first |
 | `used` | With `order=use`: planned recipes that have use rows / every recipe of the target that has them |
 | `newest` | With `order=use`: the newest session number in the use rows (the file's counter) |
 | `oldest` | With `order=use`: how many sessions before `newest` the planned recipe used longest ago was last used (0: all in the newest session); `-` when no planned recipe has use data |
@@ -811,9 +852,9 @@ totals (2 s). It shows the check is running; the
 | `early`, `total` | Releases of DXMT's last reference to an object before the GPU completed the last chunk that used it: in the window, and since the start. Both should stay 0 |
 
 What a chunk uses and who holds it until the finish thread retires the chunk
-(`src/dxmt/dxmt_gw2_lifetime.hpp`). The retirement ledger's holds (`src/dxmt/dxmt_gw2_retirement.hpp`) and the teardown waits act only with
-`DXMT_UNRETAINED=1` (the default) or the check; with both off the retained command buffers hold those objects, as
-upstream:
+(`src/dxmt/dxmt_gw2_lifetime.hpp`). The retirement ledger's holds (`src/dxmt/dxmt_gw2_retirement.hpp`) and the Metal 3 drain's teardown waits act only
+with `DXMT_UNRETAINED=1` (the default) or the check; with both off the retained command buffers hold those objects,
+as upstream. The device's wait for its committed chunks before its caches go runs either way (#316):
 
 | Object | Stamped as | Held by |
 |---|---|---|
@@ -838,7 +879,7 @@ A drawable's texture is held by Core Animation, not by DXMT, so it is stamped bu
 
 `DXMT_METAL4` (jdrly/dxmt #32, the Metal 4 plan's phase 2; GW2 on Mac
 `docs/research/dxmt-metal4-plan-2026-11-03.md`), in four pull requests (#48, #49, #50 and part 4).
-On by default since 2026-11-04 (#32's follow-up): Jan played 10 minutes on it with no device
+On by default since 2026-11-04 (#32's follow-up): I played 10 minutes on it with no device
 errors, no `missed` resources and no visual problems, and waived the separate A/B. `DXMT_METAL4=0`
 restores Metal 3 exactly.
 
@@ -898,7 +939,8 @@ ring of 4 slots over 24 chunks, split commits, a queue-level event wait.
 encodes into a `WMT::CommandBuffer` as before (upstream's code, only re-indented where Metal 4
 branches off), on Metal 4 into a `gw2::Mtl4Encoding` with the same encoder and event calls:
 
-- Command buffers begin when an encoder needs one, on the chunk slot's allocator; a queue-level
+- Command buffers begin when an encoder needs one, on the allocator the chunk took from the queue's
+  pool (#204; with `DXMT_MTL4_ALLOCATOR_POOL=0`, on the chunk slot's allocator); a queue-level
   event (`SignalEvent`, `WaitForEvent`, the chunk's own completion event) commits the open buffer
   and signals or waits at the queue, which is where Metal 4 has them. The chunk's completion event
   is its last queue operation, so the finish thread waits for it as well as for every commit's
@@ -920,9 +962,20 @@ branches off), on Metal 4 into a `gw2::Mtl4Encoding` with the same encoder and e
   each pass, and every `UseResource`'s resource (a texture view's parent, a buffer-backed texture's
   buffer, a heap-placed resource's heap). So what the device set leaves out (heap-placed, IOSurface,
   CPU-placed, DXMT's bare buffers, the argument-buffer ring, internal pipelines) is resident for the
-  chunk that uses it. `METAL4 missed` counts a `UseResource` with no set: it must stay 0.
+  chunk that uses it. `METAL4 missed` counts a `UseResource` with no set: it must stay 0. Since
+  #153 what the device's set holds stays out of the chunk's set, and a chunk's set is committed,
+  used and emptied only when it has allocations (the default; `DXMT_MTL4_DEVICE_RESIDENCY=0` puts every allocation back into the chunk's set).
+- **What validation catches** (#153, my M5 Max, macOS 27, `tests/gw2/mtl4_bridge_test.m`): with an
+  allocation marked resident but left out of every set, `MTL_DEBUG_LAYER=1` alone reports nothing.
+  A buffer left out (the argument buffer) still drew right under it; `MTL_SHADER_VALIDATION=1`
+  caught it (the draw read zeros). A pipeline left out ran right under both, unreported. So a
+  residency hole has to be ruled out by how allocations enter and leave the sets, not by the layers.
 - The timestamp readbacks read the chunk's commits' feedback (exact: the last buffer's end;
-  estimate: each buffer's span from the position it began at).
+  estimate: each buffer's span from the position it began at). A chunk with queries and no command
+  buffer begins one for them. A chunk whose last buffer is already committed (the present's, in a
+  GW2 frame) begins one only when a queue-level wait came after that buffer, so queries after the
+  present read the present's (#154, the default). With `DXMT_MTL4_TIMESTAMP_REUSE=0` it always begins
+  an empty one after it, as before #154.
 - MetalFX stays on Metal 3: `DXMT_METALFX_SPATIAL_SWAPCHAIN=1` keeps the device there, and a device
   on Metal 4 doesn't offer the temporal scaler of DXMT's context extension (`CheckFeatureSupport`
   says no; `TemporalUpscale` logs once and does nothing). A MetalFX encoder that still reaches the
@@ -942,35 +995,44 @@ branches off), on Metal 4 into a `gw2::Mtl4Encoding` with the same encoder and e
 - The queue waits for the drawable (`waitForDrawable`: the command buffers committed after it), the
   present pass is encoded into a command buffer of its own (the drawable's texture stays out of the
   chunk's residency set: a driver-owned set would pin drawables and starve `nextDrawable`, d9mt;
-  the layer's own residency set covers them, attached to the queue at a presenter's first present
-  and removed when the presenter goes), committed, then `signalDrawable` and the drawable's own
+  the layer's own residency set covers them, used by the present pass's command buffer, #184),
+  committed, then `signalDrawable` and the drawable's own
   present: `presentAfterMinimumDuration:` (the cap), `presentAtTime:` now + the deadline
   (`DXMT_PRESENT_DEADLINE`, the control file), or `present`. PRESENT's presented handler, the
   pacing and the background throttle are unchanged (they live in the swapchain and on the
   drawable).
 - With it the path is complete: `DXMT_METAL4=1` takes it on a device that has Metal 4.
+- This sequence is `DXMT_MTL4_PRESENT=mtl4`, my fork's default and what 0.1.x runs. The GW2 on Mac
+  app sets `mtl3` (#227) for the arm64 engine, where a moving pointer made this order lose a refresh
+  (#223, ADR 0008): it replaces the sequence with Metal 3's on the same device. See the switch table.
 
 `tests/gw2/mtl4_bridge_test.m` also checks that an `MTLFence` orders two separately committed
-command buffers (the present split and queue-level events depend on it) and runs the present
-sequence on a layer without a window.
+command buffers (the present split and queue-level events depend on it), that an encoder with no
+command in a command buffer of its own passes a fence's order on to a third one (#353: the
+`DXMT_MTL4_PRESENT_FENCES` and `DXMT_PRESENT_SKIP_NIL` encoders), and runs the present sequence on a
+layer without a window.
 
 ### METAL4
 
-`METAL4 commits= buffers= allocmb= slow= errors= resadds= missed= unsupported= bytesover= blitbar=` (jdrly/dxmt #32), only on the Metal 4 path, with
+`METAL4 commits= buffers= allocmb= allocators= allocheld= slow= errors= resadds= missed= unsupported= bytesover= blitbar= present= [shown=]` (jdrly/dxmt #32), only on the Metal 4 path, with
 `DXMT_STATS`; window totals (2 s).
 
 | Field | Meaning |
 |---|---|
 | `commits` | Metal 4 commits (command buffers) in the window |
-| `buffers` | The most command buffers one chunk committed (1, or 2 with the present split) |
+| `buffers` | The most command buffers one chunk committed (1, or 2 with the present split, more when a queue-level event falls between encoders). 2 in GW2 (#154). With `DXMT_MTL4_TIMESTAMP_REUSE=0` a frame with timestamp queries adds an empty one after the present: 3 |
 | `allocmb` | The largest command allocator's memory (MB) at its reset: how much command memory a chunk's slot holds |
+| `allocators` | (#204) Metal 4 command allocators alive now, every queue's: the pool's, in use and idle (#204), or with `DXMT_MTL4_ALLOCATOR_POOL=0` the chunk slots' (32 per queue by default). A gauge, not a window total |
+| `allocheld` | (#204) The sum of those allocators' memory (MB) at their last reset (an allocator not reset yet counts 0). A reset keeps the memory, so this is the command memory they hold between chunks. A gauge |
 | `slow` | Chunks the finish thread waited for over a second |
-| `errors` | Commits whose feedback had an error (each also logged as a `Device error` line) |
-| `resadds` | Allocations the replays added to the chunks' residency sets (repeats within one replay call left out) |
+| `errors` | Commits whose feedback had an error (each also logged as a `Device error` line). With `DXMT_MTL4_PRESENT=mtl3` (#227), failed Metal 3 present buffers too |
+| `resadds` | Allocations the replays added to the chunks' residency sets (repeats within one replay call left out). Since #153 only what the device's set doesn't hold: the present pass's pipeline, backbuffer and gamma texture, `UseResource`, blit operands, the visibility buffer, set textures and internal pipelines. About 930 a window in GW2 (measured 2026-11-16). With `DXMT_MTL4_DEVICE_RESIDENCY=0` every allocation a packet names: about 250,000 a window |
 | `missed` | `UseResource` packets with no residency set to take them: a resource the GPU may read as zeros or fault on. Must stay 0 |
 | `unsupported` | Packets the replays couldn't encode on Metal 4 (skipped). Must stay 0 |
 | `bytesover` | `Set*Bytes` with no bytes arena to go to (skipped). Must stay 0 |
 | `blitbar` | Barriers the blit replay put between consecutive copies |
+| `present` | (#227) `mtl4`: the Metal 4 present. `mtl3`: `DXMT_MTL4_PRESENT=mtl3` is in use, and the Metal 3 present buffers aren't in `commits` or `buffers` |
+| `shown` | (#271) Only with `DXMT_MTL4_SHOWN_WAIT=write` in effect (the default with `DXMT_MTL4_PRESENT=mtl3` on Metal 4, #332): `deferred:` Metal 3 presents whose wait for `shown` was left to a later write, `waited:` those waits placed before an encoder that writes the presented texture, `at:` where in their chunk, the share of the chunk's encoders encoded before the wait (0 to 1; 0.00 when none was placed). `at` near 1 means most of a frame runs before it touches the back buffer, so a long GPU frame can use the time the present pass waits for its drawable; near 0 the switch gains little. `deferred` above `waited` over a window: frames that didn't write the back buffer (the next write waits for the newest present) |
 
 ### SUBSAMPLE
 
@@ -1032,7 +1094,7 @@ At `Draw`, `DrawIndexed`, and `DrawInstanced`/`DrawIndexedInstanced` with one in
 ### DEPS
 
 `DEPS policy=legacy|compressed stages/f= strong/f= full/f= simplified/f= checkpoints/f= gaps= simplify_us/f=
-relation_checks/f= relation_us/f= encoders/f= waits/f= updates/f= checkpoint_waits/f=` (#132), after STATS with
+relation_checks/f= relation_us/f= encoders/f= waits/f= updates/f= checkpoint_waits/f= [presentcp= presentstale=]` (#132), after STATS with
 `DXMT_STATS` (counting is decided when the device is made), per frame of the 2 s window. Both policies
 report every field, so the two can be compared in the same place:
 
@@ -1048,6 +1110,10 @@ report every field, so the two can be compared in the same place:
   `encoders`, encoders left to encode; `waits` and `updates`, the `waitForFence`/`updateFence` they emit
   (a render pass once per fence of its pre-raster and fragment sets together); `checkpoint_waits`, of
   `waits`, those of encoders holding a checkpoint stage (the checkpoints' cost).
+- (#353) Only on Metal 4 (Metal 3's line has neither), counts in the window, not per frame: `presentcp`, the
+  presents that were checkpoints and whose fences didn't reach the Metal 4 queue (`DXMT_MTL4_PRESENT=mtl3`
+  with `DXMT_MTL4_PRESENT_FENCES` off); `presentstale`, the encoders (not frames) that waited on such a
+  present's fence before a shown wait ordered them behind it. Both are 0 with the switch on and without `mtl3`.
 
 Log lines: `Dependency compression: on (DXMT_DEPENDENCY_COMPRESSION=1): …` once when it acts, or
 `Dependency compression: requested but the queue is on Metal 3; …` once.
@@ -1057,25 +1123,232 @@ Tests: `tests/gw2/dependency_compression_test.cpp` drives the production tracker
 slot waits for every earlier update of that slot, as Metal 4 documents) and checks every RAW/WAR/WAW pair;
 a control without window or checkpoint must fail it. A fusion case (the production
 `fuseRenderPassFences`) checks that waits on a fused pass's own updates aren't counted as emitted.
+Since #353 it also has presents: the Metal 4 present's fences, `mtl3`'s (none reach the queue; the Metal 3
+buffer runs after every earlier commit and the next frame's first back-buffer write after its `shown`), and
+`DXMT_MTL4_PRESENT_FENCES=1`'s. A present on a checkpoint, the checkpoint that covers a present, and
+120 seeds of random frames must miss dependencies with `mtl3`'s, none with the other two, and
+`PresentFences` must count a stale wait wherever `mtl3`'s miss.
+
+## CI
+
+`.github/workflows/gw2.yml` (#162) checks every pull request into `gw2-on-mac` and every push to it on
+GitHub's runners, so nothing has to build on my Mac. The macOS jobs run on the `xcode-27` image (macOS 27)
+with Xcode 27.2, the one I build with. The toolchains are cached under their versions,
+so only the first run after a version change builds LLVM (about 25 minutes per architecture).
+
+- **Build x86_64, Build i386**: the build `scripts/build-dxmt.zsh` (GW2 on Mac) makes. Build i386
+  runs for a push only (#347): it builds 0.1.x's i386 DLLs, and 0.2's come from Build arm64. Release,
+  stripped, NVEXT off, Homebrew's mingw-w64 (GCC 16.2, which the job checks: `MINGW_GCC_VERSION`),
+  meson 1.12.1, LLVM 15.0.7 built for macOS 26.0 as airconv needs it. Wine's import libraries,
+  `winebuild`, `winemac.so` and `ntdll.so` come from 3Shain's Wine 8.16, as in upstream's CI. My
+  CrossOver engine isn't downloadable. The job checks that `winemetal.so` still loads both through
+  `@rpath`, so it finds the engine's copies. A compiler warning
+  fails the job unless `.github/gw2/warnings-<arch>.txt` lists it. The list keys a warning on its file
+  and message without the line, so moved code keeps its warnings, and a second warning of the same kind
+  in the same file gets through. The job prints the build's whole list. When a change removes a warning,
+  or has to keep a new one, that list replaces the file.
+  x86_64 also runs the meson `gw2` suite, `bridge-native-smoke` included, on the runner's Metal 3
+  device. `.github/gw2/unix-call.py` preprocesses `winemetal_thunks.c` with the build's own command
+  and requires `NSObject_retain`'s call to go through `__wine_unix_call_dispatcher` (#205).
+- **Build arm64** (#182, #215): the build for GW2 on Mac 0.2's engine, Mach9 0.4.0, made the way
+  Mach9's `bin/build-dxmt.sh` makes its own DXMT. One meson tree with `build-arm64ec.txt` builds the
+  ARM64X DLLs and the arm64 `winemetal.so`, a second with `build-win32.txt` the i386 DLLs, both with
+  llvm-mingw 20261104 (Mach9's pin). `build-arm64ec.txt` compiles for `-march=armv8.4-a` (#200). An M1
+  has every instruction that allows, and the ARM64X DLLs' atomics become LSE instructions (`ldadd`,
+  `cas`, `swp`) instead of load-exclusive/store-exclusive loops. `-mcpu=apple-m1` would be the exact
+  target, but llvm-mingw 20261104's clang stops with "Failed to evaluate function length in SEH unwind
+  info" on any Windows ARM64 target with Apple's tuning. `winemetal.so` is built by Apple's clang,
+  which targets Apple's cores already. They link against the engine's own `winemac.so`, `ntdll.so` and
+  import libraries, taken from its release tarball (pinned by SHA-256). `winebuild` comes from 3Shain's
+  Wine 11.2, since nothing of Mach9's engine is ever run. Then `.github/gw2/check-mach9.zsh` compares the
+  result with the engine's DXMT, without Wine: every DLL's machine (ARM64X or i386, as the engine's) and
+  builtin marker, every export of the engine's DLL of the same name in each view, `winemetal.so`'s
+  architecture, macOS floor and libraries, every symbol it imports from `winemac.so` and `ntdll.so`, and
+  `macdrv_functions`. It also compares `winemetal.dll` with the engine's `ntdll.dll`, per view: every
+  name it imports from it, and `__wine_unix_call_dispatcher`, which winecrt0 looks up at the first unix
+  call (#205). An export counts only with an address. `.github/gw2/exclusive-pairs.py` counts the
+  `ldxr`/`ldaxr` and `stxr`/`stlxr` in each ARM64X DLL's ARM64 and ARM64EC code (the CHPE code map's
+  ranges, so the x64 thunks aren't read), and the script prints the count per DLL and fails above a
+  fixed ceiling: the loops of the static libraries built for ARMv8.0, which aren't rebuilt (libc++ and
+  libc++abi, the mingw-w64 CRT, Mach9's winecrt0). The ceilings are 1,842 for `d3d11.dll`, 1,822 for
+  `dxgi.dll`, 1,774 for `d3d10core.dll` and 30 for `winemetal.dll`; without the flag `d3d11.dll` had
+  6,308. `.github/gw2/patchable-calls.py` (#248) reads each ARM64X DLL's x64 entries, those of its
+  `DXMT_HOTPATCHABLE` functions and exports, from the CHPE redirection metadata, follows every direct
+  call and tail call from each entry's ARM64EC body, and fails when one reaches another entry's x64
+  address. On ARM64EC a call to a patchable function enters its x64 entry even from inside the
+  module, so `Present` calling `Present1` ran a hook on both (the Steam overlay's) twice a frame.
+  `DXMT_HOTPATCHABLE_SHARED` in `src/util/util_hotpatch.h` gives such a pair a shared body on ARM64EC
+  only, so the x86_64 and i386 builds compile as before. The job then breaks a copy
+  (`.github/gw2/zero-export.py` clears two exports' addresses, an i386 DLL takes an ARM64X one's
+  place, the i386 `winemetal.dll`'s import of `NtQueryVirtualMemory` gets another name, and the
+  published 2483559 build's `dxgi.dll`, built without the flag and before #248, replaces the ARM64X
+  one) and requires the script to fail on exactly nine checks: those five, the misplaced i386 DLL's
+  exclusive pairs and x64 entries, which it can't read, and the old `dxgi.dll`'s exclusive pairs and
+  `CreateSwapChain` entering `CreateSwapChainForHwnd`. It also requires `patchable-calls.py` to find
+  the four crossings of that build's `d3d11.dll`, `Present` to `Present1` and `ResizeBuffers1` to
+  `ResizeBuffers` in both swap chains. Before that, `.github/gw2/unix-call.py`
+  shows what a bridge thunk calls in each tree: the ARM64EC half has to preprocess to
+  `__wine_unix_call_arm64ec`, and `#NSObject_retain`, disassembled from the unstripped
+  `winemetal.dll`, has to make no indirect call and branch straight to winecrt0's ARM64EC routine.
+  The script checks the target's address three ways: `llvm-nm` names it `__wine_unix_call_arm64ec`,
+  the image's CHPE code map puts it in an ARM64EC range (a native function of the same name would sit
+  in an ARM64 one), and the routine ends in winecrt0's `br x16`. The
+  i386 tree keeps `__wine_unix_call_dispatcher`. The engine's table has the 10 entries in the order `winemetal_unix.c` declares,
+  and its window data the same first four fields (athei/wine `501796b0ed`,
+  `dlls/winemac.drv/window.c`, which asserts both). No warnings list for this job yet: llvm-mingw's clang
+  warns differently from GCC.
+- **Native tests**: `zsh -n` on the zsh scripts and a self-check of `.github/gw2/warnings.zsh`, then
+  `tests/gw2/run.zsh all`, pure and metal in one call. `.github/gw2/switch-table.py` fails the job when
+  the [switch table](#switches) and the `DXMT_*` names `src/` reads differ, when a declared bool or
+  number default differs from the table's Default column, or when a row's Status doesn't start with
+  one of the five words. The zsh checks run here because macOS has zsh,
+  so they install nothing (#174). The runner's GPU is an Apple Paravirtual device
+  with Metal 3 and no Metal 4. There, `autorelease_count_test`, `commit_record_metal_test` and
+  `shared_event_listener_test` pass. `chunk_submission_test` and `mtl4fx_test` run their Metal 3 half and
+  skip, while `mtl4_bridge_test`, `mtl4_queue_test`, `mtl4_specialize_test` and `paired_replay_test` skip
+  outright (no Metal 4).
+  `thread_priority_test` skips
+  because the runner's jobs run clamped to the utility band (maximum priority 20). A skip shows as `skip`
+  with the test's reason. It never counts as a pass. The Metal 4 paths are still tested only on my Mac.
+  The display tests (`present_cursor_test`) only build here, with `tests/gw2/run.zsh display --build-only`.
+  A push skips this job when a green pull request run tested the same tree (the `tested` job, #273).
+  The push's parent also has to be an ancestor of that pull request's head (#310). Every job checks out
+  the head, but a pull request's run takes its workflow from GitHub's merge into `gw2-on-mac`, so only
+  then did it run the head's own steps.
+- **ccache** (#305, [ADR 0016](adr/0016-ccache-for-pull-request-builds.md)): the three builds compile
+  through ccache 4.14.3, ccache's own macOS release pinned by sha256, set up by `.github/gw2/ccache.zsh`.
+  The cross files name their compilers, so a directory of links named like them, ahead of `PATH` in the
+  `Build` step, puts ccache in front. meson adds it to Apple's `cc` and `c++` by itself, since it finds
+  ccache on `PATH`. There is one cache per job, toolchain and commit (#346). Every push to
+  `gw2-on-mac` saves one, `Build i386`'s excepted, and only a pull request reads one, the newest of its
+  job and toolchain. The toolchain text (Xcode and its clang, the macOS floor, the llvm-mingw pin,
+  each cross compiler's resolved path and version line, not the runner image's version) is in the
+  cache key and, as `CCACHE_COMPILERCHECK`, in every object's hash.
+  ccache's own check looks at the file it runs, which is a wrapper for llvm-mingw, a link for Homebrew's
+  GCC and a shim for Apple's clang, so it wouldn't see a compiler change. llvm-mingw's path holds no
+  version, so its pin is in every job's text, and a new pin starts new caches for all three. A push
+  never reads a cache: it compiles through an empty ccache and saves it, so a published archive is
+  always its commit's own compile. A hit trusts headers recorded at an earlier compile, and ADR 0016
+  says where that can go stale. Each build job prints ccache's statistics for its own run and the
+  runner's core count into its summary.
+  `Build arm64` prints one block per tree (#307). Its ARM64X tree, `build-arm64`, compiles in ccache's
+  depend mode (`CCACHE_DEPEND=1`): clang refuses `-marm64x` together with `-E`, so ccache couldn't
+  preprocess the tree's 106 cross compiles and cached none of them. Depend mode reads the headers
+  from the `-MD` file the compile writes instead. That file holds the ARM64EC half's headers only, so
+  a header that only the AArch64 half includes goes unhashed (ADR 0016).
+- **Lint**: actionlint on the workflow (`.github/actionlint.yaml` names the `xcode-27` label it doesn't
+  know yet).
+- **Artifact** `dxmt-<commit>`: the build as `build-dxmt.zsh` stages it (`x86_64-windows`,
+  `i386-windows`, `x86_64-unix`, `VERSION`, the licenses), kept 7 days. A pull request's has no
+  `i386-windows` (#347). On a pull request the commit is the branch's head, not GitHub's merge
+  commit, so `VERSION` and the startup line name it. To play it, unzip it into a directory, then
+  run `scripts/dxmt-use.zsh save <name> <dir>` and `scripts/dxmt-use.zsh <name>`.
+- **Artifact** `dxmt-arm64-<commit>` (#182, #215): the arm64 build in the layout of the engine's
+  `lib/wine/dxgi/dxmt` (`aarch64-windows`, `i386-windows`, `aarch64-unix`), the licenses and `VERSION`:
+  its first line is the `git describe` that `d3d11.dll` carries, then `commit:`, `engine:` (the tarball,
+  its SHA-256 and the Wine version its `ntdll.so` carries) and `toolchain:`. Kept 7 days. In the engine
+  the tree's `aarch64-unix/winemetal.so` is a link to `lib/wine/aarch64-unix/winemetal.so`, which serves
+  the i386 DLLs too.
+- **Publish** (#194): after every other job is green, packs `dxmt-arm64-<commit>` into
+  `dxmt-arm64-<commit>.tar.xz` (the same files at the archive's root, owner 0, directories and `.so`
+  755, the rest 644), checks that it unpacks to the artifact's files sha256 for sha256, and prints the
+  list and the archive's sha256. For a push to `gw2-on-mac` it adds the archive to the pre-release
+  `arm64-builds` of my fork, so a build stays downloadable past the artifact's 7 days, without a
+  token:
+  `https://github.com/jdrly/dxmt/releases/download/arm64-builds/dxmt-arm64-<sha>.tar.xz`, with the
+  full sha. GitHub reports each asset's sha256 as its `digest`
+  (`gh release view arm64-builds -R jdrly/dxmt --json assets`). One release, one asset per commit, the 30
+  newest kept. An asset that's there already is never replaced. The release is never marked latest, and
+  its tag is a lightweight one, which `git describe` and so `VERSION` skip. A run with a red job
+  publishes nothing. Native tests may be skipped on a push, and only when a
+  green pull request run tested the same tree. GW2 on Mac's dev build (jdrly/gw2-on-mac) takes its DXMT from this asset. Builds
+  from before #215 stay in the pre-release `mach9-builds`, which this workflow no longer touches.
+
+### Moving to a new Mach9
+
+The arm64 build is held to the engine it goes into, so a new Mach9 release moves these values
+together, in this fork and outside it. Line numbers drift, so search for the names. My Wine fork
+keeps the same list for its side: [`.github/gw2/MOVING.md`](https://github.com/jdrly/wine/blob/gw2-on-mac/.github/gw2/MOVING.md)
+on its `gw2-on-mac`. Its step 1 finds the Wine commit the new engine was built from, which two
+items here need.
+
+- `MACH9_VERSION` and `MACH9_SHA256` in `.github/workflows/gw2.yml`: the new tag, and the sha256 of
+  its `wine-<tag>-macos-arm64.tar.xz`, computed from the download.
+- `LLVM_MINGW_VERSION` and `LLVM_MINGW_SHA256` in the same `env:` block: Mach9's `pins/redist.env`
+  at the new tag, and the sha256 of llvm-mingw's `ucrt-macos-universal` tarball of that version.
+- `WINE_ARM64EC_VERSION` and `WINE_ARM64EC_SHA256`, only if winebuild's `--builtin` marker changed
+  in the new engine's Wine. The job takes nothing else from it.
+- `pair_ceiling` in `.github/gw2/check-mach9.zsh`, the exclusive-pair ceilings, and the comment
+  above it, which names both versions. They move when llvm-mingw's static libraries or Mach9's
+  winecrt0 do. I take the new counts from the first run's printed numbers and say in the pull
+  request why they moved.
+- The link-order comment at the top of `src/winemetal/meson.build`. It names Wine 11.21, whose
+  winebuild generates the CHPE metadata that decided the order. If the new Wine's winebuild or
+  winecrt0 changed there, the link may fail on a symbol defined twice again.
+- `-march=armv8.4-a` in `build-arm64ec.txt`, and whether the new llvm-mingw's clang takes
+  `-mcpu=apple-m1` without the SEH unwind error.
+- The `macdrv_functions` table and the window data that `winemetal_unix.c` declares. The check sees
+  only the name, so I read the new Wine commit's `dlls/winemac.drv/window.c` by hand and move the
+  commit named in "Build arm64" above (athei/wine `501796b0ed`).
+- The broken-copy step's old build (`UNFLAGGED`, the published 2483559 build in `mach9-builds`).
+  It stays valid as long as that release exists. The step requires exactly nine failures, so if the
+  new engine's exports make the old `dxgi.dll` fail another check too, the count moves.
+- The text of "Build arm64" above: Mach9 0.4.0, llvm-mingw 20261104 (twice), the four ceilings and
+  the Wine commit.
+- Outside this fork, in the same evening: the same Mach9 and llvm-mingw pins in my Wine fork's and
+  my FEX fork's workflows (both in that list), and the engine pin in my app on its `arm64` branch:
+  the `ENGINE_*` block and `MACOS_MIN` in `src/gw2om.sh`, the `engine:` lines of
+  `.github/workflows/checks.yml`, the engine in `scripts/test-sandbox.sh`, and `README.md`. The app
+  moves in one dev build with all three forks' archives.
+
+Two things need no edit. The footprint step reads `origin/main`, upstream's mirror, so Mach9 doesn't
+touch it. ccache's key holds the llvm-mingw pin and each cross compiler's resolved path and version
+line, read on the runner: a new llvm-mingw pin starts new caches for all three builds, and a new
+Homebrew GCC for the two GCC builds, by themselves. The Mach9 version isn't in the key.
+
+The macOS floors differ: 26.0 here, one value for all three builds, where `check-mach9.zsh` only
+requires `winemetal.so` to need no newer macOS than the engine's own, and 26.4 in my Wine fork,
+which is Mach9's `MACOS_FLOOR` because its files replace the engine's. A move is the time to decide
+whether the arm64 build should take the engine's floor too.
 
 ## Native tests
 
-`tests/gw2/run.zsh [pure|metal|all] [--meson <build dir>]` (X1) builds and runs every registered test
-under `tests/gw2/`, on the Mac, with no Wine and no game. A test registers in its header:
-`// gw2-test: pure` (no Metal device) or `metal`, one or more `// gw2-build:` lines (zsh, from the
+`tests/gw2/run.zsh [pure|metal|display|all] [--build-only] [--meson <build dir>]` (X1) builds and runs
+every registered test under `tests/gw2/`, on the Mac, with no Wine and no game. The CI runs it too
+([CI](#ci)). A test registers in its header: `// gw2-test: pure` (no Metal device), `metal` (a Metal
+device, or a real Mac as `thread_priority_test` needs; `run.zsh metal` is the Mac run in
+[CONTRIBUTING](../../.github/CONTRIBUTING.md#the-mac-run)), or `display` (a full-screen window in a GUI session; run only by name, never by `all`). `--build-only`
+builds the selected tests and runs none. Then come one or more `// gw2-build:` lines (zsh, from the
 checkout's root, writing `$OUT`) and optional `// gw2-run:` lines (default `"$OUT"`). A failed build or
 a nonzero exit fails the run; exit 77 is *skipped*, never counted as passed; a test without the lines
 is listed as unregistered. `--meson <build>/x64` adds the meson tests of the `gw2` suite (B1's
 `bridge-native-smoke`). Native tests take their threads from `tests/gw2/shim/thread.hpp` (X2):
 `dxmt::thread`, `mutex` and `condition_variable` are `std::`'s and priorities are no-ops, so a test
-checks coordination, not Wine's scheduling.
+checks coordination, not Wine's scheduling. I build the selected tests first, `GW2_TEST_JOBS` at a
+time (default: my Mac's CPU count), print `built <n> tests in <s> s`, and then run them one after the
+other in name order, so no test runs beside a compiler. A test whose build lines name a file in `$T`
+itself, not `$OUT` or `${OUT}_<suffix>`, may share that file with another such test, so I build those
+in a chain, one after the other (#308). The tests that link the bridge's unix side share its objects
+that way (#326): each skips an object that is already there, and every run deletes them first, so a
+kept `GW2_TEST_DIR` never hands over objects of older sources. `autorelease_count_test.m` compiles
+its own with `-O2`.
 
-`compile_service_test.cpp` (C1) holds the compile service's legacy parity fixture: scripted job graphs
-(GW2-shaped bursts of pipelines sharing variants, parking, failures, the spurious-dependency rerun,
-growth to 2 × CPUs) run against the service and against the scheduler it replaced
-(`tests/gw2/fixtures/legacy_task_scheduler.hpp`, unchanged), with every worker's job held at a gate
-and released one at a time; the traces (which jobs run, what they return, the worker count) must be
-identical.
+`compile_service_test.cpp` (C1) runs scripted job graphs (GW2-shaped bursts of pipelines sharing
+variants, parking, failures, the spurious-dependency rerun, growth to 2 × CPUs) through the compile
+service, with every worker's job held at a gate and released one at a time. No scenario may get
+stuck, every job completes exactly once, and the queue's count returns to zero. Until #198 it also
+ran them through the scheduler the service replaced and compared the traces
+([ADR 0015](adr/0015-compile-service-tests-without-the-old-scheduler.md)). Since #303 no check
+depends on how fast a worker reaches the gate: a scenario's step is settled when the jobs at the gate
+are as many as can run and the service counts exactly those as running, and the declared cases wait
+for the set of jobs they expect at the gate, then 8 ms more, and compare. Since #152 it also checks, for each `DXMT_COMPILE_PRIORITY` setting and both policies, that
+every worker, the first two and those a submit adds, applies the service's priority once, on itself,
+before its first job. Since #159 it checks `DXMT_WARM_JOBS` (`Options::speculative_jobs`) on the
+declared policy: one speculative job at a time while the runs are fast, and at 1 while they are
+slow; at 3 with slow runs, three at once beside a normal job on the extra worker, none started
+while a demand waits even with slots free, a demanded speculative job ahead of the one queued before
+it, and admission back to three when the demands end. A run's time comes from the fake clock (each
+job adds its `cost` while it runs), so no real time decides admission.
 
 `retirement_ledger_test.cpp` (L1, #66) checks the retirement ledger (`src/dxmt/dxmt_gw2_retirement.hpp`)
 with counting owners: nothing is released before its chunk retires, today's cross-category release
@@ -1086,7 +1359,9 @@ hold call site's former gate in each reachable configuration (Metal 3 retained o
 lifetime check, the residency set, Metal 4), with the scripted release-trace parity run per
 configuration. Since L3 (#91) retirement and drain take the completion tokens: an unbound ledger,
 another issuer's token (two queues, the same sequence), an empty (moved-from) token and another
-issuer's drained token are refused and release nothing.
+issuer's drained token are refused and release nothing. Since #316 `forEachHeldSplit` lists the split
+buffers of the unretired chunks for teardown's drain (`DXMT_DRAIN_SPLITS`), and none once their chunk
+retired or the ledger drained.
 
 `retirement_recovery_test.cpp` (#113) checks `DXMT_RETIRE_RECOVERY`'s recovery (`retireOrRecover`): a
 scripted queue with Metal 4's holds (drawable, presenter, present split) at rings of 32, 64 and 128,
@@ -1110,7 +1385,9 @@ the scripted adapter's `retireWaited` (the recovery after a refused retirement) 
 chunk once, with that wait's records, and nothing else; and `gw2::retireStep` as `RetireChunk` runs it,
 with empty tokens at a middle chunk and at the last committed one: the CPU fence follows the finish
 loop's sequence (so `WaitCommittedRetired` returns), the submission retires every chunk once, and the
-ledger releases only with a token's completion.
+ledger releases only with a token's completion. Since #316 the Metal 3 adapter gets the ledger's held
+split buffers at drain (`held_splits`, as `DXMT_DRAIN_SPLITS=1` passes them), and after `drain()` every
+split buffer of the two chunks never waited for has completed.
 
 `paired_replay_test.mm` (B4, #105) replays one frame's packet stream through both interpreters of the
 bridge's unix side, through the real table: Metal 3 (`winemetal_unix.c`, on `MTLCommandQueue` command
@@ -1125,19 +1402,14 @@ uses `MTL_SHADER_VALIDATION=1`: without it a missing residency doesn't show. A k
 into the test's `kKnown` list (by readback) with its issue: the comparison and Metal 4's CPU checks of
 that readback are reported as XFAIL, Metal 3's still count, and XPASS fails the run (#107). If the layer
 gives no drawable, the rest is compared and the test exits 77 (skipped) unless something failed.
-
-The PSO archive (#75): `pso_archive_policy_test.c` (pure) checks keep, skip and classify under the
-legacy and the exact-shape policies; `pso_archive_publish_test.c` (pure, a fake shard writer) checks
-the generation publisher: round trips, a failure injected at each of its 7 steps leaving the last good
-generation, corrupt shards, manifests and index, the writer lock, collection and session retention.
-`pso_archive_test.m` (metal, arm64 and x86_64) drives sessions through the bridge's unix entry points:
-`pso_archive_parity.zsh` runs each scripted session (Metal's real re-serialization failure, fake packer
-failures, a truncated archive, the cap, retention, the exit report) through the instance with the
-publisher off and through #55's file (`tests/gw2/fixtures/legacy_pso_archive.c`, unchanged), and
-compares reports, counters, files and `.keys` byte for byte; `pso_archive_generations.zsh` checks the
-publisher across processes (hits, exclusion, last good generation, lock, a `kill -9`, merging, and
-exclusion-only generations: a fresh store's sole failing pipeline, a failing sole delta after a publish,
-a failed exclusion-only publish retried).
+A third run (#227) encodes the same frame on Metal 4 with the present as `DXMT_MTL4_PRESENT=mtl3`
+encodes it, in a Metal 3 command buffer ordered by the two events; its drawable must equal the Metal 4
+run's. `presenter_layer_set_test.mm` runs its swap-chain phases with both presents, then presents 320
+frames through the Metal 3 present, each with a back buffer of its own colour cleared on the Metal 4
+queue, with and without the frame's commit before the present, and checks that every drawable holds its
+own frame's colour, not the next frame's. It runs the colour check through the Metal 4 present too
+(#242), with fences ordering the clear, the pass and the next clear as the context's do and the drawable
+read back in the pass's command buffer.
 
 `shared_event_listener_test.m` (#127) runs the shared-event listener's real unix handlers
 (`winemetal_unix.c`'s `#ifndef DXMT_NATIVE` block, cut out of the source by its build lines, with a
@@ -1148,6 +1420,35 @@ destroy (dropped); the arm64 binary runs under AddressSanitizer. Before the port
 `0cd8b76e9a`, the joins hung. The last three need a Metal device: without one it runs the first two and
 exits 77, skipped, not passed (#131); a third run with `LISTENER_TEST_NO_DEVICE=1` checks that path.
 
+`com_assign_test.cpp` (#247) assigns a `Com` its own raw pointer while it holds the only reference,
+for the public and the private flavour, and checks that the object stays alive with one reference
+(`SwapDeviceContextState` does this with `state_object_`). Its objects count their references and
+mark themselves dead at zero without freeing, so the order before the port of athei/dxmt `dd7c5aa`
+(release, then reference) shows as a reference taken on a dead object. `tests/gw2/shim/unknwn.h`
+stands in for the names `com_pointer.hpp` takes from `<unknwn.h>`.
+
+`autorelease_count_test.m` (#252) counts what the bridge's creation calls autorelease on a thread
+without an autorelease pool, as GW2's render thread is. It links the real bridge like
+`paired_replay_test` and makes each call through its thunk on a plain pthread, with
+`OBJC_DEBUG_MISSING_POOLS=YES`: the runtime then writes a `MISSING POOLS` line for each object
+autoreleased with no pool, and the test counts that thread's lines around each call. On arm64 the
+runtime parks an autoreleased object in a thread-local slot until the thread's next autorelease, so
+each window ends with a sentinel's autorelease that pushes it out. The calls are
+those the front end makes when the game creates a resource or a state object: `newBuffer` (shared,
+private, CPU-placed), `newTexture`, `MTLBuffer newTexture`, `newTextureView`, `newSharedTexture`,
+`newSamplerState`, `newDepthStencilState`, and the residency set's `addAllocations` that follows a
+creation. Each runs once cold and then 100 times, and its release is counted apart. It prints a
+`RESULT <arch> <call>: first n, then n in 100; release n in 101` line per call, with the classes the
+runtime named, for x86_64 and arm64. A nonzero creation count doesn't fail it. Two controls must each count one
+(an object autoreleased on the fresh thread, and one after a pool was pushed and popped there), or the
+test fails. Since #269 a release count other than 0 fails it too: Apple's drivers autorelease their
+device on every release of a buffer, texture or view (the M1's `AGXG13GDevice`, the runner's
+`AppleParavirtDevice`), so the bridge's `NSObject_release` drains a pool of its own around a release
+that frees its object (`DXMT_RELEASE_POOL`). Checks that don't depend on the device come first: an
+object whose `-dealloc` autoreleases one must count one after a plain `-release` and none after
+`NSObject_release`, and a pool released through `NSObject_release` must drain without the runtime
+aborting.
+
 `clock_bench.cpp` (#28) is not a native test: it is a Windows .exe that measures the clocks PE code
 can read (ns per call, step size, backward steps), and `tests/gw2/clock_bench.zsh <engine> <scratch dir>`
 runs it headless under an APFS clone of the engine in a throwaway prefix (winemac disabled). It chose
@@ -1156,20 +1457,12 @@ runs it headless under an APFS clone of the engine in a throwaway prefix (winema
 the unix side; `KUSER_SHARED_DATA`'s interrupt time is a 1.4 ns read but changes only when the
 wineserver wakes (about every 18 ms in an idle process).
 
-The native PSO archive tool (#111): `pso_archive_tool_test.mm` (metal) builds the tool for x86_64 and
-arm64 and a generator that writes synthetic recipes from real AIR: an isolated copy of DXMT's AIR
-cache (`$GW2_AIR_DB`, else lane C's `work/dxmt-squeeze/native/w0/sample.db` in the GW2 on Mac
-workspace; skipped without it), copied again into the test's directory. Its recipes go through C3's
-serializer in five shapes (full VS/PS, blending, sparse color slots, MSAA, fragment-less), each checked
-to build on the device. `pso_archive_tool.zsh` then checks that `run` publishes all of them, that fresh
-processes on both architectures hit every one, `status`, the refusal under a held writer lock (the
-store unchanged), a second run's newer generation, an injected crash at one recipe isolated by
-the bisection, the rest published and hit, and six faked named packer failures (a third build with
-`PSO_ARCHIVE_TESTING`) excluded over several flushes, the rest published and the six classified as
-excluded misses. First, without AIR or Metal (so even when the rest is skipped), `DXMT_CACHE_DIR`
-(#136): empty or relative, `status` warns once and its defaults stay under the user cache dir;
-absolute, they are under it; longer than `PATH_MAX`, `status` and `run` exit 1 unless every path is
-given.
+`stagecache_bench.m` (#159) is not a native test either: it needs DXMT's recorded recipes and the AIR
+they use. It replays the R rows of `recipes_1.db` with their AIR from `shaders_320.db` on the real
+device, as warming does (every function, then every pipeline), on 1 to 16 threads, and prints each
+phase's wall time, the builds by class (both functions new, one seen, …) and a `RESULT threads=
+wall=` line. Its header has the build line and where Metal keeps the tool's own cache, which has to
+be deleted before each cold run. It started as the perf review's one-thread `stagecache` (2026-11-10).
 
 `cache_dir_test.mm` (pure, #134) checks `DXMT_CACHE_DIR` through the bridge's unix side: absolute, a
 cache open (`CacheWriter`, `CacheReader`) creates `<dir>/dxmt/<exe>/<file>` and nothing in the user cache
@@ -1178,46 +1471,148 @@ relative, it is ignored (no directory created relative to the working directory)
 buffer, the base is refused, not truncated. The PE side's parse (`dxmt_gw2_cache_dir.hpp`, which logs
 and shows the base) agrees with the unix side on each value.
 
-## PSO archive tool
+`update_scope_test.cpp` (pure, #145) checks `gw2::UpdateScope`, the counting of a one-call update:
+`MAP`'s buckets and `PACE`'s `map` calls come out the same as the nested
+`Map` and `Unmap` scopes give for the same updates, an update inside another entry point's scope is
+left to that scope in `PACE`, and the 1 in 64 timing, scaled, lands near the true time, with `MAP` and
+`PACE` taking the same interval. Since #150 it also checks the clock's floor (an empty interval reads 0
+on average, though the clock steps 100 ns), that a buffer's `Map` reads the clock twice a timed call
+(the shim counts `QueryPerformanceCounter` calls) with `MAP` and `PACE` on the same interval, and that
+a texture's `Map` is still timed on every call at scale 1.
 
-`tools/gw2/pso_archive_tool.cpp` (#111) is a macOS executable, not part of the DLL build: it builds
-the pipelines W1 recorded (`recipes_1.db`, `DXMT_PSO_RECORD`) after the game exits and publishes them
-as one generation of the PSO archive store, which a session with `DXMT_PSO_ARCHIVE=1
-DXMT_PSO_GENERATIONS=1` loads for lookup (see [COMPILE](#compile), *Generations*). It runs the game's
-own code, linked natively: the recipes are read through the bridge's `CacheEnumerate` and planned by
-W2/W3's `warmPlanAdd` (same order and target filter as `DXMT_WARM`); each function comes from the AIR
-cache through `CacheReader` (read-only, never a translation); each pipeline is built by C3's
-`Metal3PipelineBuilder`, so `_MTLDevice_newRenderPipelineState`'s descriptor conversion and the
-archive's lookup and capture (`pso_archive_new_render`) are the bridge's; the store is opened and
-published with `WMTPSOArchiveInit`/`WMTPSOArchiveFlush` (generations, the exact-shape policy, its
-retries and the last good generation). Build it with `tools/gw2/build-pso-archive-tool.zsh <output>
-[x86_64|arm64]`; GW2 on Mac wraps it as `scripts/pso-archive-tool.zsh build|run|status`.
+`create_line_test.cpp` (pure, #202) checks the `CREATE` line's counting: the size classes at their
+edges, the buffer usage split, the render and depth targets, and the texture bytes estimate (mip
+chains, BC blocks, 3D, layers, and the depth formats' bytes on the Metal formats D3D11's depth formats map to). The kinds' calls and time must equal `PACE`'s `create` on the
+presenting thread's interval and in the other threads' pool; a nested `Create*` counts once, under the
+outer call's kind and description, and a `Create*` inside another entry point counts in neither. It
+runs a second time with `DXMT_STATS=0`, where a create must read no clock and leave every counter at 0.
 
-| Command | What it does |
-|---|---|
-| `run` | Builds every recipe in a child process and publishes one generation (this run is one session of the store: its shard, plus the newest 3 other sessions' shards). A publish failure that names a pipeline excludes its shape (the archive's exact-shape policy, 3 writes a flush); the child flushes again while the failures keep naming shapes (up to 64 flushes). A child that crashes, or whose publish fails without Metal naming a pipeline, is bisected in probe processes, each publishing a range into an empty scratch store no game reads; a recipe that fails alone is left out and the rest published (up to 4 rounds). Then a fresh process verifies the lookup |
-| `verify` | A fresh process builds the recipes against the published generation and reports hits and misses; it captures and publishes nothing |
-| `status` | Each store's current generation (shards, pipeline keys, size, excluded shapes), whether its writer lock is held, and the recipe file. Opens nothing for writing; probes the lock for an instant |
+`vblank_count_test.cpp` (pure, #250) checks the count behind `STATS`' `vblank`: `gw2::vblankCall()`,
+which is all `WaitForVBlank` does besides returning `S_OK`, made once, 1,000 times, then 100,000 times
+on each of 4 threads at once, and `gw2::vblankCalls()` must read back exactly the calls made. With
+`DXMT_STATS=0` the same calls leave it at 0. `dxgi.h` isn't built natively, so the test doesn't reach
+`WaitForVBlank` itself or the `IMTLDXGIAdapter` call STATS reads the count through.
 
-Options: `--cache-dir` (DXMT's per-exe cache, default `<base>dxmt/<exe>`, where `<base>` is `DXMT_CACHE_DIR` if it's absolute (#134), else `$(getconf DARWIN_USER_CACHE_DIR)`; the archive's default store is `<base>dxmt/pso`. An empty or relative `DXMT_CACHE_DIR` is ignored with one stderr warning worded like the DLL's, `pso_archive_tool: Caches: DXMT_CACHE_DIR="<value>" isn't an absolute unix path; ignored, …` (#136). A `<base>` that can't be resolved, a `DXMT_CACHE_DIR` longer than `PATH_MAX`, is exit 1 when a default needs it, never a path relative to the working directory),
-`--recipes`, `--air` (default `<cache-dir>/shaders_<target>.db`), `--archive-dir` (as
-`DXMT_PSO_ARCHIVE_DIR`; another directory is a store no game reads), `--exe` (default `Gw2-64.exe`),
-`--keep` (sessions a generation keeps, default 4 as the DLL), `--limit`, `--metal-version` (default as
-DXMT picks it: 320 on macOS 15+ with an Apple7 GPU), `--quiet`.
+`rename_trim_test.cpp` (pure, #265) builds the real `DynamicBuffer` and `DynamicLinearTexture`
+(`src/dxmt/dxmt_dynamic.cpp`) natively against fake `Buffer`, `Texture` and allocations defined in the
+test, with AddressSanitizer: each fake allocation records its birth and its free, and a free of one that
+isn't alive fails. A command queue is a `gw2::RenameClock` the test moves. It runs three times. With
+`DXMT_RENAME_TRIM=600` and `DXMT_STATS=0`: a burst of 20 renames on each kind, the clock 700 ids on, one
+walk empties the queue, `swept` counts the 20 and their bytes, and the current name stays; an allocation
+given back 601 ids before the clock goes and one 600 before stays, as does one ahead of the clock; a
+resource last mapped through another queue isn't swept by that queue's clock; then a thread destroys
+2,000 resources while the main thread walks, and each of their 22,000 allocations is freed once. With
+`DXMT_STATS=1` and the switch unset the queue stays at its peak and nothing is freed. With both off a
+walk counts nothing, because nothing is listed.
 
-Output lines (stdout): `RESULT recipes= selected= built= failed= nofunction= airmiss= fnfailed=
-othertarget= malformed= hits= misses= known= new= missexcl= excluded= skipped= generation= published=
-flush= mode=` per child (`failed`: Metal refused the pipeline, listed as `BUILDFAILED <index> <recipe key>
-<error>` without `--quiet`; `nofunction`: a function missing, its AIR (`airmiss`) or the library
-(`fnfailed`); `hits`/`misses` as the archive counts them; `skipped`: pipelines left out after Metal's packer named
-their shape; `mode` `writer` or `lookup`), `ISOLATED
-<index> exit=<code>` per recipe the bisection left out, `VERIFY …` (the verifying process's result) and
-`LEFTOUT <n>`. The archive's own report lines go to stderr.
+`getdata_flush_test.cpp` (pure, #158) checks `gw2::getDataSkipsFlush`, the rule of
+`DXMT_GETDATA_SKIP_FLUSH`: a poll of a query whose chunk is still being recorded flushes, a committed
+one's skips, and the switch off, `exact` or an unknown chunk flush as before. A loop of polls without
+`DONOTFLUSH` on a query of the current chunk flushes once and then skips.
 
-Exit codes: 0 done; 1 usage or input error (no recipes or AIR file, no device, no `<base>` for a default path); 3 the store is busy:
-another process (a running game with generations on) holds its writer lock, and nothing was written;
-4 publishing failed; 5 a failure the bisection couldn't isolate; 6 published, but the verifying process
-failed (`VERIFY failed exit=<n>`; the generation stays). A failed run leaves the last good
-generation. A game started while the tool writes gets the store's lookup-only role for that session.
-`PSO_ARCHIVE_TOOL_TEST_CRASH=<index>` (tests only) aborts a child at that recipe; a build with
-`build-pso-archive-tool.zsh <output> <arch> testing` also takes the archive's `PSO_ARCHIVE_TEST_*` fakes.
+`thread_priority_test.c` (#151, metal since #348 for the Mac run, arm64 and x86_64) calls `WMTSetThreadBasePrioritySelf(20)`
+through the PE thunk and the production table, linked with the whole unix side as the Metal 4 tests
+are. Each call runs on a thread first put into the state the wineserver leaves a Wine thread in for
+`THREAD_PRIORITY_NORMAL`, `HIGHEST` or `TIME_CRITICAL` (extended and precedence policies), and the
+thread's base priority, read with `proc_pidinfo`, must be 20 afterwards. The main thread waits by
+polling, not `pthread_join`, until the thread has measured, because a joiner's QoS override lifts the
+joined thread to base priority 31 while the join lasts. It skips when the thread's maximum priority
+is 20 or less, as in the CI runner's jobs (`taskpolicy -c utility` gives the same), where every thread
+stays at 20 whatever its importance. A task only niced down to 20 keeps maximum priority 63 and runs it.
+
+`texture_view_key_test.cpp` (pure, #155) checks the texture view key's array bit
+(`dxmt_texture_view_key.hpp`): for each of Metal's texture types, the bit of a key built from a view of
+that type matches the mask `checkViewUseArray` used before, and the key's other fields are unchanged;
+the index keeps 27 bits. It then drives `resolveViewUseArray`, the body of `Texture::checkViewUseArray`,
+over a fake texture with `createView`'s search, for every type, both of the shader's wishes and both
+values of `DXMT_VIEW_KEY_ARRAY_BIT`: a match returns the key, without reading a descriptor when the bit
+is trusted; a mismatch returns the counterpart view (type and slice count from the test's own table),
+created once and found again; 3D and texture buffers keep their key.
+
+`binding_hazard_test.cpp` (pure, #147) drives the real `BindingSet` (`dxmt_binding_set.hpp`) through
+what the context does with a texture bound as a shader resource and then as a render target, with
+`DXMT_SKIP_SAME_SRV`'s skip test and `ResolveSRVHazard`'s unbind loop copied from the context (the
+setters themselves need the PE toolchain and Metal). A plain view set again is skipped. A view that
+can be an output is never skipped, is unbound by the render target, and is bound again afterwards. A
+slot that held a plain view and was given one that can be an output keeps upstream's clear hazard bit,
+so the render target's unbind misses it and the skip's test would match; with the switch's
+`set_hazard`, neither happens.
+
+`slot_walk_test.cpp` (pure, #203) checks `DXMT_SKIP_EMPTY_SLOTS`'s walk (`visit_settable_slots` and
+`BindingSet::bound_range` in `dxmt_binding_set.hpp`), with the per-slot bodies of `SetShaderResource`
+and `SetSamplers` copied from the context. `bound_range` matches `test_bound` for every range of 1 to
+64 slots, across the 64-slot word. 200 runs of 400 random steps (calls of 1 to 64 slots, some of 0 or
+more than 64, null and non-null entries, the last call repeated or partly replaced, both values of
+`DXMT_SKIP_SAME_SRV`, draws that clear the dirty bits, render targets that unbind their views) go
+through the full and the skipping walk on two sets; after every step both emitted the same binds and
+unbinds in the same order, moved the same counters, and hold the same views and bound, dirty and hazard
+bits. It prints both walks' ns a call on GW2's shape (32 slots, 3 non-null) without asserting on them.
+
+`emit_window_test.cpp` (pure, #148) checks the emit window (`dxmt_gw2_emit_window.hpp`) over the
+fork's own ring allocator and command list, with a fake queue that commits and completes chunks as
+`CommandQueue` does and a ring of 64 KB blocks. Nothing the ring hands out may overlap a command of a
+chunk that hasn't completed, and each command runs in its own chunk with its payload intact. It covers
+a commit in the middle of a run of emits (each side in a slab taken while its own chunk was current),
+three chunks sharing a block whose first two complete before another user takes most of a block (run
+once more without the reset on commit, where the check must catch the reuse), commands larger than a
+slab, and 300,000 random steps of emits, other users' allocations, commits and late completions. It
+prints the ns an emit before #148 (an out-of-line ring allocation per command) and through the window.
+
+`present_cursor_test.m` (display, #225, for #223) is a probe, not a check of my code: a borderless
+full-screen window with one `CAMetalLayer` set up as my presenter sets it up, a frame pass with a GPU
+cost calibrated to `--gpu-ms` (13 ms by default) and a present pass, presented the Metal 3 way
+(`--present mtl3`), the Metal 4 way (`--present mtl4`, with `--layer-set queue`, `--empty-commit off`,
+`--present-thread queue`, and #230's `--present-at done` and `--wait-for-drawable off` as one-flag
+variants that combine), or the frame on Metal 4 and the present through a
+Metal 3 command buffer joined by two shared events, as #227's `DXMT_MTL4_PRESENT=mtl3` does
+(`--present mtl3-on-mtl4`), while `--pointer wave` moves the pointer 80 times a
+second. Each second it prints the frame interval, missed refreshes, `presentedTime` minus the take,
+how long Metal held the present pass, how many passes started while their surface may still have been
+on screen, and the layer's private `displayCompositingInternalStatus`; a line on a composited layer says
+that run can't show #223. For #230 it also has, on every way, what the game's process has and it didn't:
+`--hud-lines on` (DXMT's five Metal HUD label lines a frame, private), `--encode-thread wine` (wineserver's
+Mach policies for a time-critical thread), `--layer wine` (the layer and view tree of Mach9's Mac driver),
+and the arm64 binary in a bundle with Game Mode's keys. `tests/gw2/run.zsh display` runs both ways and each
+variant for 600 frames with `MTL_DEBUG_LAYER=1` (`--wait-for-drawable off` plain, and once with the layer,
+whose stop doesn't fail the run), as arm64 and x86_64, with the pointer still, and prints one `RESULT` line
+a run. `tests/gw2/present_cursor.zsh <test arguments>` is one run with `sudo sample WindowServer 10 10`
+beside it: its `RESULT` line puts `passwait` and `early` first, then (#237) `refreshes 1=… 2=… 3=… 4+=…
+max=…` (the summary's intervals by whole refreshes of the display's rate, from the test's `intervals:`
+line; `refreshes=none` from a binary without it) and `shown p50=… p95=…`, then the window server's
+frame-info thread counted as in #223 (`tests/gw2/ws_sample_count.py`). It needs a logged-in GUI session, a display and,
+for the Metal 4 ways, Metal 4, and exits 77 without them. The source's header has the flags, the fields,
+what each #230 variant's result means and what it can't tell.
+
+`layer_poll_test.cpp` (pure, #156) checks when the presenter asks the bridge for its layer's screen
+values (`dxmt_gw2_layer_poll.hpp`): at every Present with `DXMT_LAYER_PROPS_POLL_MS=0`; with 250 ms at
+the first Present, then not before 250 ms after the last ask (8 asks in 2 s at 60 fps); and at the
+next Present after a resize, which restarts the interval.
+
+`present_section_test.cpp` (pure, #224) builds the PRESENT section (`dxmt_gw2_present.cpp`) with the
+bridge's presented records scripted. It checks `drawwait`, `early` and `inuse` on made-up times with
+three surfaces in turn: a pass that ends before, at and after its surface's previous frame left the
+screen, a surface seen the first time, a frame without a pass time, a frame whose GPU times come a
+window late, a lost record and a dropped frame. It also feeds 200 windows of made-up sessions (drops,
+losses, late or missing GPU ends, the vsync grid, the frame limiter, no grid) to the section and to a
+copy of it from `215e15a`: everything before ` drawwait=` must be the same, so `presented`,
+`aftergpu`, `nogpu`, `missed` and `starved` keep their values. It also checks the skip count the
+section uses (`skippedRefreshes`, `skipWasQueued`) on known values. Since #324 it checks
+`nodrawable`: 0 in a window where every present had a drawable, the count of `presentNoDrawable`
+calls in the next line (none skipped with `DXMT_PRESENT_SKIP_NIL` unset), kept while no line prints,
+and 0 again in the line after.
+
+`present_choice_test.cpp` (pure, #283) checks the kind of present the Metal 4 branch of the context's
+present case picks once (`dxmt_gw2_present_choice.hpp`): a minimum duration over a deadline over a
+plain present, and that each choice calls exactly one of a Metal 3 command buffer's three presents.
+
+`shown_wait_test.cpp` (pure, #271) checks `DXMT_MTL4_SHOWN_WAIT` (`dxmt_gw2_shown_wait.hpp`) through a model of the encoding context's two halves (the flag on a texture write, the wait in the flush). With `next`, the wait follows every present. With `write`, a frame that writes only offscreen textures doesn't wait, and each kind of write to the back buffer (render target, clears, UAV clear, CopyResource, CopySubresourceRegion, UpdateSubresource, compute and pixel UAV, resolve, MetalFX output) waits right before its encoder, once; a read doesn't; a merged encoder hands the wait on; a write after the present in the same chunk waits for it; a second swap chain's present waits right away, and one that falls back to the Metal 4 way places the first texture's deferred wait. Then the queue arithmetic: 600 frames at 60 Hz, 13.6 ms of GPU work, every 10th 18 ms, three drawables that come back a refresh late (flip) or on time (copy), and a pass that must end by 1 ms after a vsync. These timings are a model (it gives `aftergpu` 33 ms with flip and 50 with copy; my logs read 32.2 and 48.3). With flip, `next` skips a refresh for each long frame and `write` none, also with 12 ms of back-buffer writes; with copy, `next` skips none; a 35 ms frame still skips with `write`. Its `RESULT` line gives the counts. Since #316 it also checks `ShownRepair`, the CPU's signal for a failed Metal 3 present, against a scripted event: without a failure no call reaches the event; a failure raises `shown`; when the GPU signals a later present between the CPU's read and its set, the set lowers `shown`, and that later present raises it back to the highest value.
+
+`cadence_test.cpp` (pure, #314) checks `DXMT_STEADY_SLEEP`'s deadline arithmetic (`dxmt_gw2_cadence.hpp`) against `LimitFrameRate`'s and `ThrottleBackground`'s wall-clock steps, replayed on plain integers: the first frame arms, a fixed cadence, an oversleep that comes back on the next frame, an overrun that restarts it, an interval of 0 that disarms, and the throttle's restart. Then 1,000 random frames of each agree step for step. No real time is read.
+
+`presenter_layer_set_test.mm` (metal, #184, #185, #224) runs DXMT's presenter on a real Metal 4
+queue. Since #224 it ends with 8
+tracked presents on each path, Metal 4, Metal 4 with `DXMT_MTL4_PRESENT=mtl3` and plain Metal 3, and
+prints each one's PRESENT line. Since #324 a run with `DXMT_PRESENT_SKIP_NIL=1` (arm64) resizes a
+swap chain to 0 x 0 and presents twice on Metal 4 and twice with `mtl3`, each skipped as the context
+skips it, without a command buffer error or a hang. Its `RESULT nil-drawable` lines say how many
+were skipped, or that the layer still gave a drawable at that size.

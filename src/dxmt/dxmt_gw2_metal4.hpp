@@ -4,7 +4,7 @@
 // tables of Metal 4 instead of Metal 3's, for a device that has them (MTLGPUFamilyMetal4, macOS 26).
 // The choice is made once per process, at the first command queue, and a device never mixes the
 // two. The port came in four parts (jdrly/dxmt #32): the bridge (src/winemetal, unix/mtl4.c), the
-// queue and submission, the encoders and argument tables, and present. On by default since Jan's
+// queue and submission, the encoders and argument tables, and present. On by default since my
 // in-game session of 2026-11-04 (#32's follow-up); a device without Metal 4 stays on Metal 3 with a
 // warning. DXMT_METAL4=0 does nothing at all: no bridge call, no log line (the startup line shows
 // the value).

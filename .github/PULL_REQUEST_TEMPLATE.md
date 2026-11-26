@@ -1,3 +1,19 @@
+<!-- Needs the Mac run: a PR that touches one of these paths starts with the line below and claims no
+result of it. CONTRIBUTING's "The Mac run" names the eight tests. Any other PR deletes the line.
+
+- `src/winemetal/`, but not `src/winemetal/unix/cache.c` or `src/winemetal/unix/visibility_slots.h`
+- `src/dxmt/dxmt_gw2_mtl4_*`
+- `src/dxmt/dxmt_gw2_submission.*`
+- `src/dxmt/dxmt_presenter.*`
+- `src/dxmt/dxmt_gw2_present.*`
+- `src/dxmt/dxmt_command.metal` and `src/dxmt/dxmt_command_constants.hpp`
+- `src/dxmt/dxmt_gw2_lifetime.*`
+- `src/dxmt/dxmt_gw2_residency.*`
+- the eight tests' own files in `tests/gw2/`
+- `tests/gw2/run.zsh`
+-->
+Needs the Mac run: `tests/gw2/run.zsh metal`
+
 ## What changes
 
 <!-- Two to five sentences: what this PR does and why, not a list of files. Say that an AI agent wrote it, if one did. -->
@@ -14,11 +30,11 @@ Closes #
 
 ## How to verify
 
-<!-- Steps for Jan: what to start, where to go in GW2, what to look at, which log line shows it. -->
+<!-- Steps for me: what to start, where to go in GW2, what to look at, which log line shows it. -->
 
 ## Definition of Done
 
-- [ ] `scripts/build-dxmt.zsh` builds x86_64 and i386 without new warnings.
+- [ ] The `GW2` workflow is green: x86_64 without new warnings, arm64, the native tests.
 - [ ] The change logs when it acts, and a behaviour change has a `DXMT_*` off-switch; both are in `docs/gw2/README.md`.
 - [ ] Measured in GW2: STATS before and after in the same place and settings, plus the off-switch run.
 - [ ] Nothing measurably slower or worse to look at.
