@@ -1649,6 +1649,11 @@ WINEMETAL_API void MTLCommandBuffer_presentDrawable(obj_handle_t cmdbuf, obj_han
 WINEMETAL_API void
 MTLCommandBuffer_presentDrawableAfterMinimumDuration(obj_handle_t cmdbuf, obj_handle_t drawable, double after);
 
+/* gw2: presentDrawable:atTime: CACurrentMediaTime() + interval, taken when this is called. The
+   deadline lets macOS raise the GPU clock to meet it; a plain present carries none. */
+WINEMETAL_API void
+MTLCommandBuffer_presentDrawableWithDeadline(obj_handle_t cmdbuf, obj_handle_t drawable, double interval);
+
 enum WMTGPUFamily {
   WMTGPUFamilyApple1 = 1001,
   WMTGPUFamilyApple2 = 1002,

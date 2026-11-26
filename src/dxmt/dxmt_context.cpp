@@ -530,7 +530,9 @@ ArgumentEncodingContext::resolveTexture(
 };
 
 void
-ArgumentEncodingContext::present(Rc<Texture> &texture, Rc<Presenter> &presenter, double after, DXMTPresentMetadata metadata) {
+ArgumentEncodingContext::present(
+    Rc<Texture> &texture, Rc<Presenter> &presenter, double after, double deadline, DXMTPresentMetadata metadata
+) {
   assert(!encoder_current);
   auto encoder_info = allocate<PresentData>();
   encoder_info->type = EncoderType::Present;
@@ -539,6 +541,7 @@ ArgumentEncodingContext::present(Rc<Texture> &texture, Rc<Presenter> &presenter,
   encoder_info->fence_update = {encoder_info->id};
   encoder_info->presenter = presenter;
   encoder_info->after = after;
+  encoder_info->deadline = deadline;
   encoder_info->metadata = metadata;
 
   encoder_current = encoder_info;
@@ -861,7 +864,7 @@ ArgumentEncodingContext::$$setEncodingContext(uint64_t seq_id, uint64_t frame_id
 constexpr unsigned kEncoderOptimizerThreshold = 64;
 
 QueryReadbacks
-ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId, uint64_t event_seq_id) {
+ArgumentEncodingContext::flushCommands(WMT::CommandBuffer &cmdbuf, uint64_t seqId, uint64_t event_seq_id) {
   assert(!encoder_current);
 
   unsigned encoder_count = encoder_count_;
@@ -1086,6 +1089,14 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
     }
     case EncoderType::Present: {
       auto data = static_cast<PresentData *>(current);
+      // gw2: commit the frame's work before waiting for a drawable (as d9mt does), so the GPU
+      // doesn't idle while nextDrawable blocks; the present gets a command buffer of its own.
+      // Fences and the queue order keep it behind the frame. DXMT_PRESENT_SPLIT=0 turns it off.
+      if (present_split_ && encoder_count - encoder_index > 0) {
+        cmdbuf.commit();
+        cmdbuf = queue_.CreateCommandBuffer();
+        currentFrameStatistics().present_split_count++;
+      }
       auto t0 = clock::now();
       auto drawable = data->presenter->encodeCommands(
           cmdbuf, data->backbuffer, data->metadata,
@@ -1100,6 +1111,8 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
       currentFrameStatistics().drawable_blocking_interval += (t1 - t0);
       if (data->after > 0)
         cmdbuf.presentDrawableAfterMinimumDuration(drawable, data->after);
+      else if (data->deadline > 0)
+        cmdbuf.presentDrawableWithDeadline(drawable, data->deadline);
       else
         cmdbuf.presentDrawable(drawable);
       data->~PresentData();

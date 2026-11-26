@@ -39,6 +39,9 @@ public:
 
   void changeGammaRamp(const DXMTGammaRamp *gamma_ramp);
 
+  // gw2: Metal's own vsync (CAMetalLayer displaySyncEnabled) for presents with a sync interval
+  void changeDisplaySync(bool enabled);
+
   class PresentState {
   public:
     DXMTPresentMetadata metadata;

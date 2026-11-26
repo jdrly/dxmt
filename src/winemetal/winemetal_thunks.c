@@ -492,6 +492,15 @@ MTLCommandBuffer_presentDrawableAfterMinimumDuration(obj_handle_t cmdbuf, obj_ha
   UNIX_CALL(48, &params);
 };
 
+WINEMETAL_API void
+MTLCommandBuffer_presentDrawableWithDeadline(obj_handle_t cmdbuf, obj_handle_t drawable, double interval) {
+  struct unixcall_generic_obj_obj_double_noret params;
+  params.handle = cmdbuf;
+  params.arg0 = drawable;
+  params.arg1 = interval;
+  UNIX_CALL(146, &params);
+};
+
 WINEMETAL_API bool
 MTLDevice_supportsFamily(obj_handle_t device, enum WMTGPUFamily gpu_family) {
   struct unixcall_generic_obj_uint64_uint64_ret params;

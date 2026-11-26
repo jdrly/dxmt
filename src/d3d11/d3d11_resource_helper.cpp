@@ -4,6 +4,10 @@
 #include "d3d11_resource.hpp"
 #include "d3d11_1.h"
 #include "util_math.hpp"
+#include "log/log.hpp"
+#include "util_env.hpp"
+#include <mutex>
+#include <set>
 
 namespace dxmt {
 
@@ -367,8 +371,31 @@ CreateMTLTextureDescriptorInternal(
   }
 
   if (metal_format.Flag & MTL_DXGI_FORMAT_TYPELESS) {
-    // well this is necessary for passing validation layer
-    metal_usage |= WMTTextureUsagePixelFormatView;
+    // gw2: a typeless depth buffer bound as depth-stencil doesn't get PixelFormatView, which turns
+    // off lossless compression (d9mt #18): its depth views keep its own format. Its stencil views
+    // (X24_TYPELESS_G8_UINT, X32_TYPELESS_G8X24_UINT) may need the flag; TextureView warns when one
+    // is made without it. GW2's 4K depth buffer is R24G8_TYPELESS with a shader view.
+    // DXMT_STENCIL_PFV=1 keeps the flag on depth-stencil formats with a stencil plane.
+    static const bool stencil_pfv = env::getEnvVar("DXMT_STENCIL_PFV") == "1";
+    bool depth_only = (BindFlags & D3D11_BIND_DEPTH_STENCIL) &&
+                      (metal_format.PixelFormat == WMTPixelFormatDepth32Float ||
+                       metal_format.PixelFormat == WMTPixelFormatDepth16Unorm ||
+                       (!stencil_pfv && metal_format.PixelFormat == WMTPixelFormatDepth32Float_Stencil8));
+    if (!depth_only) {
+      // well this is necessary for passing validation layer
+      metal_usage |= WMTTextureUsagePixelFormatView;
+      if (BindFlags & (D3D11_BIND_RENDER_TARGET | D3D11_BIND_DEPTH_STENCIL)) {
+        // which targets lose compression to it, once per format
+        static std::mutex logged_mutex;
+        static std::set<std::pair<DXGI_FORMAT, UINT>> logged;
+        std::lock_guard lock(logged_mutex);
+        if (logged.insert({Format, BindFlags}).second)
+          Logger::info(str::format(
+              "PixelFormatView (no lossless compression): format ", Format, " bind ", BindFlags, " ", Width, "x",
+              Height
+          ));
+      }
+    }
   }
 
   if (metal_format.Flag & (MTL_DXGI_FORMAT_DEPTH_PLANER | MTL_DXGI_FORMAT_STENCIL_PLANER)) {

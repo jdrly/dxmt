@@ -710,6 +710,11 @@ public:
   }
 
   void
+  presentDrawableWithDeadline(MetalDrawable drawable, double interval) {
+    MTLCommandBuffer_presentDrawableWithDeadline(handle, drawable, interval);
+  }
+
+  void
   encodeSpatialScale(FXSpatialScaler scaler, Texture color, Texture output, Fence fence) {
     MTLCommandBuffer_encodeSpatialScale(handle, scaler, color, output, fence);
   }
