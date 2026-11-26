@@ -2202,4 +2202,38 @@ WINEMETAL_API int WMTSetThreadQoSClassSelf(
     enum WMTQoSClass qos, int relative_priority, enum WMTQoSClass *old_qos, enum WMTQoSClass *new_qos
 );
 
+/* gw2 (#5): persistent Metal binary archives for pipelines (DXMT_PSO_ARCHIVE=1). The unix side
+   owns the archives: it loads valid ones of earlier sessions for lookup, adds every render and
+   compute pipeline it builds to this session's archive (on a background queue), and serializes
+   that archive on WMTPSOArchiveFlush and at exit. Reports are UTF-8 lines separated by '\n'. */
+struct WMTPSOArchiveConfig {
+  struct WMTConstMemoryPointer exe_name; // UTF-8; the unix side sanitizes it
+  struct WMTConstMemoryPointer base_dir; // absolute unix directory, or null for the user cache dir
+  uint32_t keep_sessions;
+  uint32_t max_pipelines; // per session archive
+};
+
+struct WMTPSOArchiveStats {
+  uint64_t loaded;        // archives of earlier sessions in use for lookup
+  uint64_t lookup_hits;   // pipelines found in those archives
+  uint64_t lookup_misses; // pipelines built without a hit
+  uint64_t added;         // pipelines added to this session's archive
+  uint64_t add_failed;
+  uint64_t capped;        // not added: max_pipelines reached
+  uint64_t queued;        // adds still waiting on the archive queue
+  uint64_t unflushed;     // added since the last serialization
+  uint64_t flushes;
+  uint64_t flushed_bytes; // size of the last serialized archive
+};
+
+WINEMETAL_API bool WMTPSOArchiveInit(
+    obj_handle_t device, const struct WMTPSOArchiveConfig *config, char *report, uint32_t report_size
+);
+
+/* Serializes this session's archive if anything was added since the last time; blocks the caller
+   until earlier adds are done. Returns 1 when written, 0 when nothing was new, -1 on failure. */
+WINEMETAL_API int WMTPSOArchiveFlush(char *report, uint32_t report_size);
+
+WINEMETAL_API void WMTPSOArchiveQuery(struct WMTPSOArchiveStats *stats);
+
 #endif

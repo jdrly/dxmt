@@ -1388,3 +1388,33 @@ WMTSetThreadQoSClassSelf(
     *new_qos = (enum WMTQoSClass)params.ret_new_qos_class;
   return params.ret;
 }
+
+// gw2 (#5): PSO archives (slots 149-151 of the jdrly/dxmt reservation 149-152)
+WINEMETAL_API bool
+WMTPSOArchiveInit(obj_handle_t device, const struct WMTPSOArchiveConfig *config, char *report, uint32_t report_size) {
+  struct unixcall_wmt_pso_archive_init params;
+  params.device = device;
+  WMT_MEMPTR_SET(params.config, config);
+  WMT_MEMPTR_SET(params.report, report);
+  params.report_size = report_size;
+  params.ret = 0;
+  UNIX_CALL(149, &params);
+  return params.ret;
+}
+
+WINEMETAL_API int
+WMTPSOArchiveFlush(char *report, uint32_t report_size) {
+  struct unixcall_wmt_pso_archive_flush params;
+  WMT_MEMPTR_SET(params.report, report);
+  params.report_size = report_size;
+  params.ret = -1;
+  UNIX_CALL(150, &params);
+  return (int)params.ret;
+}
+
+WINEMETAL_API void
+WMTPSOArchiveQuery(struct WMTPSOArchiveStats *stats) {
+  struct unixcall_wmt_pso_archive_query params;
+  WMT_MEMPTR_SET(params.stats, stats);
+  UNIX_CALL(151, &params);
+}

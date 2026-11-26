@@ -3,6 +3,7 @@
 #include "d3d11_device.hpp"
 #include "d3d11_shader.hpp"
 #include "d3d11_pipeline.hpp"
+#include "dxmt_gw2_compile.hpp"
 #include "dxmt_shader_cache.hpp"
 #include "dxmt_tasks.hpp"
 #include "log/log.hpp"
@@ -237,6 +238,7 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
               return CreateVariantShader(cache->device, this, var);
             },
             variant);
+        gw2::compileVariantNew(); // gw2 (#5)
         cache->scheduler_.submit(c.first->second.get());
       }
       return c.first->second.get();
@@ -507,9 +509,11 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
     sample.locked(pipelines_, *pDesc);
 
     if (auto iter = pipelines_.find(*pDesc); iter != pipelines_.end()) {
+      gw2::compilePipelineLookup(true); // gw2 (#5)
       *ppPipeline = iter->second.get();
       return;
     }
+    gw2::compilePipelineLookup(false);
     auto [iter, inserted] = pipelines_.insert({*pDesc, CreateGraphicsPipeline(device, pDesc)});
     if (!inserted) {
       D3D11_ASSERT(0 && "duplicated graphics pipeline");
@@ -528,9 +532,11 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
     sample.locked(pipelines_gs_, *pDesc);
 
     if (auto iter = pipelines_gs_.find(*pDesc); iter != pipelines_gs_.end()) {
+      gw2::compilePipelineLookup(true); // gw2 (#5)
       *ppPipeline = iter->second.get();
       return;
     }
+    gw2::compilePipelineLookup(false);
     auto [iter, inserted] = pipelines_gs_.insert({*pDesc, CreateGeometryPipeline(device, pDesc)});
     if (!inserted) {
       D3D11_ASSERT(0 && "duplicated geometry pipeline");
@@ -549,9 +555,11 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
     sample.locked(pipelines_ts_, *pDesc);
 
     if (auto iter = pipelines_ts_.find(*pDesc); iter != pipelines_ts_.end()) {
+      gw2::compilePipelineLookup(true); // gw2 (#5)
       *ppPipeline = iter->second.get();
       return;
     }
+    gw2::compilePipelineLookup(false);
     auto [iter, inserted] = pipelines_ts_.insert({*pDesc, CreateTessellationMeshPipeline(device, pDesc)});
     if (!inserted) {
       D3D11_ASSERT(0 && "duplicated tessellation pipeline");
@@ -567,9 +575,11 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
    std::lock_guard<dxmt::mutex> lock(mutex_cs_);
 
     if (auto iter = pipelines_cs_.find(pDesc->ComputeShader); iter != pipelines_cs_.end()) {
+      gw2::compilePipelineLookup(true); // gw2 (#5)
       *ppPipeline = iter->second.get();
       return;
     }
+    gw2::compilePipelineLookup(false);
     auto [iter, inserted] = pipelines_cs_.insert({pDesc->ComputeShader, CreateComputePipeline(device, pDesc->ComputeShader)});
     if (!inserted) {
       D3D11_ASSERT(0 && "duplicated compute pipeline");
@@ -592,7 +602,14 @@ public:
         "PSO: blend hash {} (DXMT_PSO_BLEND_HASH), MRU {} (DXMT_PSO_MRU), topology keep {} (DXMT_PSO_TOPOLOGY_KEEP)",
         pso.blend_hash ? "on" : "off", pso.mru ? "on, 4 entries" : "off", pso.topology_keep ? "on" : "off"
     ));
+
+    // gw2 (#5): DXMT_PSO_ARCHIVE=1 loads earlier sessions' pipeline archives (once per process)
+    gw2::psoArchiveInit(pDevice->GetMTLDevice().handle);
   };
+
+  ~PipelineCache() {
+    gw2::psoArchiveRequestFlush(); // gw2 (#5): non-blocking
+  }
 };
 
 std::unique_ptr<MTLD3D11PipelineCacheBase>

@@ -455,6 +455,24 @@ struct unixcall_wmt_set_thread_qos {
   uint32_t padding;
 };
 
+struct unixcall_wmt_pso_archive_init {
+  obj_handle_t device;
+  struct WMTConstMemoryPointer config;
+  struct WMTMemoryPointer report;
+  uint64_t report_size;
+  uint64_t ret;
+};
+
+struct unixcall_wmt_pso_archive_flush {
+  struct WMTMemoryPointer report;
+  uint64_t report_size;
+  int64_t ret;
+};
+
+struct unixcall_wmt_pso_archive_query {
+  struct WMTMemoryPointer stats;
+};
+
 #pragma pack(pop)
 
 #endif

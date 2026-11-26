@@ -9,6 +9,7 @@
 #include "dxmt_context.hpp"
 #include "dxmt_hud_state.hpp"
 #include "dxmt_statistics.hpp"
+#include "dxmt_gw2_compile.hpp"
 #include "dxmt_gw2_present.hpp"
 #include "dxmt_gw2_stats.hpp"
 #include "dxmt_presenter.hpp"
@@ -1028,6 +1029,9 @@ public:
     auto &queue = device_->GetDXMTDevice().queue();
     auto &bg = bgConfig();
     auto &pso = gw2::psoSettings();
+    auto &compile = gw2::compileSettings();
+    // gw2 (#5): 1 = on, failed = asked for but couldn't start (the "PSO archive: off:" line says why)
+    const char *archive = gw2::psoArchiveOn() ? "1" : compile.archive_requested ? "failed" : "0";
     double refresh = init_refresh_rate_ != DBL_MAX ? init_refresh_rate_ : 0.0;
     std::string deadline = present_deadline_ms_ < 0 ? std::string("refresh") : std::format("{}", present_deadline_ms_);
     std::string max_latency = queue.MaxLatencyOverride() ? std::to_string(queue.MaxLatencyOverride()) : "unset";
@@ -1035,14 +1039,16 @@ public:
         "DXMT_STATS=1 DXMT_HITCH_MS={} DXMT_PRESENT_SPLIT={} DXMT_DISPLAY_SYNC={} DXMT_PRESENT_DEADLINE={} "
         "DXMT_CAP_LIMITER={} DXMT_STENCIL_PFV={} DXMT_DEPTH_PFV={} DXMT_BG_FPS={} DXMT_BG_FPS_MINIMIZED={} "
         "DXMT_BG_POLICY={} DXMT_RENDER_THREAD_PRIORITY={} DXMT_PSO_BLEND_HASH={} DXMT_PSO_MRU={} "
-        "DXMT_PSO_TOPOLOGY_KEEP={} DXMT_CHUNKS={} DXMT_MAX_FRAME_LATENCY={} cpus={} refresh={}",
+        "DXMT_PSO_TOPOLOGY_KEEP={} DXMT_CHUNKS={} DXMT_MAX_FRAME_LATENCY={} DXMT_COMPILE_WAIT_MS={} "
+        "DXMT_PSO_ARCHIVE={} DXMT_PSO_ARCHIVE_DIR={} DXMT_PSO_FLUSH_EVERY={} cpus={} refresh={}",
         gw2::hitchMs(), int(queue.argument_encoding_ctx.presentSplit()), int(display_sync_vsync_), deadline,
         int(cap_limiter_),
         // read as d3d11_resource_helper.cpp and RaiseRenderThreadPriority read them
         int(env::getEnvVar("DXMT_STENCIL_PFV") == "1"), int(env::getEnvVar("DXMT_DEPTH_PFV") == "1"), bg.fps,
         bg.fps_minimized, bg.policy == BgPolicy::Occlusion ? "occlusion" : "focus",
         std::strtoul(env::getEnvVar("DXMT_RENDER_THREAD_PRIORITY").c_str(), nullptr, 10), int(pso.blend_hash),
-        int(pso.mru), int(pso.topology_keep), queue.ChunkCount(), max_latency,
+        int(pso.mru), int(pso.topology_keep), queue.ChunkCount(), max_latency, compile.wait_ms, archive,
+        compile.archive_dir.empty() ? std::string("default") : compile.archive_dir, compile.flush_every,
         GetActiveProcessorCount(ALL_PROCESSOR_GROUPS), refresh
     ));
   }

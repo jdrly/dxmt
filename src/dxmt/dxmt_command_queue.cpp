@@ -18,6 +18,7 @@
  */
 
 #include "dxmt_command_queue.hpp"
+#include "dxmt_gw2_compile.hpp"
 #include "dxmt_gw2_present.hpp"
 #include "dxmt_gw2_stats.hpp"
 #include "Metal.hpp"
@@ -281,6 +282,9 @@ CommandQueue::CommitChunkInternal(CommandChunk &chunk, uint64_t seq) {
     break;
   }
   }
+
+  // gw2 (#5): close the previous frame's GetPipeline waits (COMPILE frame= lines)
+  gw2::compileEncodeFrame(chunk.frame_);
 
   auto cmdbuf = commandQueue.commandBuffer();
   chunk.attached_cmdbuf = cmdbuf;
