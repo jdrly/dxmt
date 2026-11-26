@@ -252,6 +252,7 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
     MTL_SHADER_REFLECTION reflection_;
     MTL_SM50_SHADER_ARGUMENT *arguments_info_buffer;
     std::unordered_map<ShaderVariant, std::unique_ptr<CompiledShader>> variants;
+    int64_t created_ns_ = gw2::compileClock(); // gw2 (#160): 0 without DXMT_STATS
 
   public:
     CachedSM50Shader(PipelineCache *cache, sm50_shader_t shader_transferred,
@@ -299,6 +300,8 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
             },
             variant);
         gw2::compileVariantNew(); // gw2 (#5)
+        if (variants.size() == 1)
+          gw2::compileFirstVariant(created_ns_); // gw2 (#160)
         // gw2 (#88): a function already in the shared results needs no job
         if (!cache->shared_ || !c.first->second->CompleteFromShared(cache->shared_.get()))
           cache->scheduler_.submit(c.first->second.get());
