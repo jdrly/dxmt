@@ -25,6 +25,7 @@
 #include "dxmt_counter.hpp"
 #include "dxmt_deptrack.hpp"
 #include "dxmt_gw2_cmds.hpp"
+#include "dxmt_gw2_rebind.hpp"
 #include "dxmt_occlusion_query.hpp"
 #include "dxmt_presenter.hpp"
 #include "dxmt_residency.hpp"
@@ -213,6 +214,9 @@ struct RenderEncoderData : EncoderData {
   bool use_emulated_so = 0;
   TileBarrierPSOKey tile_barrier_pso_key = {};
   WMT::RenderPipelineState last_pso = {};
+  // gw2 (#30): the pipeline this encoder's command list has bound last through bindDrawPipeline, or
+  // none: every other pipeline bind encoded into it clears it (encodeRenderCommand)
+  WMT::RenderPipelineState bound_pso = {};
 };
 
 struct ComputeEncoderData : EncoderData {
@@ -639,11 +643,43 @@ public:
     assert(encoder_current->type == EncoderType::Render);
     gw2CountCommand<cmd_struct>();
     auto encoder = static_cast<RenderEncoderData *>(encoder_current);
+    if constexpr (std::is_same_v<cmd_struct, wmtcmd_render_setpso>)
+      encoder->bound_pso = {}; // gw2 (#30): bindDrawPipeline sets it again after its own bind
     auto storage = (cmd_struct *)allocate_cpu_heap(sizeof(cmd_struct), 16);
     encoder->cmd_tail->next.set(storage);
     encoder->cmd_tail = (wmtcmd_base *)storage;
     storage->next.set(nullptr);
     return *storage;
+  }
+
+  // gw2 (#30): a D3D11 draw's pipeline bind. A bind of the pipeline this render encoder already has
+  // bound is left out with DXMT_SKIP_REBIND: Metal keeps the bound pipeline until the encoder ends
+  // or another one is set, and a pipeline bind carries no other state (depth-stencil, rasterizer,
+  // blend color, viewports and scissors are commands of their own, emitted by their dirty flags
+  // whether or not the bind happens). bound_pso starts empty in every encoder and is cleared by any
+  // other pipeline bind, so a skip only ever drops a bind that would set the bound pipeline again.
+  void
+  bindDrawPipeline(WMT::RenderPipelineState pso) {
+    auto encoder = currentRenderEncoder();
+    encoder->last_pso = pso;
+    bool same = encoder->bound_pso.handle == pso.handle;
+    if (gw2_rebind_.on) {
+      gw2_rebind_.binds++;
+      gw2_rebind_.same += same;
+    }
+    if (same && skip_rebind_) {
+      if (gw2_rebind_.on)
+        gw2_rebind_.skipped++;
+      if (!rebind_logged_) {
+        rebind_logged_ = true;
+        gw2::rebindActed();
+      }
+      return;
+    }
+    auto &cmd = encodeRenderCommand<wmtcmd_render_setpso>();
+    cmd.type = WMTRenderCommandSetPSO;
+    cmd.pso = pso;
+    encoder->bound_pso = pso;
   }
 
   void
@@ -989,6 +1025,9 @@ private:
 
   bool present_split_ = env::getEnvVar("DXMT_PRESENT_SPLIT") != "0";
   gw2::EncodeCounters gw2_enc_; // gw2 (#4): the encode thread's ENCODE counters
+  gw2::RebindCounters gw2_rebind_; // gw2 (#30): the encode thread's REBIND counters
+  bool skip_rebind_ = gw2::skipRebind(); // gw2 (#30): DXMT_SKIP_REBIND
+  bool rebind_logged_ = false;           // gw2 (#30): the first skip is logged
 
   CommandQueue& queue_;
 };

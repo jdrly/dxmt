@@ -1492,6 +1492,7 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer &cmdbuf, uint64_t seqI
   }
 
   gw2_enc_.publishChunk(); // gw2 (#4): once per chunk
+  gw2_rebind_.publishChunk(); // gw2 (#30)
 
   return readbacks;
 }

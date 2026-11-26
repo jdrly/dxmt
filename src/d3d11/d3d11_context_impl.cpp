@@ -4878,10 +4878,7 @@ public:
       enc.tess_threads_per_patch = GraphicsPipeline.ThreadsPerPatch;
       if (!GraphicsPipeline.PipelineState)
         return;
-      auto &cmd = enc.encodeRenderCommand<wmtcmd_render_setpso>();
-      cmd.type = WMTRenderCommandSetPSO;
-      cmd.pso = GraphicsPipeline.PipelineState;
-      render_encoder->last_pso = GraphicsPipeline.PipelineState;
+      enc.bindDrawPipeline(GraphicsPipeline.PipelineState); // gw2 (#30): skips a rebind
     });
 
     cmdbuf_state = CommandBufferState::TessellationRenderPipelineReady;
@@ -4924,10 +4921,7 @@ public:
       pso->GetPipeline(&GraphicsPipeline); // may block
       if (!GraphicsPipeline.PipelineState)
         return;
-      auto &cmd = enc.encodeRenderCommand<wmtcmd_render_setpso>();
-      cmd.type = WMTRenderCommandSetPSO;
-      cmd.pso = GraphicsPipeline.PipelineState;
-      render_encoder->last_pso = GraphicsPipeline.PipelineState;
+      enc.bindDrawPipeline(GraphicsPipeline.PipelineState); // gw2 (#30): skips a rebind
     });
 
     cmdbuf_state = CommandBufferState::GeometryRenderPipelineReady;
@@ -4987,10 +4981,7 @@ public:
       pso->GetPipeline(&GraphicsPipeline); // may block
       if (!GraphicsPipeline.PipelineState)
         return;
-      auto &cmd = enc.encodeRenderCommand<wmtcmd_render_setpso>();
-      cmd.type = WMTRenderCommandSetPSO;
-      cmd.pso = GraphicsPipeline.PipelineState;
-      enc.currentRenderEncoder()->last_pso = GraphicsPipeline.PipelineState;
+      enc.bindDrawPipeline(GraphicsPipeline.PipelineState); // gw2 (#30): skips a rebind
     });
 
     cmdbuf_state = CommandBufferState::RenderPipelineReady;
