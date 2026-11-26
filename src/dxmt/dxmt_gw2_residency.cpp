@@ -121,6 +121,17 @@ residencyAttachQueue(WMT::Device device, WMT::CommandQueue queue) {
 }
 
 bool
+residencyAttachMtl4Queue(WMT::Device device, WMT::MTL4CommandQueue queue) {
+  auto &s = state();
+  std::lock_guard lock(s.mutex);
+  if (!s.active.load(std::memory_order_relaxed) || device.handle != s.device)
+    return false;
+  queue.addResidencySet(s.set);
+  Logger::info("Residency: the residency set is attached to this device's Metal 4 queue too (DXMT_METAL4)");
+  return true;
+}
+
+bool
 residencyAdd(WMT::Device device, const obj_handle_t *allocations, uint32_t count, uint64_t bytes) {
   auto &s = state();
   if (!s.active.load(std::memory_order_acquire) || device.handle != s.device)

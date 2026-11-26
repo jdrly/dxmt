@@ -17,6 +17,7 @@
 #include "../airconv_thunks.h"
 #include "pso_archive.h"
 #include "visibility_slots.h"
+#include "mtl4.h"
 
 typedef int NTSTATUS;
 #define STATUS_SUCCESS 0
@@ -3484,6 +3485,41 @@ const void *__wine_unix_call_funcs[] = {
     &_WMTGetMetalShaderCachePath, /* 152: gw2 (#46, under #5) */
     &_WMTSetThreadQoSClassSelf, /* 153, gw2 #9 */
     &_MTLCommandQueue_commandBufferWithUnretainedReferences, /* 154, gw2 (#31) */
+    &_MTLDevice_metal4Support, /* 155-178: gw2 (#32) Metal 4, mtl4.c */
+    &_MTLDevice_newMTL4CommandQueue,
+    &_MTLDevice_newCommandAllocator,
+    &_MTLDevice_newMTL4CommandBuffer,
+    &_MTLDevice_newArgumentTable,
+    &_MTL4CommandAllocator_reset, /* 160 */
+    &_MTL4CommandBuffer_beginCommandBuffer,
+    &_MTL4CommandBuffer_endCommandBuffer,
+    &_MTL4CommandBuffer_useResidencySet,
+    &_MTL4CommandQueue_commit,
+    &_MTL4CommandQueue_waitForDrawable, /* 165 */
+    &_MTL4CommandQueue_signalDrawable,
+    &_MTL4CommandQueue_signalEvent,
+    &_MTL4CommandQueue_waitForEvent,
+    &_MTL4CommandQueue_addResidencySet,
+    &_MTL4CommandQueue_removeResidencySet, /* 170 */
+    &_MetalLayer_residencySet,
+    &_MetalDrawable_present,
+    &_MTL4CommandBuffer_renderCommandEncoder,
+    &_MTL4CommandBuffer_computeCommandEncoder,
+    &_MTL4RenderCommandEncoder_encodeCommands, /* 175 */
+    &_MTL4ComputeCommandEncoder_encodeCommands,
+    &_MTL4ComputeCommandEncoder_encodeBlitCommands,
+    &_MTL4CommandEncoder_barrier,
+    NULL, /* 179-189: reserved for jdrly/dxmt #32 (parts 2-4) */
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
 };
 
 #ifndef DXMT_NATIVE
@@ -3643,5 +3679,40 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_WMTGetMetalShaderCachePath, /* 152: gw2 (#46, under #5) */
     &_WMTSetThreadQoSClassSelf, /* 153, gw2 #9 */
     &_MTLCommandQueue_commandBufferWithUnretainedReferences, /* 154, gw2 (#31) */
+    &_MTLDevice_metal4Support, /* 155-178: gw2 (#32) Metal 4, mtl4.c */
+    &_MTLDevice_newMTL4CommandQueue,
+    &_MTLDevice_newCommandAllocator,
+    &_MTLDevice_newMTL4CommandBuffer,
+    &_MTLDevice_newArgumentTable,
+    &_MTL4CommandAllocator_reset, /* 160 */
+    &_MTL4CommandBuffer_beginCommandBuffer,
+    &_MTL4CommandBuffer_endCommandBuffer,
+    &_MTL4CommandBuffer_useResidencySet,
+    &_MTL4CommandQueue_commit,
+    &_MTL4CommandQueue_waitForDrawable, /* 165 */
+    &_MTL4CommandQueue_signalDrawable,
+    &_MTL4CommandQueue_signalEvent,
+    &_MTL4CommandQueue_waitForEvent,
+    &_MTL4CommandQueue_addResidencySet,
+    &_MTL4CommandQueue_removeResidencySet, /* 170 */
+    &_MetalLayer_residencySet,
+    &_MetalDrawable_present,
+    &_MTL4CommandBuffer_renderCommandEncoder,
+    &_MTL4CommandBuffer_computeCommandEncoder,
+    &_MTL4RenderCommandEncoder_encodeCommands, /* 175 */
+    &_MTL4ComputeCommandEncoder_encodeCommands,
+    &_MTL4ComputeCommandEncoder_encodeBlitCommands,
+    &_MTL4CommandEncoder_barrier,
+    NULL, /* 179-189: reserved for jdrly/dxmt #32 (parts 2-4) */
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
 };
 #endif

@@ -26,6 +26,7 @@
 #include "dxmt_deptrack.hpp"
 #include "dxmt_gw2_cmds.hpp"
 #include "dxmt_gw2_rebind.hpp"
+#include "dxmt_gw2_mtl4_encoding.hpp"
 #include "dxmt_occlusion_query.hpp"
 #include "dxmt_presenter.hpp"
 #include "dxmt_residency.hpp"
@@ -863,6 +864,9 @@ public:
   // cmdbuf may be committed and replaced (the present split): the caller commits what it returns in
   // cmdbuf.
   QueryReadbacks flushCommands(WMT::CommandBuffer &cmdbuf, uint64_t seqId, uint64_t event_seq_id);
+  // gw2 (#32): the same chunk on Metal 4: encoding begins and commits its command buffers; the caller
+  // commits the one left open
+  QueryReadbacks flushCommands(gw2::Mtl4Encoding &encoding, uint64_t seqId, uint64_t event_seq_id);
 
   uint64_t currentSeqId() {return seq_id_;}
 
@@ -944,6 +948,11 @@ public:
   TileBarrierContext tile_barrier_cmd;
 
 private:
+  // gw2 (#32): flushCommands for both: a WMT::CommandBuffer (Metal 3) or a gw2::Mtl4Encoding
+  template <typename CommandBuffer>
+  QueryReadbacks flushCommandsImpl(CommandBuffer &cmdbuf, uint64_t seqId, uint64_t event_seq_id);
+  void gw2Metal4Unsupported(const char *what);
+
   DXMT_ENCODER_LIST_OP checkEncoderRelation(EncoderData* former, EncoderData* latter);
   bool hasDataDependency(EncoderData* from, EncoderData* to);
   // gw2 (#4): was isEncoderSignatureMatched; returns why the two can't merge, Refuse::None if they can

@@ -154,16 +154,20 @@ public:
     dispatchThreads({texture.width(), texture.height(), texture.depth()});
   }
 
+  // gw2 (#32): a WMT::RenderCommandEncoder, or a WMT::MTL4RenderCommandEncoder on Metal 4
+  template <typename RenderEncoder>
   void
-  MarshalGSDispatchArguments(WMT::RenderCommandEncoder encoder, WMT::Buffer commands, uint32_t commands_offset) {
+  MarshalGSDispatchArguments(RenderEncoder encoder, WMT::Buffer commands, uint32_t commands_offset) {
     encoder.setRenderPipelineState(gs_draw_arguments_marshal);
     encoder.setVertexBuffer(commands, commands_offset, kCustomBufferArgumentIndex0);
     encoder.drawPrimitives(WMTPrimitiveTypePoint, 0, 1);
     encoder.setVertexBuffer({}, 0, kCustomBufferArgumentIndex0);
   }
 
+  // gw2 (#32): a WMT::RenderCommandEncoder, or a WMT::MTL4RenderCommandEncoder on Metal 4
+  template <typename RenderEncoder>
   void
-  MarshalTSDispatchArguments(WMT::RenderCommandEncoder encoder, WMT::Buffer commands, uint32_t commands_offset) {
+  MarshalTSDispatchArguments(RenderEncoder encoder, WMT::Buffer commands, uint32_t commands_offset) {
     encoder.setRenderPipelineState(ts_draw_arguments_marshal);
     encoder.setVertexBuffer(commands, commands_offset, kCustomBufferArgumentIndex0);
     encoder.drawPrimitives(WMTPrimitiveTypePoint, 0, 1);
