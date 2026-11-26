@@ -32,6 +32,12 @@ void compilePipelineLookup(bool hit);
 void compileAirLookup(bool hit);
 int64_t compileClock();
 void compileShaderBuilt(int64_t t0);
+// gw2 (W0): one stage of a shader variant's build, from `t0` (compileClock()) to now; nothing without
+// DXMT_STATS (t0 = 0). Lock: waiting for the AIR cache reader's lock; Air: the AIR read; Library:
+// newLibrary; Function: newFunction; Translate: airconv, on an AIR miss; Store: writing the new AIR
+// (the writer's lock included).
+enum class VariantStage : uint32_t { Lock, Air, Library, Function, Translate, Store, Count };
+void compileVariantStage(VariantStage stage, int64_t t0);
 void compilePipelineBuilt(int64_t t0, bool ok);
 // The compile scheduler: a task was submitted (+1) or completed (-1); its worker count.
 void compileQueue(int64_t delta);

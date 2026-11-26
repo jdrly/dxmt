@@ -85,7 +85,9 @@ public:
     WMT::Reference<WMT::DispatchData> lib_data = shader_->find_cached_variant(variant_digest_);
 
     while (lib_data != nullptr) {
+      auto tl = gw2::compileClock(); // gw2 (W0)
       auto library = device_->GetMTLDevice().newLibrary(lib_data, err);
+      gw2::compileVariantStage(gw2::VariantStage::Library, tl);
 
       if (err || !library) {
         ERR("Failed to create MTLLibrary from cache: ", err.description().getUTF8String());
@@ -93,7 +95,9 @@ public:
         break;
       }
 
+      auto tf = gw2::compileClock(); // gw2 (W0)
       function_ = library.newFunction(func_name.c_str());
+      gw2::compileVariantStage(gw2::VariantStage::Function, tf);
 
       if (function_ == nullptr) {
         ERR("Failed to create MTLFunction from cache: ", func_name);
@@ -106,7 +110,9 @@ public:
     gw2::compileAirLookup(lib_data != nullptr);
     if (!lib_data) {
       SM50_COMPILED_BITCODE bitcode;
+      auto tx = gw2::compileClock(); // gw2 (W0)
       sm50_bitcode_t compile_result = proc(func_name.c_str(), &sm50_common);
+      gw2::compileVariantStage(gw2::VariantStage::Translate, tx);
 
       if (!compile_result) {
         gw2::compileShaderBuilt(t0);
@@ -115,7 +121,9 @@ public:
 
       SM50GetCompiledBitcode(compile_result, &bitcode);
       lib_data = WMT::MakeDispatchData(bitcode.Data, bitcode.Size);
+      auto tl = gw2::compileClock(); // gw2 (W0)
       auto library = device_->GetMTLDevice().newLibrary(lib_data, err);
+      gw2::compileVariantStage(gw2::VariantStage::Library, tl);
 
       if (err) {
         ERR("Failed to create MTLLibrary: ", err.description().getUTF8String());
@@ -126,7 +134,9 @@ public:
       shader_->update_cached_variant(variant_digest_, lib_data);
 
       SM50DestroyBitcode(compile_result);
+      auto tf = gw2::compileClock(); // gw2 (W0)
       function_ = library.newFunction(func_name.c_str());
+      gw2::compileVariantStage(gw2::VariantStage::Function, tf);
 
       if (function_ == nullptr) {
         ERR("Failed to create MTLFunction: ", func_name);
