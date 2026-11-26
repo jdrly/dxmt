@@ -21,11 +21,16 @@
 #include "dxmt_command_queue.hpp"
 #include "dxmt_deptrack.hpp"
 #include "dxmt_format.hpp"
+#include "dxmt_gw2_stats.hpp"
+#include "dxmt_names.hpp"
 #include "dxmt_occlusion_query.hpp"
 #include "dxmt_presenter.hpp"
 #include "wsi_platform.hpp"
 #include <cstdint>
 #include <cfloat>
+#include <mutex>
+#include <set>
+#include <utility>
 
 namespace dxmt {
 
@@ -359,6 +364,11 @@ ArgumentEncodingContext::encodeShaderResources(
               access<stage>(srv.texture, viewIdChecked, ResourceAccess::Read).gpuResourceID;
           encoded_buffer[arg.StructurePtrOffset + 1] = TextureMetadata(srv.texture->arrayLength(viewIdChecked), 0);
           makeResident<stage, kind>(srv.texture.ptr(), viewIdChecked);
+          // gw2 (#2): the pass's depth-stencil texture read as a shader resource (null unless DXMT_STATS)
+          if constexpr (stage != PipelineStage::Compute) {
+            if (unlikely(srv.texture.ptr() == gw2_pass_depth_))
+              gw2ReportDepthSrv(stage, arg.SM50BindingSlot, viewIdChecked);
+          }
         } else {
           encoded_buffer[arg.StructurePtrOffset] = 0;
           encoded_buffer[arg.StructurePtrOffset + 1] = 0;
@@ -653,6 +663,7 @@ ArgumentEncodingContext::startRenderPass(
   encoder_info->allocated_argbuf_offset = offset;
   encoder_info->allocated_argbuf_mapping = gpu_buffer_contents;
   encoder_current = encoder_info;
+  gw2_pass_depth_ = nullptr; // gw2 (#2): gw2NotePassDepth sets it once the pass has its attachments
 
   currentFrameStatistics().render_pass_count++;
 
@@ -702,8 +713,64 @@ ArgumentEncodingContext::startBlitPass() {
 }
 
 void
+ArgumentEncodingContext::gw2NotePassDepth(Texture *texture, uint8_t dsv_readonly_flags) {
+  if (!gw2::statsEnabled())
+    return;
+  gw2_pass_depth_ = texture;
+  gw2_pass_dsv_readonly_ = dsv_readonly_flags;
+}
+
+// gw2 (#2): one DEPTHSRV line per texture (at most kDepthSrvTextures, then one "suppressed" line) whose
+// view is the render pass's depth-stencil attachment and is read by a shader in the same pass. The
+// check is in encodeShaderResources because each new render pass marks every SRV dirty, so every SRV a
+// shader of the pass uses is encoded there at least once; only the shader's own bindings count.
+void
+ArgumentEncodingContext::gw2ReportDepthSrv(PipelineStage stage, unsigned slot, uint64_t viewId) {
+  constexpr size_t kDepthSrvTextures = 64;
+  static const char *const stage_names[] = {"vertex", "pixel", "geometry", "hull", "domain", "compute"};
+  Texture *texture = gw2_pass_depth_;
+  gw2_pass_depth_ = nullptr; // once per pass is enough
+  static std::mutex mutex;
+  static std::set<Texture *> seen;
+  static bool suppressed = false;
+  {
+    std::lock_guard lock(mutex);
+    if (seen.count(texture))
+      return;
+    if (seen.size() >= kDepthSrvTextures) {
+      if (!std::exchange(suppressed, true))
+        Logger::info(str::format("DEPTHSRV: more than ", kDepthSrvTextures, " textures, the rest are suppressed"));
+      return;
+    }
+    seen.insert(texture);
+  }
+  auto planes = [](uint32_t flags) {
+    switch (flags & 3) {
+    case 1:
+      return "depth";
+    case 2:
+      return "stencil";
+    case 3:
+      return "depth+stencil";
+    default:
+      return "none";
+    }
+  };
+  auto usage = texture->usage();
+  auto view_format = texture->pixelFormat(TextureViewKey(viewId));
+  Logger::info(str::format(
+      "DEPTHSRV format=", (WMTPixelFormat)ORIGINAL_FORMAT(texture->pixelFormat()), " size=", texture->width(), "x",
+      texture->height(), " pfv=", (usage & WMTTextureUsagePixelFormatView) ? 1 : 0,
+      " readonly=", planes(gw2_pass_dsv_readonly_), " stage=", stage_names[(unsigned)stage], " slot=", slot,
+      " view=", (WMTPixelFormat)ORIGINAL_FORMAT(view_format), " swizzled=", (view_format & WMTPixelFormatCustomSwizzle) ? 1 : 0,
+      " aspect=", planes(DepthStencilPlanarFlags(view_format))
+  ));
+}
+
+void
 ArgumentEncodingContext::endPass() {
   assert(encoder_current);
+  gw2_pass_depth_ = nullptr; // gw2 (#2)
   encoder_last->next = encoder_current;
   encoder_last = encoder_current;
 

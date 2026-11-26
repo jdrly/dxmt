@@ -17,15 +17,88 @@
  */
 
 #include "dxmt_texture.hpp"
+#include "dxmt_format.hpp"
+#include "dxmt_names.hpp"
 #include "dxmt_residency.hpp"
 #include "wsi_platform.hpp"
 #include "log/log.hpp"
 #include <atomic>
 #include <cassert>
+#include <mutex>
+#include <set>
+#include <tuple>
+#include <utility>
 
 namespace dxmt {
 
 std::atomic_uint64_t global_texture_seq = {0};
+
+namespace {
+
+// gw2 (#2): a DEPTHVIEW line once per distinct view of a depth/stencil texture (and for any view that
+// came back nil), so the log shows which views GW2's depth buffer gets and whether the texture has
+// PixelFormatView. At most kDepthViewTuples tuples are kept, then one line says the rest are suppressed.
+constexpr size_t kDepthViewTuples = 64;
+
+const char *
+depthViewAspect(uint32_t planar_flags) {
+  switch (planar_flags & 3) {
+  case 1:
+    return "depth";
+  case 2:
+    return "stencil";
+  case 3:
+    return "depth+stencil";
+  default:
+    return "none";
+  }
+}
+
+void
+logDepthView(const Texture *base, const TextureViewDescriptor &descriptor, bool nil) {
+  auto base_format = (WMTPixelFormat)ORIGINAL_FORMAT(base->pixelFormat());
+  auto view_format = (WMTPixelFormat)descriptor.format; // may carry swizzle bits (R32X8X32, X32G8X32)
+  // DepthStencilPlanarFlags knows the swizzled depth/stencil formats: it's the view's aspect
+  uint32_t aspect = DepthStencilPlanarFlags(view_format);
+  if (!nil && !aspect && !DepthStencilPlanarFlags(base_format))
+    return;
+
+  using Tuple = std::tuple<uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, bool>;
+  static std::mutex mutex;
+  static std::set<Tuple> seen;
+  static bool suppressed = false;
+  Tuple tuple{base_format, view_format, (uint32_t)descriptor.type, base->width(), base->height(), base->usage(), nil};
+  {
+    std::lock_guard lock(mutex);
+    if (seen.count(tuple))
+      return;
+    if (seen.size() >= kDepthViewTuples) {
+      if (!std::exchange(suppressed, true))
+        Logger::info(str::format("DEPTHVIEW: more than ", kDepthViewTuples, " distinct views, the rest are suppressed"));
+      return;
+    }
+    seen.insert(tuple);
+  }
+
+  static const char swizzle_names[] = "01RGBA";
+  char swizzle[5] = {
+      swizzle_names[GET_SWIZZLE_RED(view_format) % 6], swizzle_names[GET_SWIZZLE_GREEN(view_format) % 6],
+      swizzle_names[GET_SWIZZLE_BLUE(view_format) % 6], swizzle_names[GET_SWIZZLE_ALPHA(view_format) % 6], 0
+  };
+  auto usage = base->usage();
+  auto line = str::format(
+      "DEPTHVIEW base=", base_format, " view=", (WMTPixelFormat)ORIGINAL_FORMAT(view_format), " swizzle=", swizzle,
+      " type=", (uint32_t)descriptor.type, " size=", base->width(), "x", base->height(), " usage=", (uint32_t)usage,
+      " pfv=", (usage & WMTTextureUsagePixelFormatView) ? 1 : 0, " aspect=", depthViewAspect(aspect),
+      " nil=", nil ? 1 : 0
+  );
+  if (nil)
+    Logger::warn(line);
+  else
+    Logger::info(line);
+}
+
+} // namespace
 
 void
 TextureView::incRef() {
@@ -49,22 +122,14 @@ TextureView::TextureView(TextureAllocation *allocation, unsigned index, TextureV
     allocation(allocation),
     key(descriptor, index, allocation->descriptor->miplevelCount()) {
   auto parent = allocation->texture();
-  // gw2: depth-stencil textures no longer get PixelFormatView (d3d11_resource_helper.cpp); say so if
-  // a stencil view of one is made anyway, it's the case that may need the flag
-  if (!(allocation->descriptor->usage() & WMTTextureUsagePixelFormatView)) {
-    auto f = (WMTPixelFormat)ORIGINAL_FORMAT(descriptor.format);
-    if (f == WMTPixelFormatX32_Stencil8 || f == WMTPixelFormatX24_Stencil8) {
-      static std::atomic<unsigned> warned = 0;
-      if (warned++ < 8)
-        WARN("TextureView: stencil view of a depth-stencil texture without PixelFormatView (DXMT_STENCIL_PFV=1 "
-             "restores the flag if stencil reads look wrong)");
-    }
-  }
   texture = parent.newTextureView(
       descriptor.format, descriptor.type, descriptor.firstMiplevel, descriptor.miplevelCount,
       descriptor.firstArraySlice, descriptor.arraySize,
       {WMTTextureSwizzleRed, WMTTextureSwizzleGreen, WMTTextureSwizzleBlue, WMTTextureSwizzleAlpha}, gpuResourceID
   );
+  // gw2 (#2): depth-stencil textures may lack PixelFormatView (d3d11_resource_helper.cpp); log each
+  // distinct view of one, and any nil view (replaces the stencil-only warning)
+  logDepthView(allocation->descriptor, descriptor, !texture);
 }
 
 TextureAllocation::TextureAllocation(

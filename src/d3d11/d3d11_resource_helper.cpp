@@ -6,6 +6,7 @@
 #include "util_math.hpp"
 #include "log/log.hpp"
 #include "util_env.hpp"
+#include <atomic>
 #include <mutex>
 #include <set>
 
@@ -373,14 +374,26 @@ CreateMTLTextureDescriptorInternal(
   if (metal_format.Flag & MTL_DXGI_FORMAT_TYPELESS) {
     // gw2: a typeless depth buffer bound as depth-stencil doesn't get PixelFormatView, which turns
     // off lossless compression (d9mt #18): its depth views keep its own format. Its stencil views
-    // (X24_TYPELESS_G8_UINT, X32_TYPELESS_G8X24_UINT) may need the flag; TextureView warns when one
-    // is made without it. GW2's 4K depth buffer is R24G8_TYPELESS with a shader view.
+    // (X24_TYPELESS_G8_UINT, X32_TYPELESS_G8X24_UINT) may need the flag; TextureView logs each such
+    // view (DEPTHVIEW, #2). GW2's 4K depth buffer is R24G8_TYPELESS with a shader view.
     // DXMT_STENCIL_PFV=1 keeps the flag on depth-stencil formats with a stencil plane.
+    // gw2 (#2): DXMT_DEPTH_PFV=1 keeps it on the single-plane ones (R32_TYPELESS, R16_TYPELESS as depth).
     static const bool stencil_pfv = env::getEnvVar("DXMT_STENCIL_PFV") == "1";
+    static const bool depth_pfv = env::getEnvVar("DXMT_DEPTH_PFV") == "1";
+    bool single_plane_depth = (BindFlags & D3D11_BIND_DEPTH_STENCIL) &&
+                              (metal_format.PixelFormat == WMTPixelFormatDepth32Float ||
+                               metal_format.PixelFormat == WMTPixelFormatDepth16Unorm);
     bool depth_only = (BindFlags & D3D11_BIND_DEPTH_STENCIL) &&
-                      (metal_format.PixelFormat == WMTPixelFormatDepth32Float ||
-                       metal_format.PixelFormat == WMTPixelFormatDepth16Unorm ||
+                      ((!depth_pfv && single_plane_depth) ||
                        (!stencil_pfv && metal_format.PixelFormat == WMTPixelFormatDepth32Float_Stencil8));
+    if (depth_pfv && single_plane_depth) {
+      static std::atomic<bool> logged_depth_pfv = false;
+      if (!logged_depth_pfv.exchange(true))
+        Logger::info(str::format(
+            "DXMT_DEPTH_PFV=1: keeping PixelFormatView on typeless single-plane depth targets (first: format ", Format,
+            " bind ", BindFlags, " ", Width, "x", Height, ")"
+        ));
+    }
     if (!depth_only) {
       // well this is necessary for passing validation layer
       metal_usage |= WMTTextureUsagePixelFormatView;
