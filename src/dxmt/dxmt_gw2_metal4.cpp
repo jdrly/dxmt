@@ -45,6 +45,8 @@ sw::Switch<bool> kMetalfxSpatialSwapchain{
 sw::Switch<bool> kMtl4TimestampReuse{"DXMT_MTL4_TIMESTAMP_REUSE", false, sw::legacy::exactlyOne};
 // gw2 (#227): `mtl4` (the default) or `mtl3`
 sw::Switch<std::string> kMtl4Present{"DXMT_MTL4_PRESENT", "mtl4", mtl4PresentGrammar};
+// gw2 (#204)
+sw::Switch<bool> kMtl4AllocatorPool{"DXMT_MTL4_ALLOCATOR_POOL", false, sw::legacy::exactlyOne};
 } // namespace
 
 bool
@@ -62,6 +64,11 @@ bool
 mtl4PresentMetal3() {
   static const bool on = kMtl4Present() == "mtl3";
   return on;
+}
+
+bool
+mtl4AllocatorPool() {
+  return kMtl4AllocatorPool();
 }
 
 bool

@@ -5,7 +5,11 @@
 // - One MTL4CommandQueue, with the device's residency set attached (Metal 4 has no useResource).
 // - One MTL4CommandAllocator per chunk slot (the ring's size, DXMT_CHUNKS): a chunk's command buffers
 //   take their memory from their slot's allocator, which the finish thread resets when it retires
-//   the chunk, after the GPU completed every buffer of it.
+//   the chunk, after the GPU completed every buffer of it. gw2 (#204), with
+//   DXMT_MTL4_ALLOCATOR_POOL=1: a slot has no allocator of its own; the chunk takes one from the
+//   queue's pool at its first begin() and gives it back in retire(), after the reset. The pool makes
+//   an allocator only when it has none idle and keeps at most kIdleAllocators idle (one more is
+//   released).
 // - A chunk commits one command buffer, or several (the present split commits the frame before
 //   nextDrawable and the present pass gets its own, and queue-level events commit as well). Each commit carries its own
 //   MTL4CommitOptions feedback (GPU start and end, error), written into an Mtl4Commit record, and
@@ -29,7 +33,8 @@
 // a slot's use between them.
 //
 // The METAL4 section (2 s, with DXMT_STATS): commits= buffers=<per chunk, max> allocmb=<largest
-// allocator at reset> slow=<chunks the finish thread waited for over 1 s> errors=.
+// allocator at reset> allocators=<alive now> allocheld=<their sizes at their last reset, MB>
+// slow=<chunks the finish thread waited for over 1 s> errors=.
 
 #include "Metal.hpp"
 #include <atomic>
@@ -81,14 +86,19 @@ void metal4EncodeCounters(const WMTMtl4BindingState &state);
 
 class Mtl4Queue {
 public:
-  // `slots`: the chunk ring's size. Check the result with valid().
-  Mtl4Queue(WMT::Device device, uint32_t slots);
+  // gw2 (#204): the most allocators the pool keeps idle (DXMT_MTL4_ALLOCATOR_POOL=1)
+  static constexpr size_t kIdleAllocators = 8;
+
+  // `slots`: the chunk ring's size. `allocator_pool`: gw2 (#204), DXMT_MTL4_ALLOCATOR_POOL=1 (the
+  // caller reads it once per queue). Check the result with valid().
+  Mtl4Queue(WMT::Device device, uint32_t slots, bool allocator_pool = false);
   ~Mtl4Queue();
 
   Mtl4Queue(const Mtl4Queue &) = delete;
   Mtl4Queue &operator=(const Mtl4Queue &) = delete;
 
-  // the queue, its event, every slot's allocator and the first command buffers were created
+  // the queue, its event, every slot's allocator (with the pool: its first one) and the first
+  // command buffers were created
   bool
   valid() const {
     return ready_;
@@ -97,6 +107,23 @@ public:
   WMT::MTL4CommandQueue
   queue() const {
     return queue_;
+  }
+
+  // gw2 (#204): this queue's command allocators alive now (the slots', in use and idle), and the sum
+  // of their sizes at their last reset
+  uint32_t
+  allocators() const {
+    return allocators_.load(std::memory_order_relaxed);
+  }
+  uint64_t
+  allocatorBytes() const {
+    return allocator_bytes_.load(std::memory_order_relaxed);
+  }
+  // The allocator chunk `seq`'s command buffers take their memory from; null with the pool before
+  // its first begin() and after its retire()
+  WMT::MTL4CommandAllocator
+  allocator(uint64_t seq) {
+    return slot(seq).allocator.ref;
   }
 
   // encode thread
@@ -108,7 +135,8 @@ public:
   // --- encode thread, chunk `seq`
 
   // Begins the chunk's next command buffer on its slot's allocator (the first of the chunk, or the
-  // one after commit()). The record stays valid until retire(seq).
+  // one after commit()). The record stays valid until retire(seq). gw2 (#204), with the pool: the
+  // chunk's first begin() takes the allocator all of its command buffers use.
   Mtl4Commit &begin(uint64_t seq);
 
   // The command buffer begin() opened, or null if none is open.
@@ -176,7 +204,8 @@ public:
   const std::vector<Mtl4Commit *> &wait(uint64_t seq);
 
   // After wait(seq), once nothing reads the records: releases their errors, resets the slot's
-  // allocator, and recycles the command buffers.
+  // allocator, and recycles the command buffers. gw2 (#204), with the pool: the reset allocator goes
+  // back to it, or is released if kIdleAllocators are idle.
   void retire(uint64_t seq);
 
   // --- teardown, both threads stopped
@@ -185,8 +214,12 @@ public:
   void waitIdle();
 
 private:
+  struct Allocator {
+    WMT::Reference<WMT::MTL4CommandAllocator> ref;
+    uint64_t bytes = 0; // its size at its last reset (allocatedSize)
+  };
   struct Slot {
-    WMT::Reference<WMT::MTL4CommandAllocator> allocator;
+    Allocator allocator; // gw2 (#204), with the pool: only from the chunk's first begin() to its retire()
     WMT::Reference<WMT::ResidencySet> residency;
     std::vector<Mtl4Commit *> commits; // committed, in order
     Mtl4Commit *open = nullptr;        // begun, not committed
@@ -200,6 +233,11 @@ private:
 
   Mtl4Commit *acquire();
   void recycle(Mtl4Commit *commit);
+  // gw2 (#204)
+  bool newAllocator(Allocator &allocator);
+  void releaseAllocator(Allocator &allocator);
+  Allocator takeAllocator();
+  void giveBackAllocator(Allocator &allocator);
   void waitCommit(Mtl4Commit *commit, uint64_t seq);
   void waitMetal3(const Metal3Present &present);
 
@@ -215,10 +253,14 @@ private:
   std::vector<Slot> slots_;
   Mtl4Tables tables_;
   bool ready_ = false;
+  bool allocator_pool_ = false; // gw2 (#204)
+  std::atomic<uint32_t> allocators_{0};
+  std::atomic<uint64_t> allocator_bytes_{0};
 
   std::mutex pool_mutex_;
   std::vector<std::unique_ptr<Mtl4Commit>> records_; // every record, for stable addresses
   std::vector<Mtl4Commit *> free_;
+  std::vector<Allocator> idle_allocators_; // gw2 (#204): the pool's, reset; at most kIdleAllocators
 };
 
 } // namespace dxmt::gw2
