@@ -1,5 +1,8 @@
 #include "dxmt_gw2_present.hpp"
+#include "dxmt_gw2_present_pace.hpp"
 #include "dxmt_gw2_stats.hpp"
+#include "dxmt_gw2_switches.hpp"
+#include "log/log.hpp"
 #include "winemetal.h"
 #include <algorithm>
 #include <atomic>
@@ -59,6 +62,47 @@ std::vector<std::pair<uint64_t, uint64_t>> g_gpu_waiting;
 std::string section(double, uint32_t);
 SectionRegistrar g_registrar("PRESENT", section);
 
+// gw2 (#157): DXMT_PRESENT_QUEUE (`default`, `two`, `pace`; anything else is `default`)
+std::string
+rawText(const std::string &raw, const std::string &fallback) {
+  return raw.empty() ? fallback : raw;
+}
+sw::Switch<std::string> kPresentQueue{"DXMT_PRESENT_QUEUE", "default", rawText};
+// the startup line shows the mode in effect: `unused` for pace without DXMT_STATS
+sw::Effective kPresentQueueLine{"DXMT_PRESENT_QUEUE", [] {
+  switch (presentQueue()) {
+  case PresentQueue::Two:
+    return std::string("two");
+  case PresentQueue::Pace:
+    return std::string(presentPaceOn() ? "pace" : "unused");
+  default:
+    return std::string("default");
+  }
+}};
+
+// pace's signals: the encode thread writes them, the render thread reads them, once per present each
+std::mutex g_pace_mutex;
+LiveSkips g_live;
+int64_t g_blocked_ns = 0;
+uint64_t g_blocked_seq = 0;
+
+// the PRESENTQ section: pace's sleeps in the window, and whether it has given up
+std::atomic<uint64_t> g_pace_presents{0}, g_pace_sleeps{0}, g_pace_sleep_ns{0}, g_pace_sleep_max_ns{0};
+std::atomic<bool> g_pace_gave_up{false};
+
+std::string
+paceSection(double, uint32_t) {
+  if (!presentPaceOn())
+    return {};
+  uint64_t presents = g_pace_presents.exchange(0, std::memory_order_relaxed);
+  uint64_t sleeps = g_pace_sleeps.exchange(0, std::memory_order_relaxed);
+  uint64_t sum = g_pace_sleep_ns.exchange(0, std::memory_order_relaxed);
+  uint64_t max_ns = g_pace_sleep_max_ns.exchange(0, std::memory_order_relaxed);
+  return std::format("pace slept={}/{} sleep={:.2f}/{:.2f} gaveup={}", sleeps, presents,
+                     sleeps ? sum / 1e6 / sleeps : 0.0, max_ns / 1e6, g_pace_gave_up.load(std::memory_order_relaxed) ? 1 : 0);
+}
+SectionRegistrar g_pace_registrar("PRESENTQ", paceSection);
+
 std::string
 section(double, uint32_t) {
   std::vector<WMTPresentedRecord> records;
@@ -106,10 +150,10 @@ section(double, uint32_t) {
         skipped = (int64_t)std::floor((g_late_ms + 0.25) / refresh_ms);
         g_late_ms = std::max(0.0, g_late_ms - skipped * refresh_ms);
       } else {
-        skipped = std::max<int64_t>(0, std::llround(gap / refresh_ms) - (int64_t)vsyncs);
+        skipped = skippedRefreshes(gap, refresh_ms, vsyncs); // gw2 (#157): shared with LiveSkips
       }
       if (skipped > 0) {
-        if (r.encode_ns < g_last_presented_ns)
+        if (skipWasQueued(r.encode_ns, g_last_presented_ns))
           missed += skipped;
         else
           starved += skipped;
@@ -186,6 +230,20 @@ presentTrack(uint64_t drawable, uint64_t frame) {
   uint32_t n = MTLDrawable_trackPresented(drawable, frame, out, WMT_PRESENTED_BATCH, &lost);
   if (!n && !lost)
     return;
+  if (presentPaceOn() && n) {
+    // gw2 (#157): pace's per-frame skip count, as the section counts them, in frame order. An insertion
+    // sort: mingw-GCC's -Warray-bounds misreads std::sort on this 8-record array
+    uint32_t m = std::min<uint32_t>(n, WMT_PRESENTED_BATCH);
+    for (uint32_t i = 1; i < m; i++)
+      for (uint32_t j = i; j > 0 && out[j].frame < out[j - 1].frame; j--)
+        std::swap(out[j], out[j - 1]);
+    double refresh_ms = g_refresh_ms.load(std::memory_order_relaxed);
+    uint32_t vsyncs = g_vsyncs.load(std::memory_order_relaxed);
+    double limiter_ms = g_limiter_ms.load(std::memory_order_relaxed);
+    std::lock_guard lock(g_pace_mutex);
+    for (uint32_t i = 0; i < m; i++)
+      g_live.add(out[i].frame, out[i].encode_ns, out[i].presented_ns, refresh_ms, vsyncs, limiter_ms);
+  }
   std::lock_guard lock(g_mutex);
   for (uint32_t i = 0; i < n; i++) {
     if (g_pending.size() < kMaxPending)
@@ -212,6 +270,53 @@ presentSetPacing(double refresh_ms, uint32_t vsyncs, double limiter_ms) {
   g_refresh_ms.store(refresh_ms, std::memory_order_relaxed);
   g_vsyncs.store(vsyncs, std::memory_order_relaxed);
   g_limiter_ms.store(limiter_ms, std::memory_order_relaxed);
+}
+
+PresentQueue
+presentQueue() {
+  static const PresentQueue mode = [] {
+    auto v = kPresentQueue();
+    return v == "two" ? PresentQueue::Two : v == "pace" ? PresentQueue::Pace : PresentQueue::Default;
+  }();
+  return mode;
+}
+
+bool
+presentPaceOn() {
+  static const bool on = [] {
+    bool asked = presentQueue() == PresentQueue::Pace;
+    if (asked && !statsEnabled())
+      Logger::warn("Present queue: DXMT_PRESENT_QUEUE=pace needs DXMT_STATS=1 (its presented records and "
+                   "nextDrawable timer); pace does nothing");
+    return asked && statsEnabled();
+  }();
+  return on;
+}
+
+void
+presentPaceBlocked(int64_t ns, uint64_t seq) {
+  std::lock_guard lock(g_pace_mutex);
+  g_blocked_ns = ns;
+  g_blocked_seq = seq;
+}
+
+PaceSignals
+presentPaceSignals() {
+  std::lock_guard lock(g_pace_mutex);
+  return {g_blocked_ns, g_blocked_seq, g_live.missed(), g_live.starved()};
+}
+
+void
+presentPaceStep(int64_t ns, bool gave_up) {
+  g_pace_presents.fetch_add(1, std::memory_order_relaxed);
+  if (gave_up)
+    g_pace_gave_up.store(true, std::memory_order_relaxed);
+  if (ns <= 0)
+    return;
+  g_pace_sleeps.fetch_add(1, std::memory_order_relaxed);
+  g_pace_sleep_ns.fetch_add(uint64_t(ns), std::memory_order_relaxed);
+  if (uint64_t(ns) > g_pace_sleep_max_ns.load(std::memory_order_relaxed))
+    g_pace_sleep_max_ns.store(uint64_t(ns), std::memory_order_relaxed);
 }
 
 } // namespace dxmt::gw2

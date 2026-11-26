@@ -1816,6 +1816,9 @@ struct WMTLayerProps {
   bool display_sync_enabled;
   bool framebuffer_only;
   enum WMTPixelFormat pixel_format;
+  /* gw2 (#157): setProps sets the layer's maximumDrawableCount to this when it isn't 0 (0 leaves the
+     layer's count alone, as before #157); getProps doesn't write it */
+  uint32_t maximum_drawable_count;
 };
 
 WINEMETAL_API void MetalLayer_setProps(obj_handle_t layer, const struct WMTLayerProps *props);

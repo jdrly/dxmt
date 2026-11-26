@@ -22,4 +22,26 @@ void presentGpuEnd(uint64_t frame, uint64_t gpu_end_ns);
 // isn't a whole number of refreshes), which missed vsyncs are counted against instead of vsyncs.
 void presentSetPacing(double refresh_ms, uint32_t vsyncs, double limiter_ms);
 
+// gw2 (#157): DXMT_PRESENT_QUEUE, parsed once per process. Default: the layer keeps its three
+// drawables and Present doesn't sleep. Two: the layer's maximumDrawableCount is 2. Pace: Present
+// sleeps when the last nextDrawable blocked (dxmt_gw2_present_pace.hpp); it needs DXMT_STATS, whose
+// presented records and nextDrawable timer it reads, and does nothing without it.
+enum class PresentQueue : uint8_t { Default, Two, Pace };
+PresentQueue presentQueue();
+// pace asked for and DXMT_STATS on: the encode thread counts skips per frame and reports its blocks
+bool presentPaceOn();
+
+// Encode thread, with presentPaceOn(): how long the nextDrawable of present `seq` blocked.
+void presentPaceBlocked(int64_t ns, uint64_t seq);
+
+// Render thread, with presentPaceOn(): the last block and the per-frame missed and starved totals.
+struct PaceSignals {
+  int64_t blocked_ns = 0;
+  uint64_t blocked_seq = 0;
+  uint64_t missed = 0, starved = 0;
+};
+PaceSignals presentPaceSignals();
+// Render thread: pace slept `ns` (0: it didn't), for the PRESENTQ section; gave_up once when it gave up.
+void presentPaceStep(int64_t ns, bool gave_up);
+
 } // namespace dxmt::gw2

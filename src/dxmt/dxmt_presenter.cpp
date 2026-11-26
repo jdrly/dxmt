@@ -4,6 +4,7 @@
 #include "dxmt_format.hpp"
 #include "dxmt_presenter.hpp"
 #include "dxmt_gw2_lifetime.hpp"
+#include "dxmt_gw2_present.hpp"
 #include "dxmt_gw2_stats.hpp"
 #include "dxmt_gw2_switches.hpp"
 #include "util_likely.hpp"
@@ -30,6 +31,10 @@ Presenter::Presenter(WMT::Device device, WMT::MetalLayer layer, InternalCommandL
   layer_props_.display_sync_enabled = false;
   layer_props_.framebuffer_only = false; // how strangely setting it true results in worse performance
   layer_props_.contents_scale = layer_props_.contents_scale * scale_factor;
+  // gw2 (#157): DXMT_PRESENT_QUEUE=two holds the layer to two drawables; 0 leaves its three
+  layer_props_.maximum_drawable_count = gw2::presentQueue() == gw2::PresentQueue::Two ? 2 : 0;
+  if (layer_props_.maximum_drawable_count)
+    Logger::info("Presenter: maximumDrawableCount 2 (DXMT_PRESENT_QUEUE=two)");
 
   WMTTextureInfo texture_info;
   texture_info.type = WMTTextureType2D;

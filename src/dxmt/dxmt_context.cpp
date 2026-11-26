@@ -1458,6 +1458,10 @@ ArgumentEncodingContext::flushCommandsImpl(CommandBuffer &cmdbuf, uint64_t seqId
           currentFrameStatistics().next_drawable_interval += data->presenter->lastNextDrawable();
         if (stats)
           gw2::presentTrack(drawable.handle, frame_id_);
+        if (gw2::presentPaceOn()) // gw2 (#157): pace answers this block
+          gw2::presentPaceBlocked(
+              std::chrono::duration_cast<std::chrono::nanoseconds>(data->presenter->lastNextDrawable()).count(), frame_id_
+          );
         cmdbuf.signalDrawable(drawable); // commits the present pass first
         if (data->after > 0) {
           drawable.present(WMTDrawablePresentAfterMinimumDuration, data->after);
@@ -1516,6 +1520,10 @@ ArgumentEncodingContext::flushCommandsImpl(CommandBuffer &cmdbuf, uint64_t seqId
         // gw2 (#7): when the drawable reaches the screen, for the PRESENT section
         if (stats)
           gw2::presentTrack(drawable.handle, frame_id_);
+        if (gw2::presentPaceOn()) // gw2 (#157): pace answers this block
+          gw2::presentPaceBlocked(
+              std::chrono::duration_cast<std::chrono::nanoseconds>(data->presenter->lastNextDrawable()).count(), frame_id_
+          );
         if (data->after > 0) {
           cmdbuf.presentDrawableAfterMinimumDuration(drawable, data->after);
           if (stats)
