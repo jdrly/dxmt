@@ -178,6 +178,9 @@ public:
   NOTE: the current thread is blocked if it's not ready
    */
   virtual void GetPipeline(MTL_COMPILED_GRAPHICS_PIPELINE *pGraphicsPipeline) = 0;
+  // gw2 (#88): when it is created: true if its pipeline was already done in the shared results (then
+  // it is complete and isn't submitted)
+  virtual bool CompleteFromShared() { return false; }
 };
 
 class MTLCompiledComputePipeline : public ThreadpoolWork {

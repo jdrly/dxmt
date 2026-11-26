@@ -241,6 +241,69 @@ _CacheWriter_set(void *obj) {
   return 0;
 }
 
+// gw2 (W2/W3): see struct unixcall_cache_enumerate. Read-only, its own connection per call (a batch
+// is hundreds of KB; the warm thread makes a handful of calls).
+int
+_CacheEnumerate(void *obj) {
+  struct unixcall_cache_enumerate *params = obj;
+  params->ret_count = 0;
+  params->ret_used = 0;
+  params->ret_last_rowid = params->after_rowid;
+  params->ret_more = 0;
+  params->ret_status = 1;
+  @autoreleasepool {
+    NSString *path = [NSString stringWithUTF8String:params->path.ptr];
+    NSString *dbPath = resolve_cache_dir(path, true);
+    if (!dbPath || ![[NSFileManager defaultManager] fileExistsAtPath:dbPath])
+      return 0;
+    sqlite3 *db = NULL;
+    if (sqlite3_open_v2([dbPath fileSystemRepresentation], &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, NULL) !=
+        SQLITE_OK) {
+      sqlite3_close(db);
+      return 0;
+    }
+    NSString *sql = [NSString stringWithFormat:@"SELECT rowid, key, value FROM cache_%llu WHERE rowid > ? "
+                                               @"AND (? = 256 OR substr(key, 1, 1) = ?) ORDER BY rowid;",
+                                               params->version];
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, sql.UTF8String, -1, &stmt, NULL) != SQLITE_OK) {
+      sqlite3_close(db);
+      return 0;
+    }
+    unsigned char prefix = (unsigned char)params->prefix;
+    sqlite3_bind_int64(stmt, 1, (sqlite3_int64)params->after_rowid);
+    sqlite3_bind_int(stmt, 2, (int)params->prefix);
+    sqlite3_bind_blob(stmt, 3, &prefix, 1, SQLITE_STATIC);
+    params->ret_status = 0;
+    unsigned char *out = params->buffer.ptr;
+    uint64_t used = 0;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+      const void *key = sqlite3_column_blob(stmt, 1);
+      uint32_t key_len = (uint32_t)sqlite3_column_bytes(stmt, 1);
+      const void *value = sqlite3_column_blob(stmt, 2);
+      uint32_t value_len = (uint32_t)sqlite3_column_bytes(stmt, 2);
+      uint64_t need = 8ull + key_len + value_len;
+      if (used + need > params->capacity) {
+        params->ret_more = 1;
+        break;
+      }
+      for (int i = 0; i < 4; i++)
+        out[used + i] = (unsigned char)(key_len >> (8 * i));
+      memcpy(out + used + 4, key, key_len);
+      for (int i = 0; i < 4; i++)
+        out[used + 4 + key_len + i] = (unsigned char)(value_len >> (8 * i));
+      memcpy(out + used + 8 + key_len, value, value_len);
+      used += need;
+      params->ret_count++;
+      params->ret_last_rowid = (uint64_t)sqlite3_column_int64(stmt, 0);
+    }
+    params->ret_used = used;
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+  }
+  return 0;
+}
+
 #ifndef DXMT_NO_PRIVATE_API
 
 extern void MTLSetShaderCachePath(NSString* path);

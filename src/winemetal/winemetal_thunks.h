@@ -357,6 +357,21 @@ struct unixcall_cache_set {
   uint64_t ret_db_bytes;
 };
 
+// gw2 (W2/W3): read the rows of a cache database (cache.c's layout) in rowid order, in batches.
+struct unixcall_cache_enumerate {
+  struct WMTConstMemoryPointer path; // as CacheReader_alloc_init's (relative: the user cache dir)
+  uint64_t version;                  // the table, cache_<version>
+  uint64_t after_rowid;              // rows after this one
+  struct WMTMemoryPointer buffer;    // out: per row u32 key length, key, u32 value length, value (LE)
+  uint64_t capacity;                 // the buffer's size
+  uint32_t prefix;                   // the first key byte to match, or 256: any
+  uint32_t ret_count;                // rows written
+  uint64_t ret_used;                 // bytes written
+  uint64_t ret_last_rowid;           // the last row written (the next call's after_rowid)
+  uint32_t ret_more;                 // rows remain (the buffer was full)
+  uint32_t ret_status;               // 0: read; 1: no database or table
+};
+
 struct unixcall_setmetalcachepath {
   struct WMTConstMemoryPointer path;
   uint64_t ret_success;

@@ -98,6 +98,13 @@ recorder() {
   return *r;
 }
 
+// A key's 63-bit fingerprint (FNV-1a; bit 0 is the admitted flag). Two different keys with the same
+// fingerprint count as one (#58 review, accepted; #103): the table keeps no keys, which would cost
+// about 12 MB at 2^18 slots. The keys are SHA-1-based (21-45 bytes), so for n = 30,000 keys a session
+// the chance of any collision is about n^2 / 2^64, about 5e-11. Fingerprints are deterministic, so a
+// colliding pair collides in every session that sees both: the second key's row is never recorded
+// and its pipeline is built at first use, as without recording. Warming's own tables (C4) are keyed
+// by full digests and never rely on this.
 uint64_t
 fingerprint(const std::string &key) {
   uint64_t h = 1469598103934665603ull; // FNV-1a 64
