@@ -22,9 +22,9 @@ bool metal4Requested();
 // upstream's own line (the same grammar) and makes the MetalFX spatial swapchain.
 bool metalfxSpatialSwapchain();
 
-// gw2 (#154): DXMT_MTL4_TIMESTAMP_REUSE (off unless exactly "1"), read once per process. On, a Metal 4
-// chunk's timestamp queries read its last command buffer, the present's after a present. Off (the
-// default) gives them an empty command buffer of their own after it, as before #154.
+// gw2 (#154): DXMT_MTL4_TIMESTAMP_REUSE (on unless exactly "0"), read once per process.
+// On (the default), a Metal 4 chunk's timestamp queries read its last command buffer, the present's
+// after a present. =0 gives them an empty command buffer of their own after it, as before #154.
 bool mtl4TimestampReuse();
 
 // gw2 (#227): DXMT_MTL4_PRESENT=mtl3 (exactly), read once per process: a queue on Metal 4 presents
@@ -42,9 +42,9 @@ mtl4ShownWaitGrammar(const std::string &raw, const std::string &fallback) {
   return raw == "write" ? raw : fallback;
 }
 
-// gw2 (#204): DXMT_MTL4_ALLOCATOR_POOL (off unless exactly "1"), read on each call: the command queue
-// reads it once, for its Metal 4 queue (gw2::Mtl4Queue's allocator_pool). On, the queue's command
-// allocators come from a pool instead of one per chunk slot.
+// gw2 (#204): DXMT_MTL4_ALLOCATOR_POOL (on unless exactly "0"), read on each call: the command queue
+// reads it once, for its Metal 4 queue (gw2::Mtl4Queue's allocator_pool).
+// On (the default), the queue's command allocators come from a pool; =0: one per chunk slot.
 bool mtl4AllocatorPool();
 
 // Whether this process's queues take the Metal 4 path (DXMT_METAL4 on, on a device that has it).
