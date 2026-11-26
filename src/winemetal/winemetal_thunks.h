@@ -490,6 +490,14 @@ struct unixcall_wmt_set_thread_qos {
   uint32_t padding;
 };
 
+/* gw2 (#151): 32-bit fields only, one layout for 32-bit and 64-bit (one wow64 entry). */
+struct unixcall_wmt_set_thread_base_priority {
+  int32_t base_priority;
+  int32_t ret_old_base;
+  int32_t ret_new_base;
+  int32_t ret;
+};
+
 struct unixcall_wmt_pso_archive_init {
   obj_handle_t device;
   struct WMTConstMemoryPointer config;
