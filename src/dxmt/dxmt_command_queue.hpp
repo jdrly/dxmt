@@ -231,6 +231,9 @@ private:
   bool refused_holds_logged_ = false;        // gw2 (#113): finish thread
   // gw2 (#10, #32, #77): finish thread: the split buffers' error lines (the first 8, then one a second)
   gw2::BasicSplitErrorThrottle<clock::time_point> split_errors_;
+  // gw2 (#353): finish thread, Metal 4: the lines at a device error (dxmt_gw2_present_fences.cpp)
+  gw2::PresentFenceReport present_fences_;
+  void gw2ReportPresentFences(CommandChunk &chunk, const CompletedChunk &completed);
 
   std::atomic_uint64_t ready_for_encode = 1; // we start from 1, so 0 is always coherent
   std::atomic_uint64_t ready_for_commit = 1;

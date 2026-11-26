@@ -326,6 +326,10 @@ struct DependencyCounters {
   std::atomic<uint64_t> waits{};           // waitForFence the encoders emit
   std::atomic<uint64_t> updates{};         // updateFence the encoders emit
   std::atomic<uint64_t> checkpoint_waits{}; // of `waits`, those of encoders holding a checkpoint stage
+  // gw2 (#353): Metal 4 with DXMT_MTL4_PRESENT=mtl3 (dxmt_gw2_present_fences.hpp): presents on a checkpoint
+  // whose fences didn't reach the queue, and encoders that waited on such a present's fence before a shown wait
+  std::atomic<uint64_t> present_checkpoints{};
+  std::atomic<uint64_t> present_stale{};
 };
 DependencyCounters &dependencyCounters();
 
