@@ -540,6 +540,18 @@ struct unixcall_mtl4_drawable_present {
   double value;
 };
 
+/* gw2 (#242) */
+struct unixcall_mtl4_queue_commit_present {
+  obj_handle_t queue;
+  obj_handle_t cmdbuf;
+  struct WMTMemoryPointer feedback;
+  obj_handle_t event;
+  uint64_t event_value;
+  obj_handle_t drawable;
+  uint64_t mode;
+  double value;
+};
+
 struct unixcall_mtl4_new_encoder {
   obj_handle_t cmdbuf;
   struct WMTConstMemoryPointer info;

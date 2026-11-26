@@ -45,6 +45,9 @@
 //     unknown and when its surface is seen for the first time. A gap in the frame numbers (a lost
 //     record) starts every surface's history over.
 //   - inuse: drawables whose surface IOSurfaceIsInUse called in use when the present was tracked.
+// - gw2 (#242), last, on Metal 4 only: presentat, the drawable's present call minus its encode, avg/max
+//   ms (presentAtSample). 0 on the Metal 4 order, which presents right after signalDrawable; with
+//   DXMT_MTL4_PRESENT=done, when the present went out after the pass's commit completed.
 
 namespace dxmt::gw2 {
 
@@ -186,7 +189,11 @@ section(double, uint32_t) {
     lost = g_lost;
     g_lost = 0;
   }
-  if (records.empty() && !lost && g_gpu_waiting.empty())
+  // gw2 (#242): the window's presentat
+  uint64_t at_n = g_present_at.n.exchange(0, std::memory_order_relaxed);
+  uint64_t at_sum = g_present_at.sum_ns.exchange(0, std::memory_order_relaxed);
+  uint64_t at_max = g_present_at.max_ns.exchange(0, std::memory_order_relaxed);
+  if (records.empty() && !lost && g_gpu_waiting.empty() && !at_n)
     return {};
   std::sort(records.begin(), records.end(), [](auto &a, auto &b) { return a.frame < b.frame; });
 
@@ -314,6 +321,8 @@ section(double, uint32_t) {
   else
     text += " drawwait=-";
   text += std::format(" early={} inuse={}", early, inuse);
+  if (at_n) // gw2 (#242)
+    text += std::format(" presentat={:.2f}/{:.2f}", at_sum / 1e6 / at_n, at_max / 1e6);
   return text;
 }
 

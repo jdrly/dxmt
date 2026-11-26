@@ -2455,8 +2455,15 @@ struct WMTMtl4CommitFeedback {
   double gpu_end;
   obj_handle_t error;
   uint64_t done;
+  /* gw2 (#242): MTL4CommandQueue_commitPresent's present, 0 for any other commit. present_encode:
+     CACurrentMediaTime after signalDrawable, in the call; present_time: right before the present call;
+     present_early: 1 if the commit's feedback handler hadn't run then. The handler writes the last two
+     before done when it presents; when the call presents, it writes them before it returns. */
+  double present_encode;
+  double present_time;
+  uint64_t present_early;
 };
-STATIC_ASSERT(sizeof(struct WMTMtl4CommitFeedback) == 32);
+STATIC_ASSERT(sizeof(struct WMTMtl4CommitFeedback) == 56);
 STATIC_ASSERT(sizeof(struct WMTArgTableInfo) == 16);
 
 /* gw2 (#32): every value below is +1 (new*) unless it says otherwise */
@@ -2500,6 +2507,19 @@ enum WMTDrawablePresentMode : uint32_t {
   WMTDrawablePresentWithDeadline = 2,
 };
 WINEMETAL_API void MetalDrawable_present(obj_handle_t drawable, enum WMTDrawablePresentMode mode, double value);
+
+/* gw2 (#242): DXMT_MTL4_PRESENT=done. Commits cmdbuf (the present pass) as MTL4CommandQueue_commit does,
+   with feedback (not 0) and event, then signalDrawable:drawable, then presents the drawable once both
+   that signal and the commit's feedback handler have happened: whichever comes second presents, once,
+   from its own thread (the handler's is a Metal thread). The present is MetalDrawable_present's for
+   mode and value, but a deadline counts from the time taken after signalDrawable in this call, not
+   from the present. The drawable is retained until it is presented; a commit with an error presents
+   all the same. If the unix side can't allocate its gate (a few bytes), that present is today's: right after
+   the signal, from the call. */
+WINEMETAL_API void MTL4CommandQueue_commitPresent(
+    obj_handle_t queue, obj_handle_t cmdbuf, struct WMTMtl4CommitFeedback *feedback, obj_handle_t event,
+    uint64_t event_value, obj_handle_t drawable, enum WMTDrawablePresentMode mode, double value
+);
 
 /* autoreleased, like Metal 3's encoders. Binds state's tables (if state isn't null); a render
    encoder also puts the pass's attachments into state's residency set */

@@ -30,6 +30,11 @@ bool mtl4TimestampReuse();
 // through a Metal 3 command buffer (gw2::Mtl4Queue::enableMetal3Present). A test switch for #223, off.
 bool mtl4PresentMetal3();
 
+// gw2 (#242): DXMT_MTL4_PRESENT=done (exactly), read once per process: a queue on Metal 4 presents the
+// drawable once its pass's commit has completed (gw2::Mtl4Queue::enablePresentWhenDone). A test switch
+// for #223, off.
+bool mtl4PresentDone();
+
 // gw2 (#204): DXMT_MTL4_ALLOCATOR_POOL (off unless exactly "1"), read on each call: the command queue
 // reads it once, for its Metal 4 queue (gw2::Mtl4Queue's allocator_pool). On, the queue's command
 // allocators come from a pool instead of one per chunk slot.

@@ -1449,6 +1449,10 @@ ArgumentEncodingContext::flushCommandsImpl(CommandBuffer &cmdbuf, uint64_t seqId
         // belong to the Metal 4 queue and aren't encoded. The layer's residency set isn't named: Metal 3
         // keeps the drawable resident.
         bool mtl3 = cmdbuf.queue().metal3Present();
+        // gw2 (#242): DXMT_MTL4_PRESENT=done: the Metal 4 order up to and including signalDrawable, but the
+        // unix side presents once the pass's commit has completed (Mtl4Encoding::presentWhenDone commits
+        // the pass, signals the drawable and leaves the present to whichever of the two comes second)
+        const bool done = cmdbuf.queue().presentWhenDone();
         WMT::CommandBuffer mtl3_present{};
         uint64_t mtl3_value = 0;
         if (mtl3) {
@@ -1498,29 +1502,36 @@ ArgumentEncodingContext::flushCommandsImpl(CommandBuffer &cmdbuf, uint64_t seqId
           gw2::presentPaceBlocked(
               std::chrono::duration_cast<std::chrono::nanoseconds>(data->presenter->lastNextDrawable()).count(), frame_id_
           );
-        if (!mtl3)
+        if (!mtl3 && !done)
           cmdbuf.signalDrawable(drawable); // commits the present pass first
         // gw2 (#227): with mtl3 the command buffer presents, as on Metal 3: Metal calls the drawable's
-        // present once it schedules the buffer
+        // present once it schedules the buffer. gw2 (#242): with done, the same three presents, with the
+        // deadline counted from here, not from the pass's completion
         if (data->after > 0) {
           if (mtl3)
             mtl3_present.presentDrawableAfterMinimumDuration(drawable, data->after);
+          else if (done)
+            cmdbuf.presentWhenDone(drawable, WMTDrawablePresentAfterMinimumDuration, data->after);
           else
-            drawable.present(WMTDrawablePresentAfterMinimumDuration, data->after);
+            cmdbuf.present(drawable, WMTDrawablePresentAfterMinimumDuration, data->after);
           if (stats)
             currentFrameStatistics().present_after++;
         } else if (data->deadline > 0) {
           if (mtl3)
             mtl3_present.presentDrawableWithDeadline(drawable, data->deadline);
+          else if (done)
+            cmdbuf.presentWhenDone(drawable, WMTDrawablePresentWithDeadline, data->deadline);
           else
-            drawable.present(WMTDrawablePresentWithDeadline, data->deadline);
+            cmdbuf.present(drawable, WMTDrawablePresentWithDeadline, data->deadline);
           if (stats)
             currentFrameStatistics().present_deadline++;
         } else {
           if (mtl3)
             mtl3_present.presentDrawable(drawable);
+          else if (done)
+            cmdbuf.presentWhenDone(drawable, WMTDrawablePresent, 0);
           else
-            drawable.present();
+            cmdbuf.present(drawable, WMTDrawablePresent, 0);
           if (stats)
             currentFrameStatistics().present_plain++;
         }
