@@ -25,6 +25,16 @@ enum class TimestampMode : uint8_t {
 TimestampMode timestampMode();
 const char *timestampModeName(TimestampMode mode);
 
+// gw2 (#158): DXMT_GETDATA_SKIP_FLUSH. A GetData without DONOTFLUSH that finds a timestamp or
+// timestamp-disjoint query unresolved skips its Flush in estimate and boundary once the chunk the query
+// ended in (`issued_chunk`, 0: unknown) is no longer the one being recorded (`current_chunk`): a
+// committed chunk resolves without help (the GPU, then the finish thread). A query still in the current
+// chunk flushes, which commits that chunk, so a poll loop always ends.
+inline bool
+getDataSkipsFlush(bool on, TimestampMode mode, uint64_t issued_chunk, uint64_t current_chunk) {
+  return on && mode != TimestampMode::Exact && issued_chunk && issued_chunk < current_chunk;
+}
+
 // Logs once per process, at the first query End that estimate or boundary handles.
 void timestampActed();
 

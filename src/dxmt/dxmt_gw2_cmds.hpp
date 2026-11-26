@@ -99,6 +99,15 @@ enum class Promote : uint8_t {
 constexpr unsigned kPromoteCount = (unsigned)Promote::Count;
 extern const char *const kPromoteNames[kPromoteCount];
 
+// gw2 (#158): the query of a GetData that would flush (without DONOTFLUSH, or a stalled poll) and found
+// its data not ready. The names are the getflush= and getskip= keys (kGetDataNames).
+enum class GetDataKind : uint8_t { Event, Occlusion, Timestamp, Disjoint, Count };
+constexpr unsigned kGetDataKindCount = (unsigned)GetDataKind::Count;
+extern const char *const kGetDataNames[kGetDataKindCount];
+// Counts one such poll: `flushed` (STATS stall counts it too), or its Flush skipped by
+// DXMT_GETDATA_SKIP_FLUSH. Only with DXMT_STATS; any thread (a relaxed atomic add).
+void getDataPoll(GetDataKind kind, bool flushed);
+
 // The render thread's counters (the immediate context).
 struct FrontCounters {
   bool on = statsEnabled(); // DXMT_STATS, cached: off, nothing is counted
