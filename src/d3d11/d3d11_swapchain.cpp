@@ -757,6 +757,7 @@ public:
     if (PresentFlags & DXGI_PRESENT_TEST)
       return hr;
 
+    RaiseRenderThreadPriority();
     PresentStart();
     ThrottleBackground();
     int64_t gw2_present_t0 = gw2::nowNs();
@@ -887,6 +888,72 @@ public:
       ));
     }
     gw2::apiFrameReset();
+  }
+
+  // gw2 (#9): DXMT_RENDER_THREAD_PRIORITY raises the thread that calls Present (GW2's bgfx render
+  // thread, which makes every D3D11 call) on its first Present; it ran 22% of its time on
+  // Performance cores in Lion's Arch. =1: the macOS QoS class USER_INTERACTIVE, set on this thread
+  // through the bridge (pthread_set_qos_class_self_np). =2: Win32 SetThreadPriority(HIGHEST), which
+  // Wine's server turns into Mach scheduling policies (precedence, latency/throughput tier 0), not
+  // a QoS class. =3: both, SetThreadPriority first: Wine's thread_policy_set likely takes a thread
+  // out of its QoS class, so the QoS class goes last. Once per thread, logged; a failure leaves the
+  // thread as it was. No restore: the render thread lives as long as the game, and only the thread
+  // itself can change its QoS class, which a swapchain destroyed on another thread couldn't do.
+  void RaiseRenderThreadPriority() {
+    static const uint32_t s_mode = [] {
+      auto v = env::getEnvVar("DXMT_RENDER_THREAD_PRIORITY");
+      return v.empty() ? 0u : uint32_t(std::strtoul(v.c_str(), nullptr, 10));
+    }();
+    if (!s_mode)
+      return;
+    static thread_local bool t_done = false;
+    if (t_done)
+      return;
+    t_done = true;
+    DWORD tid = GetCurrentThreadId();
+    if (s_mode > 3) {
+      Logger::info(str::format("RenderThreadPriority: thread ", tid, ": DXMT_RENDER_THREAD_PRIORITY=", s_mode,
+                               " isn't 1, 2 or 3, left unchanged"));
+      return;
+    }
+    if (s_mode & 2) {
+      HANDLE self = GetCurrentThread();
+      int old_priority = GetThreadPriority(self);
+      BOOL ok = SetThreadPriority(self, THREAD_PRIORITY_HIGHEST);
+      DWORD err = ok ? 0 : GetLastError();
+      Logger::info(str::format(
+          "RenderThreadPriority: thread ", tid, " priority ", old_priority, " -> ", GetThreadPriority(self),
+          " (SetThreadPriority THREAD_PRIORITY_HIGHEST: ",
+          ok ? std::string("ok") : str::format("error ", err, ", left unchanged"), ")"
+      ));
+    }
+    if (s_mode & 1) {
+      WMTQoSClass old_qos, new_qos;
+      int err = WMTSetThreadQoSClassSelf(WMTQoSClassUserInteractive, 0, &old_qos, &new_qos);
+      Logger::info(str::format(
+          "RenderThreadPriority: thread ", tid, " QoS ", QoSName(old_qos), " -> ", QoSName(new_qos),
+          " (pthread_set_qos_class_self_np user-interactive: ",
+          err ? str::format("error ", err, ", left unchanged") : std::string("ok"), ")"
+      ));
+    }
+  }
+
+  static const char *QoSName(WMTQoSClass qos) {
+    switch (qos) {
+    case WMTQoSClassUnspecified:
+      return "unspecified";
+    case WMTQoSClassBackground:
+      return "background";
+    case WMTQoSClassUtility:
+      return "utility";
+    case WMTQoSClassDefault:
+      return "default";
+    case WMTQoSClassUserInitiated:
+      return "user-initiated";
+    case WMTQoSClassUserInteractive:
+      return "user-interactive";
+    }
+    return "other";
   }
 
   // gw2: the background throttle (d9mt 42b0c47). When the window isn't visible, macOS doesn't make

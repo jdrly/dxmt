@@ -1340,3 +1340,22 @@ MTLTexture_getBytes(
   params.bytes_per_image = bytes_per_image;
   UNIX_CALL(145, &params);
 }
+
+WINEMETAL_API int
+WMTSetThreadQoSClassSelf(
+    enum WMTQoSClass qos, int relative_priority, enum WMTQoSClass *old_qos, enum WMTQoSClass *new_qos
+) {
+  struct unixcall_wmt_set_thread_qos params;
+  params.qos_class = qos;
+  params.relative_priority = relative_priority;
+  params.ret_old_qos_class = 0;
+  params.ret_new_qos_class = 0;
+  params.ret = -1;
+  params.padding = 0;
+  UNIX_CALL(153, &params);
+  if (old_qos)
+    *old_qos = (enum WMTQoSClass)params.ret_old_qos_class;
+  if (new_qos)
+    *new_qos = (enum WMTQoSClass)params.ret_new_qos_class;
+  return params.ret;
+}

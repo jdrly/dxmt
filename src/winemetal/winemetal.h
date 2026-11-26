@@ -2153,4 +2153,21 @@ WINEMETAL_API void MTLTexture_getBytes(
     struct WMTMemoryPointer data, uint64_t bytes_per_row, uint64_t bytes_per_image
 );
 
+/* gw2 (#9): macOS QoS classes, the values of qos_class_t (<sys/qos.h>). */
+enum WMTQoSClass {
+  WMTQoSClassUnspecified = 0x00,
+  WMTQoSClassBackground = 0x09,
+  WMTQoSClassUtility = 0x11,
+  WMTQoSClassDefault = 0x15,
+  WMTQoSClassUserInitiated = 0x19,
+  WMTQoSClassUserInteractive = 0x21,
+};
+
+/* gw2 (#9): pthread_set_qos_class_self_np(qos, relative_priority) on the calling thread (a unix
+   call runs on the thread that makes it). Returns 0 or the errno; *old_qos is qos_class_self()
+   before the call, *new_qos after it. On failure the thread is unchanged. */
+WINEMETAL_API int WMTSetThreadQoSClassSelf(
+    enum WMTQoSClass qos, int relative_priority, enum WMTQoSClass *old_qos, enum WMTQoSClass *new_qos
+);
+
 #endif
