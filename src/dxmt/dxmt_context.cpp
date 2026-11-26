@@ -566,6 +566,9 @@ ArgumentEncodingContext::present(
   encoder_info->metadata = metadata;
 
   encoder_current = encoder_info;
+  // gw2 (#271): the texture this present reads, for the writes after it (DXMT_MTL4_SHOWN_WAIT=write)
+  if (gw2_shown_write_)
+    encoder_info->gw2_shown_now = gw2_shown_.presented(texture->current());
   encoder_info->backbuffer = access(texture, texture->fullView, ResourceAccess::Read).texture;
   endPass();
 }
@@ -1198,8 +1201,17 @@ ArgumentEncodingContext::flushCommandsImpl(CommandBuffer &cmdbuf, uint64_t seqId
 
   while (encoder_index) {
     auto current = encoders[encoder_count - encoder_index];
-    if constexpr (kMetal4)
+    if constexpr (kMetal4) {
       cmdbuf.setPosition(2 * uint64_t(encoder_count - encoder_index)); // gw2 (#32): timestamp segments
+      // gw2 (#271): DXMT_MTL4_SHOWN_WAIT=write: the first encoder that writes the texture a present read
+      // waits for that present's `shown` (a merged-away encoder is Null and passed its flag on)
+      if (current->gw2_shown_wait && current->type != EncoderType::Null && cmdbuf.queue().metal3Present()) {
+        if (uint64_t value = gw2_shown_.waitBefore()) {
+          cmdbuf.waitShown(value);
+          gw2::metal4ShownWaited(encoder_count - encoder_index, encoder_count);
+        }
+      }
+    }
     // gw2 (#4): the Metal encoders as they are encoded, after the optimizer's merges
     if (gw2_stats && current->type != EncoderType::Null) {
       gw2_enc_.encoders[(unsigned)gw2EncoderKind(current->type)]++;
@@ -1462,6 +1474,11 @@ ArgumentEncodingContext::flushCommandsImpl(CommandBuffer &cmdbuf, uint64_t seqId
           } else {
             // no Metal 3 buffer: nothing waits for `shown`, and this frame presents the Metal 4 way
             mtl3 = false;
+            // gw2 (#271): with DXMT_MTL4_SHOWN_WAIT=write a present before it may still be left to a write,
+            // and this one may have replaced its texture as the one writes are checked against: wait now
+            if (gw2_shown_write_)
+              if (uint64_t value = gw2_shown_.waitBefore())
+                cmdbuf.waitShown(value);
             static std::atomic<bool> s_logged{false};
             if (!s_logged.exchange(true, std::memory_order_relaxed))
               ERR("Metal 4: no Metal 3 command buffer for a present; it presents the Metal 4 way "
@@ -1535,8 +1552,18 @@ ArgumentEncodingContext::flushCommandsImpl(CommandBuffer &cmdbuf, uint64_t seqId
           if (stats)
             currentFrameStatistics().present_plain++;
         }
-        if (mtl3)
-          cmdbuf.commitMetal3Present(mtl3_present, mtl3_value); // the queue's next commits wait for it
+        if (mtl3) {
+          // the queue's next commits wait for it. gw2 (#271): with DXMT_MTL4_SHOWN_WAIT=write, only from
+          // the next encoder that writes the presented texture, unless this present read another
+          // texture than the one before it
+          const bool now = !gw2_shown_write_ || data->gw2_shown_now;
+          cmdbuf.commitMetal3Present(mtl3_present, mtl3_value, now);
+          if (gw2_shown_write_) {
+            gw2_shown_.flushed(mtl3_value, now);
+            if (!now)
+              gw2::metal4ShownDeferred();
+          }
+        }
         if (lt_on) { // gw2 (#31)
           lt(drawable, LtKind::Drawable);
           lt(drawable.texture(), LtKind::DrawableTexture);
@@ -1949,6 +1976,7 @@ ArgumentEncodingContext::checkEncoderRelation(EncoderData *former, EncoderData *
           render->fence_wait.merge(clear->fence_wait);
           render->fence_wait.subtract(clear->fence_update);
           render->gw2_checkpoint |= clear->gw2_checkpoint; // gw2 (#132)
+          render->gw2_shown_wait |= clear->gw2_shown_wait; // gw2 (#271)
           currentFrameStatistics().clear_pass_optimized++;
           clear->~ClearEncoderData();
           clear->next = nullptr;
@@ -1965,6 +1993,7 @@ ArgumentEncodingContext::checkEncoderRelation(EncoderData *former, EncoderData *
           render->fence_wait.merge(clear->fence_wait);
           render->fence_wait.subtract(clear->fence_update);
           render->gw2_checkpoint |= clear->gw2_checkpoint; // gw2 (#132)
+          render->gw2_shown_wait |= clear->gw2_shown_wait; // gw2 (#271)
           currentFrameStatistics().clear_pass_optimized++;
           clear->~ClearEncoderData();
           clear->next = nullptr;
@@ -1995,6 +2024,7 @@ ArgumentEncodingContext::checkEncoderRelation(EncoderData *former, EncoderData *
         render->fence_update.merge(resolve->fence_update);
         render->fence_wait.merge(resolve->fence_wait);
         render->gw2_checkpoint |= resolve->gw2_checkpoint; // gw2 (#132)
+        render->gw2_shown_wait |= resolve->gw2_shown_wait; // gw2 (#271)
         render->fence_wait.subtract(resolve->fence_update);
 
         currentFrameStatistics().resolve_pass_optimized++;
@@ -2067,6 +2097,7 @@ ArgumentEncodingContext::checkEncoderRelation(EncoderData *former, EncoderData *
           r0->fence_wait_vertex, r0->fence_update, r0->fence_update_vertex
       );
       r1->gw2_checkpoint |= r0->gw2_checkpoint;
+      r1->gw2_shown_wait |= r0->gw2_shown_wait; // gw2 (#271)
 
       currentFrameStatistics().render_pass_optimized++;
       r0->~RenderEncoderData();

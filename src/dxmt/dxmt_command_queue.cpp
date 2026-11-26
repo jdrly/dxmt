@@ -243,6 +243,12 @@ CommandQueue::CommandQueue(WMT::Device device) :
       // gw2 (#227): a test switch for #223; unset, no line
       if (gw2::mtl4PresentMetal3())
         Logger::info("Metal 4: present through a Metal 3 command buffer (DXMT_MTL4_PRESENT=mtl3)");
+      // gw2 (#271): off by default; unset, no line
+      if (gw2::mtl4ShownWaitWrite()) {
+        gw2::metal4ShownWaitInUse();
+        Logger::info("Metal 4: the next frame waits for a Metal 3 present only before it writes the presented "
+                     "texture (DXMT_MTL4_SHOWN_WAIT=write)");
+      }
       // gw2 (#242): a test switch for #223; unset, no line
       if (gw2::mtl4PresentDone())
         Logger::info("Metal 4: the drawable is presented when its pass's commit has completed (DXMT_MTL4_PRESENT=done)");
