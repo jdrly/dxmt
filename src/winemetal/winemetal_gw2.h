@@ -103,6 +103,9 @@ enum WMTMtl4TableStage : uint32_t {
 };
 #define WMT_MTL4_TABLE_STAGES 4
 #define WMT_MTL4_MAX_BUFFERS 31
+/* gw2 (#297): the texture slots of an argument table (newTable's max_textures); set_texture
+   refuses an index at or past it */
+#define WMT_MTL4_MAX_TEXTURES 32
 
 /*
  * An encoder's binding state, in the caller's memory (the encode thread's), read and updated by the

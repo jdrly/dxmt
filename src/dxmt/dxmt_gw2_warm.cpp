@@ -184,15 +184,32 @@ readRows(const WarmEnumerate &enumerate, const std::atomic<bool> &stop, uint64_t
   while (more && !stop.load()) {
     WarmBatch b = enumerate(after, buffer.data(), buffer.size());
     status.busy += b.busy;
-    for (uint64_t p = 0, i = 0; i < b.count && p + 8 <= b.used; i++) {
+    // gw2 (#297): a row must lie inside what the batch says it used (and inside the buffer). One
+    // that doesn't means the batch disagrees with itself: nothing of it is handed on from there, and
+    // the read ends as a failed batch does
+    const uint64_t used = std::min<uint64_t>(b.used, buffer.size());
+    bool malformed = false;
+    for (uint64_t p = 0, i = 0; i < b.count && p + 8 <= used; i++) {
       auto u32 = [&](uint64_t at) {
         return uint32_t(buffer[at]) | uint32_t(buffer[at + 1]) << 8 | uint32_t(buffer[at + 2]) << 16 |
                uint32_t(buffer[at + 3]) << 24;
       };
       uint32_t key_length = u32(p);
+      if (p + 8 + uint64_t(key_length) > used) {
+        malformed = true;
+        break;
+      }
       uint32_t value_length = u32(p + 4 + key_length);
+      if (p + 8 + uint64_t(key_length) + value_length > used) {
+        malformed = true;
+        break;
+      }
       row(buffer.data() + p + 4, key_length, buffer.data() + p + 8 + key_length, value_length);
       p += 8ull + key_length + value_length;
+    }
+    if (malformed) {
+      status.read_error = 1; // as an answer that can't be stepped past (SQLITE_ERROR)
+      break;
     }
     if (b.status == 2) {
       status.read_error = b.error ? b.error : 1; // the rows before it were read; the rest is lost

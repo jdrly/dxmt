@@ -502,7 +502,7 @@ set_bytes(struct replay *r, unsigned stage, const void *bytes, uint64_t length, 
 static inline void
 set_texture(struct replay *r, unsigned stage, obj_handle_t texture, unsigned index) {
   id<MTL4ArgumentTable> table = (id<MTL4ArgumentTable>)r->state->tables[stage];
-  if (!table) {
+  if (!table || index >= WMT_MTL4_MAX_TEXTURES) { /* gw2 (#297): as set_address bounds buffers */
     r->state->unsupported++;
     return;
   }
@@ -690,6 +690,13 @@ _MTL4RenderCommandEncoder_encodeCommands(void *obj) {
       index_lookup(
           r, &index, body->index_buffer, packet_resident(next), body->index_buffer_address, body->index_buffer_length
       );
+      /* gw2 (#297): D3D11 allows an index buffer offset at or past the buffer's end (the fetches
+         read 0). The length below would wrap to nearly 2^64 and Metal 4 takes raw addresses. Nothing
+         can be drawn from it, so the draw is skipped and counted */
+      if (body->index_buffer_offset >= index.length) {
+        state->unsupported++;
+        break;
+      }
       [encoder drawIndexedPrimitives:(MTLPrimitiveType)body->primitive_type
                           indexCount:body->index_count
                            indexType:(MTLIndexType)body->index_type
@@ -712,6 +719,10 @@ _MTL4RenderCommandEncoder_encodeCommands(void *obj) {
       struct wmtcmd_render_draw_indexed_indirect *body = (struct wmtcmd_render_draw_indexed_indirect *)next;
       bool resident = packet_resident(next);
       index_lookup(r, &index, body->index_buffer, resident, body->index_buffer_address, body->index_buffer_length);
+      if (body->index_buffer_offset >= index.length) { /* gw2 (#297): as WMTRenderCommandDrawIndexed */
+        state->unsupported++;
+        break;
+      }
       [encoder
           drawIndexedPrimitives:(MTLPrimitiveType)body->primitive_type
                       indexType:(MTLIndexType)body->index_type
