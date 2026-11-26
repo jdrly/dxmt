@@ -1,5 +1,6 @@
 #pragma once
 #include <array>
+#include <atomic>
 #include <cassert>
 #include <cstdint>
 #include <cstring>
@@ -22,7 +23,14 @@ constexpr auto kAllLaneMask = ~0ull >> (64 /* uint64_t */ - kLane);
 constexpr auto kParity = 4; // can also use 3, although power of 2 is nice
 constexpr auto kParityLane = kParity * kLane;
 
+// gw2 (#132): with DXMT_DEPENDENCY_COMPRESSION the trackers keep direct dependencies this many
+// encoder IDs back (the legacy policy keeps kLane); FenceLocalityCheck's checkpoint chain covers
+// everything older (see collectAndSimplifyWaits).
+constexpr auto kCompressedHorizon = 2 * kLane;
+constexpr auto kCheckpointStride = kLane - 1;
+
 static_assert(kLog2Lane <= 6);
+static_assert(kCompressedHorizon < kParityLane);
 static_assert(kLane > 1);
 
 using LaneStorage = uint64_t;
@@ -163,6 +171,15 @@ public:
     return laneMask() == 0;
   }
 
+  // gw2 (#132): how many fences the set names
+  uint32_t
+  count() const {
+    uint32_t ret = 0;
+    for (int i = 0; i < kParity; i++)
+      ret += __builtin_popcountll(storage_[i]);
+    return ret;
+  }
+
   template <typename Fn>
   void
   forEach(Fn &&fn) {
@@ -228,18 +245,19 @@ public:
     storage_[cursor] = 0;
   };
 
+  // gw2 (#132): `horizon` (<= Sz) is how far back an access still counts; the legacy policy passes kLane
   template <typename Fn>
   size_t
-  enumerate(EncoderId id_before, Fn &&fn) {
+  enumerate(EncoderId id_before, EncoderId horizon, Fn &&fn) {
     size_t count = 0;
-    assert(id_before > Sz);
+    assert(id_before > Sz && horizon <= Sz);
     for (size_t i = 0; i < Sz; i++) {
       auto c = storage_[(cursor + Sz - i) % Sz];
       if (c >= id_before) {
         assert(c - id_before <= Forward);
         continue;
       }
-      if (c > (id_before - Sz)) {
+      if (c > (id_before - horizon)) {
         fn(c);
         count++;
         continue;
@@ -265,21 +283,22 @@ struct EncoderBarrierState {
   uint64_t reserved                         : 56;
 };
 
+// gw2 (#132): every access takes the context's horizon: kLane (legacy) or kCompressedHorizon
 class GenericAccessTracker {
 public:
-  void accessShared(EncoderId id, FenceSet &wait_fences, EncoderBarrierState &barrier_state);
-  void accessExclusive(EncoderId id, FenceSet &wait_fences, EncoderBarrierState &barrier_state, bool uav);
+  void accessShared(EncoderId id, FenceSet &wait_fences, EncoderBarrierState &barrier_state, EncoderId horizon = kLane);
+  void accessExclusive(EncoderId id, FenceSet &wait_fences, EncoderBarrierState &barrier_state, bool uav, EncoderId horizon = kLane);
 
-  void accessSharedPreRaster(EncoderId id, FenceSet &wait_fences, EncoderBarrierState &barrier_state);
-  void accessExclusivePreRaster(EncoderId id, FenceSet &wait_fences, EncoderBarrierState &barrier_state, bool uav);
-  void accessSharedFragment(EncoderId id, FenceSet &wait_fences, EncoderBarrierState &barrier_state);
-  void accessExclusiveFragment(EncoderId id, FenceSet &wait_fences, EncoderBarrierState &barrier_state, bool uav);
+  void accessSharedPreRaster(EncoderId id, FenceSet &wait_fences, EncoderBarrierState &barrier_state, EncoderId horizon = kLane);
+  void accessExclusivePreRaster(EncoderId id, FenceSet &wait_fences, EncoderBarrierState &barrier_state, bool uav, EncoderId horizon = kLane);
+  void accessSharedFragment(EncoderId id, FenceSet &wait_fences, EncoderBarrierState &barrier_state, EncoderId horizon = kLane);
+  void accessExclusiveFragment(EncoderId id, FenceSet &wait_fences, EncoderBarrierState &barrier_state, bool uav, EncoderId horizon = kLane);
 
 private:
   /**
-   * Previous shared access
+   * Previous shared access (gw2 #132: room for kCompressedHorizon readers)
    */
-  TrackingSet<> shared_;
+  TrackingSet<kCompressedHorizon> shared_;
   /**
    * Last exclusive access
    */
@@ -289,12 +308,84 @@ private:
   uint64_t lastWriteFromPreRaster : 1 = 0;
 };
 
+// gw2 (#132): DEPS section counters (the section is dxmt_gw2_deps.cpp), added by every context's
+// FenceLocalityCheck and taken by the 2 s statistics window.
+struct DependencyCounters {
+  // endPass (the API thread), per encoder stage
+  std::atomic<uint64_t> encoders{};    // collectAndSimplifyWaits calls (one per fenced encoder stage)
+  std::atomic<uint64_t> strong{};      // dependencies the trackers reported
+  std::atomic<uint64_t> full{};        // after the weak window or the checkpoint were added
+  std::atomic<uint64_t> simplified{};  // waits left after simplification, before encoder fusion
+  std::atomic<uint64_t> checkpoints{}; // compressed: checkpoint stages
+  std::atomic<uint64_t> gaps{};        // compressed: an ID came out of order (never expected)
+  std::atomic<uint64_t> ns{};          // time in collectAndSimplifyWaits
+  // flushCommands (the encode thread), per chunk, after the relation scan fused encoders
+  std::atomic<uint64_t> relation_checks{}; // checkEncoderRelation calls
+  std::atomic<uint64_t> relation_ns{};     // time in the relation scan
+  std::atomic<uint64_t> encoded{};         // encoders left to encode
+  std::atomic<uint64_t> waits{};           // waitForFence the encoders emit
+  std::atomic<uint64_t> updates{};         // updateFence the encoders emit
+  std::atomic<uint64_t> checkpoint_waits{}; // of `waits`, those of encoders holding a checkpoint stage
+};
+DependencyCounters &dependencyCounters();
+
+// gw2 (#132): what an encoder emits for its fence sets. A render pass waits once per fence in the union of
+// its pre-raster and fragment sets (FenceSet::forEach with a prior) and updates likewise; others once each.
+inline uint32_t
+emittedFences(const FenceSet &set, const FenceSet *vertex_set = nullptr) {
+  return vertex_set ? set.unionOf(*vertex_set).count() : set.count();
+}
+
+// gw2 (#132): the fence part of fusing render pass r0 into the later r1 (checkEncoderRelation): r1 takes
+// r0's waits and updates, and drops waits on what the fused pass itself updates.
+inline void
+fuseRenderPassFences(
+    FenceSet &r1_wait, FenceSet &r1_wait_vertex, FenceSet &r1_update, FenceSet &r1_update_vertex,
+    const FenceSet &r0_wait, const FenceSet &r0_wait_vertex, const FenceSet &r0_update,
+    const FenceSet &r0_update_vertex
+) {
+  r1_update.merge(r0_update);
+  r1_wait.merge(r0_wait);
+  r1_wait.subtract(r0_update);
+  r1_update_vertex.merge(r0_update_vertex);
+  r1_wait_vertex.merge(r0_wait_vertex);
+  r1_wait_vertex.subtract(r0_update_vertex);
+
+  // just in case
+  r1_wait.subtract(r0_update_vertex);
+  /*
+  r1_wait_vertex.subtract(r0_update);
+  does not make sense
+  */
+}
+
 class FenceLocalityCheck {
 public:
   FenceSet collectAndSimplifyWaits(FenceSet strong_fences, EncoderId id, bool implicit_pre_raster_wait = false);
 
+  // gw2 (#132): choose the policy before the first encoder; it never changes afterwards
+  void setCompressed(bool compressed) { compressed_ = compressed; }
+  bool compressed() const { return compressed_; }
+  EncoderId horizon() const { return compressed_ ? kCompressedHorizon : kLane; }
+  void setCounting(bool counting) { counting_ = counting; }
+  bool counting() const { return counting_; }
+  // compressed: whether the latest collectAndSimplifyWaits made a checkpoint
+  bool lastWasCheckpoint() const { return last_checkpoint_; }
+
 private:
+  FenceSet collectLegacy(FenceSet strong_fences, EncoderId id, bool implicit_pre_raster_wait);
+  FenceSet collectCompressed(FenceSet strong_fences, EncoderId id, bool implicit_pre_raster_wait);
+
   std::array<FenceSet, kParityLane> summary_;
+  // gw2 (#132): the compressed policy's state
+  std::array<EncoderId, kParityLane> summary_generation_ = {};
+  bool compressed_ = false;
+  bool counting_ = false;
+  EncoderId checkpoint_ = 0; // the latest checkpoint encoder
+  EncoderId covered_ = 0;    // when checkpoint_ has finished, so has every encoder up to this ID
+  EncoderId first_ = 0;      // the first ID this context saw
+  EncoderId last_ = 0;       // the latest ID this context saw
+  bool last_checkpoint_ = false;
 };
 
 } // namespace dxmt

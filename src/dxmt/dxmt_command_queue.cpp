@@ -19,6 +19,7 @@
 
 #include "dxmt_command_queue.hpp"
 #include "dxmt_gw2_compile.hpp"
+#include "dxmt_gw2_deps.hpp"
 #include "dxmt_gw2_present.hpp"
 #include "dxmt_gw2_residency.hpp"
 #include "dxmt_gw2_metal4.hpp"
@@ -210,6 +211,10 @@ CommandQueue::CommandQueue(WMT::Device device) :
   ledger_.setPolicy({.metal4 = metal4_, .unretained = unretained_, .lifetime_check = gw2::lifetime::check()});
   // gw2 (#91): only this submission's tokens retire and drain the chunks' holds
   ledger_.acceptTokensFrom(submission_.get());
+  // gw2 (#132): the encoder dependency policy (Metal 4 only), before the context's first encoder
+  argument_encoding_ctx.setDependencyPolicy(
+      gw2::dependencyCompressionAttach(metal4_), gw2::statsEnabled()
+  );
 
   // gw2 (#8): the ring and the frame latency in effect, once per device
   g_ring_chunks.store(chunk_count_, std::memory_order_relaxed);
