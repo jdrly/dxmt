@@ -245,8 +245,8 @@ WMT_RESERVED(199, "lane C, jdrly/dxmt #64")
 WMT_CALL(200, WMTSetThreadBasePrioritySelf, _WMTSetThreadBasePrioritySelf)
 /* gw2 (#153): Metal 4 uses a chunk's residency set only when it has allocations */
 WMT_CALL(201, MTLResidencySet_allocationCount, _MTLResidencySet_allocationCount)
-/* gw2 (#242): DXMT_MTL4_PRESENT=done, the present pass's commit with the drawable's signal and present */
-WMT_CALL(202, MTL4CommandQueue_commitPresent, _MTL4CommandQueue_commitPresent)
+/* gw2 (#277): DXMT_MTL4_PRESENT=done (#242), deleted with its call */
+WMT_RESERVED(202, "#277: was the call of DXMT_MTL4_PRESENT=done (#242)")
 
 /* clang-format on */
 

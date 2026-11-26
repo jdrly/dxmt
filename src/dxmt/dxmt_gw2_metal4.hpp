@@ -31,11 +31,6 @@ bool mtl4TimestampReuse();
 // through a Metal 3 command buffer (gw2::Mtl4Queue::enableMetal3Present). A test switch for #223, off.
 bool mtl4PresentMetal3();
 
-// gw2 (#242): DXMT_MTL4_PRESENT=done (exactly), read once per process: a queue on Metal 4 presents the
-// drawable once its pass's commit has completed (gw2::Mtl4Queue::enablePresentWhenDone). A test switch
-// for #223, off.
-bool mtl4PresentDone();
-
 // gw2 (#271): DXMT_MTL4_SHOWN_WAIT=write (exactly) with DXMT_MTL4_PRESENT=mtl3, read once per process:
 // the Metal 4 queue waits for a Metal 3 present's `shown` only before the next encoder that writes the
 // presented texture, not right after the present (dxmt_gw2_shown_wait.hpp). Off by default.
