@@ -72,16 +72,68 @@ enum class Wait : uint32_t { Commit, Sync, Count };
 constexpr unsigned kWaitCount = (unsigned)Wait::Count;
 void waitAdd(Wait wait, uint64_t ns);
 
+// gw2 (#202): PACE's `create` split by what the call made, for the CREATE line. Kept where PACE keeps
+// it (the presenting thread's interval, or the other threads' pool), from the same outer scope, so the
+// kinds' calls and time add up to PACE's `create`. Only with DXMT_STATS on.
+enum class CreateKind : uint8_t { Buffer, Texture, View, Shader, State, Query, Count };
+constexpr unsigned kCreateKindCount = (unsigned)CreateKind::Count;
+extern const char *const kCreateKindNames[kCreateKindCount];
+constexpr unsigned kCreateResourceKinds = 2; // Buffer and Texture: they have bytes, a size class, ...
+constexpr unsigned kSizeClassCount = 4;
+constexpr unsigned kUsageCount = 4; // D3D11_USAGE: DEFAULT, IMMUTABLE, DYNAMIC, STAGING
+constexpr uint32_t kBindRenderTarget = 0x20, kBindDepthStencil = 0x40; // D3D11_BIND_FLAG
+
+// under 64 KB, 64 KB to 1 MB, 1 to 16 MB, over 16 MB (KB and MB of 1024)
+constexpr unsigned
+sizeClass(uint64_t bytes) {
+  return bytes < (64u << 10) ? 0 : bytes < (1u << 20) ? 1 : bytes <= (16u << 20) ? 2 : 3;
+}
+
+// A texture's bytes from its D3D11 description, estimated as RESIDENCY's `mb` is: every mip level
+// (mips 0: the full chain), layer and sample; `unit` is a texel's bytes, or a 4x4 block's with bc.
+uint64_t textureBytes(uint32_t width, uint32_t height, uint32_t depth, uint32_t layers, uint32_t mips, uint32_t unit,
+                      bool bc);
+
+// One Create*. bytes, usage, bind and init are a buffer's or texture's.
+struct CreateCall {
+  CreateKind kind;
+  uint64_t bytes = 0;
+  uint32_t usage = 0; // D3D11_USAGE
+  uint32_t bind = 0;  // D3D11_BIND_FLAG
+  bool init = false;  // with initial data
+};
+
+struct CreateTotals {
+  uint32_t calls[kCreateKindCount] = {};
+  int64_t ns[kCreateKindCount] = {}; // signed, as ApiTotals::ns
+  uint64_t bytes[kCreateResourceKinds] = {};
+  uint32_t init[kCreateResourceKinds] = {};
+  uint32_t size[kCreateResourceKinds][kSizeClassCount] = {};
+  uint32_t usage[kUsageCount] = {}; // buffers
+  uint32_t rt = 0, ds = 0;          // textures bound as render target, as depth-stencil
+
+  void add(const CreateCall &call, int64_t call_ns);
+  void add(const CreateTotals &other);
+  uint64_t totalCalls() const;
+};
+
+// The CREATE line's text after "CREATE ", per frame: the presenting thread's creates (PACE's `create`
+// in `dxmt`), then the other threads' (`other`'s), prefixed `other.`. Empty if neither has a call.
+std::string createLine(const CreateTotals &thread, const CreateTotals &other, double frames);
+
 struct ThreadInterval {
   ApiTotals api;
   uint64_t wait_ns[kWaitCount] = {};
   uint32_t wait_count[kWaitCount] = {};
+  CreateTotals create; // gw2 (#202)
 };
 // At the top of Present: marks the calling thread as a presenting thread and returns its API time
 // and waits since its previous call, then starts over.
 ThreadInterval takeThreadInterval();
 // The other threads' API time since the last drain.
 ApiTotals otherDrain();
+// gw2 (#202): the other threads' creates since the last drain (drained with otherDrain).
+CreateTotals otherCreateDrain();
 
 // The calling thread's next pseudo-random value (xorshift32, never 0). A sampler takes its 1 in 2^bits
 // from the top bits: `(draw >> (32 - bits)) == 0`.
@@ -110,6 +162,7 @@ struct ApiThread {
   uint32_t draw();
   void call(Api api);
   void add(Api api, int64_t ns);
+  void create(const CreateCall &call, int64_t ns); // gw2 (#202)
   void reset();
 };
 
@@ -175,6 +228,12 @@ public:
   // unscaled, less the clock's floor. The destructor adds that one to PACE without reading the clock
   // again, so another sampler of the call (MapScope) takes the same interval.
   int64_t stop();
+  // gw2 (#202): the thread of an outer scope that times its call, else null (stats off, nested, or
+  // not drawn)
+  ApiThread *
+  timedThread() const {
+    return outer_ && scale_ ? thread_ : nullptr;
+  }
 
 private:
   void begin(bool sampled, ApiThreadCache *cache);
@@ -195,6 +254,40 @@ private:
 // gw2 (#28): the same, finding the thread through an ApiThreadCache (a context's gw2_api_thread_)
 #define GW2_API_SCOPE_IN(cat, cache) ::dxmt::gw2::ApiScope gw2_api_scope_(::dxmt::gw2::Api::cat, false, &(cache))
 #define GW2_API_SAMPLED_IN(cat, cache) ::dxmt::gw2::ApiScope gw2_api_scope_(::dxmt::gw2::Api::cat, true, &(cache))
+
+// gw2 (#202): a Create* entry point's scope: PACE's `create` (an ApiScope, never sampled) and, for an
+// outer scope, CREATE's kind on the same interval, so the clock is read twice a call as before. A
+// nested Create* (CreateTexture2D -> CreateTexture2D1) counts in neither. With stats off it does
+// nothing.
+class CreateScope {
+public:
+  explicit CreateScope(CreateKind kind) : api_(Api::Create, false) { call_.kind = kind; }
+  ~CreateScope() {
+    if (auto t = api_.timedThread())
+      t->create(call_, api_.stop()); // ApiScope's destructor adds the same interval to PACE
+  }
+  CreateScope(const CreateScope &) = delete;
+  CreateScope &operator=(const CreateScope &) = delete;
+
+  // whether this call is counted: only then describe it
+  bool
+  counting() const {
+    return api_.timedThread();
+  }
+  void
+  resource(uint64_t bytes, uint32_t usage, uint32_t bind, bool init) {
+    call_.bytes = bytes;
+    call_.usage = usage;
+    call_.bind = bind;
+    call_.init = init;
+  }
+
+private:
+  ApiScope api_;
+  CreateCall call_;
+};
+
+#define GW2_CREATE_SCOPE(kind) ::dxmt::gw2::CreateScope gw2_create_scope_(::dxmt::gw2::CreateKind::kind)
 
 int64_t nowNs();
 // gw2 (#150): the clock's own cost, what an empty interval of two nowNs() reads measures: about 52 ns

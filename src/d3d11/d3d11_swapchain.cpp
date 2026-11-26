@@ -1037,6 +1037,7 @@ public:
   static constexpr size_t kPaceMax = 16384;
   std::mutex pace_mutex_;
   std::vector<PaceRecord> pace_; // drained by LogPace on the encode thread
+  gw2::CreateTotals pace_create_; // gw2 (#202): the pushed records' creates, drained with them
   int64_t pace_last_ns_ = 0;     // render thread
 
   void PresentStart() {
@@ -1054,8 +1055,10 @@ public:
     pace_last_ns_ = now;
     {
       std::lock_guard lock(pace_mutex_);
-      if (pace_.size() < kPaceMax)
+      if (pace_.size() < kPaceMax) {
         pace_.push_back({ms, interval.api});
+        pace_create_.add(interval.create);
+      }
     }
     double hitch_ms = gw2::hitchMs();
     if (hitch_ms <= 0 || ms < hitch_ms)
@@ -1574,11 +1577,14 @@ public:
   // 64; Map includes its waits), and the other threads' time inside DXMT.
   void LogPace() {
     std::vector<PaceRecord> records;
+    gw2::CreateTotals create;
     {
       std::lock_guard lock(pace_mutex_);
       records.swap(pace_);
+      std::swap(create, pace_create_);
     }
     auto other = gw2::otherDrain();
+    auto other_create = gw2::otherCreateDrain();
     if (records.empty())
       return;
     std::vector<double> app;
@@ -1616,6 +1622,10 @@ public:
         pct(0.50), pct(0.95), pct(0.99), app.back(), slow33, slow50, app.size(), total / frames, dxmt,
         other_total / frames, others.empty() ? std::string() : " (" + others.substr(1) + ")"
     ));
+    // gw2 (#202): PACE's create (this thread's and other's) by kind, only in a window with a create
+    auto create_text = gw2::createLine(create, other_create, frames);
+    if (!create_text.empty())
+      Logger::info("CREATE " + create_text);
   }
 
   // gw2 (#3): per frame, the union of DXMT's command buffers' GPU execution spans (not the GPU's
