@@ -15,6 +15,7 @@
 // FrontCounters does. With DXMT_STATS=0 nothing is counted.
 
 #include "dxmt_gw2_stats.hpp"
+#include <atomic>
 #include <cstdint>
 
 namespace dxmt::gw2 {
@@ -72,9 +73,40 @@ struct MapCounters {
   uint32_t created = 0; // ... and it was a new Metal buffer (none was free)
   uint32_t grown = 0;   // ... and DXMT_MAP_FAST doubled the buffer's page
   uint32_t dropped = 0; // free allocations dropped instead of reused (a smaller page, or other flags)
-  // Adds the counters to the shared totals and clears them (once per chunk).
-  void publish();
+  // Adds the counters to the shared totals and clears them (once per chunk). Called only when `on`.
+  // gw2 (#251): current_seq_id is the chunk MAP's queued.age counts from.
+  void publish(uint64_t current_seq_id);
 };
+
+// gw2 (#251): the allocations queued for reuse in every live dynamic buffer and dynamic linear
+// texture. With DXMT_STATS=0 and DXMT_RENAME_TRIM off no resource is listed.
+struct RenameQueues {
+  uint64_t pages = 0;
+  uint64_t bytes = 0;
+  uint64_t oldest = UINT64_MAX; // the lowest will_free_at (sequence id) of any queued allocation
+  uint64_t age = 0;             // mapSeqId() after the walk minus oldest; 0 when nothing is queued
+  uint64_t swept = 0;           // gw2 (#265): allocations DXMT_RENAME_TRIM released, and their bytes
+  uint64_t swept_bytes = 0;
+};
+// The last walk's (dxmt_dynamic.cpp: a thread walks the list every 2 s); empty before the first. Its
+// swept and swept_bytes are every walk's since the previous call, which zeroes them.
+RenameQueues renameQueues();
+// gw2 (#265): DXMT_RENAME_TRIM's age in sequence ids (0: off), read once per process
+uint32_t renameTrimAge();
+// gw2 (#265): one walk now, as the thread's (one walk at a time): sweeps with DXMT_RENAME_TRIM on,
+// counts, and publishes for renameQueues(). For tests; the thread calls it every 2 s.
+void walkRenameQueues();
+
+// gw2 (#265): a command queue's coherent sequence id, as DXMT_RENAME_TRIM's sweep reads it. The finish
+// thread stores it where it signals the queue's coherent id. A dynamic resource keeps a pointer to the
+// clock of the queue it was last mapped through, and the sweep compares its queue's ids with that
+// clock only. A queue's clock is never freed (8 bytes per command queue), so a resource that outlives
+// its queue still points at a clock: the queue's last coherent id, which every chunk of it reached.
+struct RenameClock {
+  std::atomic<uint64_t> coherent = 0;
+};
+// The immediate context's current sequence id at its last chunk (MapCounters::publish).
+uint64_t mapSeqId();
 
 // One Map or Unmap: counts it in the bucket set last, timing it as the header says. Destroyed before
 // its ApiScope, under the device lock.

@@ -507,6 +507,7 @@ CommandQueue::RetireChunk(CommandChunk &chunk, uint64_t seq, CompletedChunk &&co
   // gw2 (#113): the bookkeeping retires step.seq, the finish loop's sequence (WaitCommittedRetired waits
   // for it), whatever the token said
   cpu_coherent.signal(step.seq);
+  gw2_rename_clock->coherent.store(step.seq, std::memory_order_release); // gw2 (#265)
   chunk_ongoing.fetch_sub(1, std::memory_order_release);
   chunk_ongoing.notify_one();
 

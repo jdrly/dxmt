@@ -254,6 +254,12 @@ public:
 
   Texture(unsigned bytes_per_image, unsigned bytes_per_row, const WMTTextureInfo &info, WMT::Device device);
 
+  // gw2 (#251): a linear texture's bytes per allocation (0 for a texture that isn't linear)
+  unsigned
+  gw2BytesPerImage() const {
+    return bytes_per_image_;
+  }
+
 private:
   void prepareAllocationViews(TextureAllocation* allocation);
   // gw2 (#29): puts a new allocation into the device's residency set when it can go there
