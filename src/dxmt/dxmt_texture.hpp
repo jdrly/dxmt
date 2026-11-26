@@ -150,6 +150,9 @@ public:
   uint64_t gpuResourceID;
   mach_port_t machPort;
   small_vector<GenericAccessTracker, 1> fenceTrackers;
+  // gw2 (#29): in the device's residency set (set once, at creation): makeResident skips it
+  bool gw2Resident = false;
+  uint64_t gw2ResidentBytes = 0;
 
 private:
   TextureAllocation(
@@ -293,6 +296,8 @@ public:
 
 private:
   void prepareAllocationViews(TextureAllocation* allocation);
+  // gw2 (#29): puts a new allocation into the device's residency set when it can go there
+  Rc<TextureAllocation> gw2EnterResidencySet(TextureAllocation *allocation, const WMTTextureInfo &info);
 
   WMTTextureInfo info_;
   unsigned bytes_per_image_ = 0;

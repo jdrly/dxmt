@@ -151,6 +151,8 @@ public:
 
   DXMT_RESOURCE_RESIDENCY_STATE residencyState;
   small_vector<GenericAccessTracker, 1> fenceTrackers;
+  // gw2 (#29): in the device's residency set (set once, at creation): makeResident skips it
+  bool gw2Resident = false;
 
 private:
   BufferAllocation(

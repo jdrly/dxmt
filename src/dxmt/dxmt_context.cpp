@@ -22,6 +22,7 @@
 #include "dxmt_deptrack.hpp"
 #include "dxmt_format.hpp"
 #include "dxmt_gw2_present.hpp"
+#include "dxmt_gw2_residency.hpp"
 #include "dxmt_gw2_stats.hpp"
 #include "dxmt_names.hpp"
 #include "dxmt_occlusion_query.hpp"
@@ -1259,6 +1260,7 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer &cmdbuf, uint64_t seqI
       // doesn't idle while nextDrawable blocks; the present gets a command buffer of its own.
       // Fences and the queue order keep it behind the frame. DXMT_PRESENT_SPLIT=0 turns it off.
       if (present_split_ && encoder_count - encoder_index > 0) {
+        gw2::residencyBeforeCommit(); // gw2 (#29)
         cmdbuf.commit();
         if (gw2::statsEnabled())
           queue_.KeepSplitCommandBuffer(seqId, cmdbuf); // gw2 (#3): its GPU span counts for the frame

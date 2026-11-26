@@ -566,6 +566,8 @@ public:
   void
   makeResident(Counter *counter) {
     auto allocation = getCounterAllocation(counter)->buffer();
+    if (allocation->gw2Resident) // gw2 (#29): the residency set keeps it resident
+      return;
     uint64_t encoder_id = currentEncoder()->id;
     DXMT_RESOURCE_RESIDENCY requested = GetResidencyMask<kind>(stage, true, true);
     if (CheckResourceResidency(allocation->residencyState, encoder_id, requested)) {
@@ -576,6 +578,8 @@ public:
   void
   makeResident(Buffer *buffer, bool read = true, bool write = false) {
     auto allocation = buffer->current();
+    if (allocation->gw2Resident) // gw2 (#29)
+      return;
     uint64_t encoder_id = currentEncoder()->id;
     DXMT_RESOURCE_RESIDENCY requested = GetResidencyMask<kind>(stage, read, write);
     if (CheckResourceResidency(allocation->residencyState, encoder_id, requested)) {
@@ -586,6 +590,8 @@ public:
   void
   makeResident(Buffer *buffer, uint64_t viewId, bool read = true, bool write = false) {
     auto allocation = buffer->current();
+    if (allocation->gw2Resident) // gw2 (#29): a view of a buffer in the set
+      return;
     uint64_t encoder_id = currentEncoder()->id;
     DXMT_RESOURCE_RESIDENCY requested = GetResidencyMask<kind>(stage, read, write);
     if (CheckResourceResidency(buffer->residency(viewId, allocation), encoder_id, requested)) {
@@ -596,6 +602,8 @@ public:
   void
   makeResident(Texture *texture, uint64_t viewId, bool read = true, bool write = false) {
     auto allocation = texture->current();
+    if (allocation->gw2Resident) // gw2 (#29): views share the texture's memory, which the set holds
+      return;
     uint64_t encoder_id = currentEncoder()->id;
     DXMT_RESOURCE_RESIDENCY requested = GetResidencyMask<kind>(stage, read, write);
     auto &view = texture->view(viewId, allocation);

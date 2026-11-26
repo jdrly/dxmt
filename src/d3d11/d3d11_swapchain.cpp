@@ -14,6 +14,7 @@
 #include "dxmt_gw2_present.hpp"
 #include "dxmt_gw2_map.hpp"
 #include "dxmt_gw2_rebind.hpp"
+#include "dxmt_gw2_residency.hpp"
 #include "dxmt_gw2_stats.hpp"
 #include "dxmt_gw2_timestamp.hpp"
 #include "dxmt_presenter.hpp"
@@ -1055,7 +1056,7 @@ public:
         "DXMT_PSO_TOPOLOGY_KEEP={} DXMT_CHUNKS={} DXMT_MAX_FRAME_LATENCY={} DXMT_COMPILE_WAIT_MS={} "
         "DXMT_PSO_ARCHIVE={} DXMT_PSO_ARCHIVE_DIR={} DXMT_PSO_FLUSH_EVERY={} DXMT_PROMOTE_FLUSH_MIN={} "
         "DXMT_PROMOTE_FLUSH_MS={} DXMT_TIMESTAMP_MODE={} DXMT_MAP_FAST={} DXMT_SKIP_REBIND={} DXMT_CONTROL={} "
-        "cpus={} refresh={}",
+        "DXMT_RESIDENCY_SET={} cpus={} refresh={}",
         gw2::hitchMs(), int(queue.argument_encoding_ctx.presentSplit()), int(display_sync_vsync_), deadline,
         int(cap_limiter_),
         // read as d3d11_resource_helper.cpp and RaiseRenderThreadPriority read them
@@ -1069,6 +1070,7 @@ public:
         int(gw2::mapFast()),                          // gw2 (#25)
         int(gw2::skipRebind()),                       // gw2 (#30)
         gw2::controlPath().empty() ? std::string("off") : gw2::controlPath(), // gw2 (#7)
+        gw2::residencySetState(),                     // gw2 (#29)
         GetActiveProcessorCount(ALL_PROCESSOR_GROUPS), refresh
     ));
   }

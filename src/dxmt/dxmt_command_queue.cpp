@@ -20,6 +20,7 @@
 #include "dxmt_command_queue.hpp"
 #include "dxmt_gw2_compile.hpp"
 #include "dxmt_gw2_present.hpp"
+#include "dxmt_gw2_residency.hpp"
 #include "dxmt_gw2_stats.hpp"
 #include "Metal.hpp"
 #include "dxmt_statistics.hpp"
@@ -162,6 +163,8 @@ CommandQueue::CommandQueue(WMT::Device device) :
     chunk.reset();
   };
   event = device.newSharedEvent();
+  // gw2 (#29): the device's residency set on this queue (DXMT_RESIDENCY_SET); logs once per queue
+  gw2::residencyAttachQueue(device, commandQueue);
 
   // gw2 (#8): the ring and the frame latency in effect, once per device
   g_ring_chunks.store(chunk_count_, std::memory_order_relaxed);
@@ -191,6 +194,20 @@ CommandQueue::~CommandQueue() {
   SharedEventListener_destroy(shared_event_listener);
   encodeThread.join();
   finishThread.join();
+  // gw2 (#29): with the residency set, a chunk's references are what keep its allocations in the set
+  // (and alive: the command buffers no longer retain them through useResource). The finish thread
+  // stopped without retiring every committed chunk, so wait for their command buffers first; the
+  // split-off ones were committed earlier on this queue and complete before their chunk's last.
+  if (gw2::residencyActive()) {
+    for (unsigned i = 0; i < kCommandChunkCountMax; i++) {
+      auto &cmdbuf = chunks[i].attached_cmdbuf;
+      if (!cmdbuf)
+        continue;
+      auto status = cmdbuf.status();
+      if (status == WMTCommandBufferStatusCommitted || status == WMTCommandBufferStatusScheduled)
+        cmdbuf.waitUntilCompleted();
+    }
+  }
   for (unsigned i = 0; i < kCommandChunkCountMax; i++) {
     auto &chunk = chunks[i];
     chunk.reset();
@@ -292,6 +309,7 @@ CommandQueue::CommitChunkInternal(CommandChunk &chunk, uint64_t seq) {
     cmdbuf.encodeWaitForEvent(initializer.event(), chunk.resource_initializer_event_id);
   }
   chunk.encode(chunk.attached_cmdbuf, this->argument_encoding_ctx);
+  gw2::residencyBeforeCommit(); // gw2 (#29): the set's pending adds and removes, if any
   chunk.attached_cmdbuf.commit();
 
   ready_for_commit.fetch_add(1, std::memory_order_release);
