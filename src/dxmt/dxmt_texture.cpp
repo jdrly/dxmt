@@ -20,6 +20,7 @@
 #include "dxmt_format.hpp"
 #include "dxmt_gw2_residency.hpp"
 #include "dxmt_gw2_stats.hpp"
+#include "dxmt_gw2_switches.hpp"
 #include "dxmt_names.hpp"
 #include "dxmt_residency.hpp"
 #include "wsi_platform.hpp"
@@ -27,6 +28,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cassert>
+#include <cstdlib>
 #include <mutex>
 #include <set>
 #include <tuple>
@@ -37,6 +39,9 @@ namespace dxmt {
 std::atomic_uint64_t global_texture_seq = {0};
 
 namespace {
+
+// gw2 (#155): a match in checkViewUseArray is read from the key's array bit, without the texture's lock
+sw::Switch<bool> kViewKeyArrayBit{"DXMT_VIEW_KEY_ARRAY_BIT", true, sw::legacy::notZero};
 
 // gw2 (#2): a DEPTHVIEW line once per distinct view of a depth/stencil texture (and for any view that
 // came back nil), so the log shows which views GW2's depth buffer gets and whether the texture has
@@ -230,6 +235,11 @@ Texture::createView(TextureViewDescriptor const &descriptor) {
       continue;
     return TextureViewKey(descriptor, i, info_.mipmap_level_count);
   }
+  // gw2 (#155): the key's index has 27 bits since the array bit took one
+  if (unlikely(i >= TextureViewKey::kIndexLimit)) {
+    Logger::err(str::format("Texture: more than ", TextureViewKey::kIndexLimit, " views of one texture"));
+    std::abort();
+  }
   viewDescriptors_.push_back(descriptor);
   version_ = version_ + 1;
   return TextureViewKey(descriptor, i, info_.mipmap_level_count);
@@ -383,52 +393,16 @@ Texture::view(TextureViewKey key, TextureAllocation* allocation) {
 }
 
 TextureViewKey Texture::checkViewUseArray(TextureViewKey key, bool isArray) {
-  std::shared_lock<dxmt::shared_mutex> shared_lock(mutex_);
-  auto view = viewDescriptors_[key.index];
-  shared_lock = {};
-  static constexpr uint32_t ARRAY_TYPE_MASK = 0b0101001010;
-  if (unlikely(bool((1 << uint32_t(view.type)) & ARRAY_TYPE_MASK) != isArray)) {
-    // TODO: this process can be cached
-    auto new_view_desc = view;
-    switch (view.type) {
-    case WMTTextureType1D:
-      new_view_desc.type = WMTTextureType1DArray;
-      new_view_desc.arraySize = 1;
-      break;
-    case WMTTextureType1DArray:
-      new_view_desc.type = WMTTextureType1D;
-      new_view_desc.arraySize = 1;
-      break;
-    case WMTTextureType2D:
-      new_view_desc.type = WMTTextureType2DArray;
-      new_view_desc.arraySize = 1;
-      break;
-    case WMTTextureType2DArray:
-      new_view_desc.type = WMTTextureType2D;
-      new_view_desc.arraySize = 1;
-      break;
-    case WMTTextureType2DMultisample:
-      new_view_desc.type = WMTTextureType2DMultisampleArray;
-      new_view_desc.arraySize = 1;
-      break;
-    case WMTTextureType2DMultisampleArray:
-      new_view_desc.type = WMTTextureType2DMultisample;
-      new_view_desc.arraySize = 1;
-      break;
-    case WMTTextureTypeCube:
-      new_view_desc.type = WMTTextureTypeCubeArray;
-      new_view_desc.arraySize = 6;
-      break;
-    case WMTTextureTypeCubeArray:
-      new_view_desc.type = WMTTextureTypeCube;
-      new_view_desc.arraySize = 6;
-      break;
-    default:
-      return key; // should be unreachable
-    }
-    return createView(new_view_desc);
-  }
-  return key;
+  // gw2 (#155): read once per process
+  static const bool trust_bit = kViewKeyArrayBit();
+  return resolveViewUseArray(
+      key, isArray, trust_bit,
+      [this](unsigned index) {
+        std::shared_lock<dxmt::shared_mutex> shared_lock(mutex_);
+        return viewDescriptors_[index];
+      },
+      [this](const TextureViewDescriptor &descriptor) { return createView(descriptor); }
+  );
 }
 
 TextureViewKey Texture::checkViewUseFormat(TextureViewKey key, WMTPixelFormat format) {

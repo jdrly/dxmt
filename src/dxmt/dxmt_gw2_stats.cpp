@@ -1,6 +1,7 @@
 #include "dxmt_gw2_stats.hpp"
 #include "dxmt_gw2_switches.hpp"
 #include "log/log.hpp"
+#include "thread.hpp"
 #include "util_env.hpp"
 #include <algorithm>
 #include <atomic>
@@ -224,7 +225,7 @@ apiThread() {
   }
   if (auto t = t_thread)
     return *t;
-  uint32_t tid = uint32_t(GetCurrentThreadId());
+  uint32_t tid = this_thread::get_id(); // gw2 (#149): from the TEB, no kernel32 call
   if (fls != FLS_OUT_OF_INDEXES) {
     auto t = takeBlock(tid, false);
     if (FlsSetValue(fls, t)) {
@@ -246,7 +247,7 @@ apiThread() {
 
 ApiThread &
 ApiThreadCache::get() {
-  uint32_t tid = uint32_t(GetCurrentThreadId());
+  uint32_t tid = this_thread::get_id(); // gw2 (#149): from the TEB, no kernel32 call
   ApiThread *t = last_.load(std::memory_order_acquire);
   if (t && t->tid.load(std::memory_order_acquire) == tid)
     return *t; // tid is set only by the owning thread and cleared when it exits: this thread's
@@ -306,15 +307,14 @@ otherDrain() {
   return t;
 }
 
-ApiScope::ApiScope(Api api, bool sampled, ApiThreadCache *cache) : api_(api) {
-  if (!statsEnabled())
-    return;
+void
+ApiScope::begin(bool sampled, ApiThreadCache *cache) {
   ApiThread &t = cache ? cache->get() : apiThread();
   thread_ = &t;
   if (t.depth++ > 0)
     return; // nested: the outer scope counts
   outer_ = true;
-  t.call(api);
+  t.call(api_);
   if (sampled) {
     draw_ = t.draw();
     if ((draw_ >> 28) != 0)
@@ -324,9 +324,8 @@ ApiScope::ApiScope(Api api, bool sampled, ApiThreadCache *cache) : api_(api) {
   t0_ = nowNs();
 }
 
-ApiScope::~ApiScope() {
-  if (!thread_)
-    return;
+void
+ApiScope::end() {
   thread_->depth--;
   if (!outer_ || !scale_)
     return;

@@ -21,6 +21,7 @@
 #include "dxmt_deptrack.hpp"
 #include "dxmt_residency.hpp"
 #include "dxmt_allocation.hpp"
+#include "dxmt_texture_view_key.hpp"
 #include "rc/util_rc_ptr.hpp"
 #include "thread.hpp"
 #include "util_flags.hpp"
@@ -39,47 +40,6 @@ enum class TextureAllocationFlag : uint32_t {
   Shared = 5,
   ShaderReadonly = 6,
   AllocatedOnHeap = 7,
-};
-
-struct TextureViewDescriptor {
-  WMTPixelFormat format    : 24;
-  WMTTextureType type      : 8;
-  uint32_t firstMiplevel   : 4 = 0;
-  uint32_t miplevelCount   : 4 = 1;
-  uint32_t firstArraySlice : 12 = 0;
-  uint32_t arraySize       : 12 = 1;
-};
-
-struct TextureViewKey {
-  union {
-    struct {
-      uint64_t index       : 28;
-      uint64_t mip_count   : 4;
-      uint64_t mip_start   : 4;
-      uint64_t array_start : 12;
-      uint64_t mip_end     : 4;
-      uint64_t array_end   : 12;
-    };
-    uint64_t impl_;
-  };
-
-  TextureViewKey() {
-    impl_ = 0;
-  }
-  TextureViewKey(const TextureViewDescriptor &descriptor, unsigned index, unsigned total_mip_count) {
-    mip_start = descriptor.firstMiplevel;
-    array_start = descriptor.firstArraySlice;
-    mip_end = descriptor.firstMiplevel + descriptor.miplevelCount;
-    array_end = descriptor.firstArraySlice + descriptor.arraySize;
-    mip_count = total_mip_count;
-    this->index = index;
-  }
-  TextureViewKey(uint64_t impl) {
-    impl_ = impl;
-  }
-  operator uint64_t() const {
-    return impl_;
-  }
 };
 
 class Texture;
