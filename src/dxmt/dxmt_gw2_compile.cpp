@@ -1,5 +1,7 @@
 #include "dxmt_gw2_compile.hpp"
+#include "dxmt_compile_service.hpp"
 #include "dxmt_gw2_stats.hpp"
+#include "dxmt_gw2_switches.hpp"
 #include "log/log.hpp"
 #include "thread.hpp"
 #include "util_env.hpp"
@@ -14,6 +16,12 @@
 #include <string>
 
 namespace dxmt::gw2 {
+
+namespace {
+// gw2 (C2): =1 only (exactly "1"), off by default
+sw::Switch<bool> kCompileDemand{"DXMT_COMPILE_DEMAND", false, sw::legacy::exactlyOne};
+std::atomic<uint64_t> g_promoted{0};
+} // namespace
 
 namespace {
 
@@ -245,11 +253,12 @@ section(double, uint32_t) {
   auto waits = drainWaits();
   return std::format(
       "variants={} air={}/{} pso={}/{} built={} failed={} build=shader:{:.0f}/{:.1f} pipeline:{:.0f}/{:.1f} "
-      "queue={}/{} threads={} wait={}x {:.1f}/{:.1f} slow={}{}{}",
+      "queue={}/{} threads={} wait={}x {:.1f}/{:.1f} slow={}{}{}{}",
       x(w.variants), x(w.air_hit), x(w.air_miss), x(w.pso_hit), x(w.pso_miss), x(w.built), x(w.failed),
       x(w.shader_ns) / 1e6, x(g_shader_max_ns) / 1e6, x(w.pso_ns) / 1e6, x(g_pso_max_ns) / 1e6, queue_now,
       queue_max, g_threads.load(std::memory_order_relaxed), waits.total_n, waits.total_ns / 1e6,
-      x(g_wait_max_ns) / 1e6, x(g_slow_frames), windowCauses(waits), archiveSection()
+      x(g_wait_max_ns) / 1e6, x(g_slow_frames), windowCauses(waits),
+      compileDemand() ? std::format(" promoted={}", x(g_promoted)) : std::string(), archiveSection()
   );
 }
 
@@ -326,82 +335,58 @@ compileEncodeFrame(uint64_t frame) {
   t_frame = frame;
 }
 
-// --- gw2 (#46): compile task timelines (relaxed: each field has one writer at a time, and the
-// encode thread reads them only to classify and report, after the task's done flag for the end)
+// --- gw2 (#46, C1): the compile jobs' timelines are kept by the compile service
+// (dxmt_compile_service.hpp); relaxed: each field has one writer at a time, and the encode thread
+// reads them only to classify and report, after the job's done flag for the end
 
-void
-compileTraceSubmit(CompileTrace &t) {
-  if (!statsEnabled()) {
-    t.state.store(CompileTrace::None, std::memory_order_relaxed);
-    return;
-  }
-  t.start_ns.store(0, std::memory_order_relaxed);
-  t.build_ns.store(0, std::memory_order_relaxed);
-  t.done_ns.store(0, std::memory_order_relaxed);
-  t.parked_ns.store(0, std::memory_order_relaxed);
-  t.parked_at_ns.store(0, std::memory_order_relaxed);
-  t.dep.store(nullptr, std::memory_order_relaxed);
-  t.submit_ns.store(nowNs(), std::memory_order_relaxed);
-  t.state.store(CompileTrace::Queued, std::memory_order_release);
+bool
+compileTiming() {
+  return statsEnabled();
+}
+
+bool
+compileDemand() {
+  static const bool on = kCompileDemand();
+  return on;
 }
 
 void
-compileTraceRun(CompileTrace &t) {
-  auto s = t.state.load(std::memory_order_acquire);
-  if (s == CompileTrace::None)
-    return;
-  auto now = nowNs();
-  if (!t.start_ns.load(std::memory_order_relaxed))
-    t.start_ns.store(now, std::memory_order_relaxed);
-  if (s == CompileTrace::Parked)
-    t.parked_ns.fetch_add(now - t.parked_at_ns.load(std::memory_order_relaxed), std::memory_order_relaxed);
-  t.state.store(CompileTrace::Running, std::memory_order_release);
+compilePromoted() {
+  if (statsEnabled())
+    g_promoted.fetch_add(1, std::memory_order_relaxed);
 }
 
-void
-compileTraceParked(CompileTrace &t, const CompileTrace *dep) {
-  if (t.state.load(std::memory_order_acquire) == CompileTrace::None)
-    return;
-  t.parked_at_ns.store(nowNs(), std::memory_order_relaxed);
-  t.dep.store(dep, std::memory_order_relaxed);
-  t.state.store(CompileTrace::Parked, std::memory_order_release);
+int64_t
+compileNowNs() {
+  return nowNs();
 }
 
-void
-compileTraceBuild(CompileTrace &t) {
-  if (t.state.load(std::memory_order_acquire) == CompileTrace::None)
-    return;
-  t.build_ns.store(nowNs(), std::memory_order_relaxed);
-  t.state.store(CompileTrace::Building, std::memory_order_release);
+// A job submitted with STATS off has no timeline and isn't classified (as before C1).
+static bool
+timed(const compile::JobRecord *job) {
+  return job && job->timed.load(std::memory_order_relaxed);
 }
 
-void
-compileTraceDone(CompileTrace &t) {
-  if (t.state.load(std::memory_order_acquire) == CompileTrace::None)
-    return;
-  t.done_ns.store(nowNs(), std::memory_order_relaxed);
-  t.state.store(CompileTrace::Done, std::memory_order_release);
-}
-
-CompileWaitScope::CompileWaitScope(const CompileTrace *trace) {
+CompileWaitScope::CompileWaitScope(const compile::JobRecord *job) {
   if (!statsEnabled())
     return;
   t0_ = nowNs();
-  trace_ = trace;
+  job_ = job;
   cause_ = CauseOther;
-  if (trace) {
-    switch (trace->state.load(std::memory_order_acquire)) {
-    case CompileTrace::Queued:
+  if (timed(job)) {
+    switch (job->state.load(std::memory_order_acquire)) {
+    case compile::JobState::Queued:
       cause_ = CauseQueued;
       break;
-    case CompileTrace::Running:
-    case CompileTrace::Parked: {
-      auto dep = trace->dep.load(std::memory_order_relaxed);
-      cause_ = dep && dep->state.load(std::memory_order_acquire) == CompileTrace::Queued ? CauseVariantQueued
-                                                                                         : CauseVariant;
+    case compile::JobState::Running:
+    case compile::JobState::Parked: {
+      auto dep = job->parked_on.load(std::memory_order_relaxed);
+      cause_ = timed(dep) && dep->state.load(std::memory_order_acquire) == compile::JobState::Queued
+                   ? CauseVariantQueued
+                   : CauseVariant;
       break;
     }
-    case CompileTrace::Building:
+    case compile::JobState::Building:
       cause_ = CauseBuilding;
       break;
     default:
@@ -433,21 +418,20 @@ CompileWaitScope::~CompileWaitScope() {
     l.cause = cause_;
     l.depth = depth_;
     l.archq = archq_;
-    if (trace_ && trace_->state.load(std::memory_order_acquire) != CompileTrace::None) {
-      auto submit = trace_->submit_ns.load(std::memory_order_relaxed);
-      auto start = trace_->start_ns.load(std::memory_order_relaxed);
-      auto build = trace_->build_ns.load(std::memory_order_relaxed);
-      auto done = trace_->done_ns.load(std::memory_order_relaxed);
+    if (timed(job_)) {
+      auto submit = job_->submit_ns.load(std::memory_order_relaxed);
+      auto start = job_->start_ns.load(std::memory_order_relaxed);
+      auto build = job_->build_ns.load(std::memory_order_relaxed);
+      auto done = job_->done_ns.load(std::memory_order_relaxed);
       if (submit) {
         l.lead = t0_ - submit;
         if (start)
           l.queue = start - submit;
       }
-      l.parked = trace_->parked_ns.load(std::memory_order_relaxed);
+      l.parked = job_->parked_ns.load(std::memory_order_relaxed);
       if (build && done >= build)
         l.build = done - build;
-      if (auto dep = trace_->dep.load(std::memory_order_relaxed);
-          dep && dep->state.load(std::memory_order_acquire) != CompileTrace::None) {
+      if (auto dep = job_->parked_on.load(std::memory_order_relaxed); timed(dep)) {
         auto dsub = dep->submit_ns.load(std::memory_order_relaxed);
         auto dstart = dep->start_ns.load(std::memory_order_relaxed);
         auto ddone = dep->done_ns.load(std::memory_order_relaxed);

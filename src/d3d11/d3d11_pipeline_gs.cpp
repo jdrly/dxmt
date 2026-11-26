@@ -65,11 +65,18 @@ public:
   }
 
   void GetPipeline(MTL_COMPILED_GRAPHICS_PIPELINE *pPipeline) final {
-    if (!ready_.load(std::memory_order_acquire)) {
-      gw2::CompileWaitScope wait(&compile_trace); // gw2 (#5, #46): the encode thread waits for this compile
-      ready_.wait(false, std::memory_order_acquire);
-    }
+    compile::demand(compile_job, ready_); // gw2 (#5, #46, C1): the encode thread waits for this compile
     *pPipeline = {state_mesh_};
+  }
+
+  // gw2 (C2): what RunThreadpoolWork probes, in its order (the declared policy waits for them)
+  void GetDependencies(std::vector<ThreadpoolWork *> &deps) final {
+    if (VertexShader)
+      deps.push_back(VertexShader);
+    if (GeometryShader)
+      deps.push_back(GeometryShader);
+    if (PixelShader)
+      deps.push_back(PixelShader);
   }
 
   ThreadpoolWork *RunThreadpoolWork() {
@@ -136,7 +143,7 @@ public:
 
     info.raster_sample_count = SampleCount;
 
-    gw2::compileTraceBuild(compile_trace); // gw2 (#46)
+    compile::building(compile_job); // gw2 (#46, C1)
     gw2::recipePipelineUnsupported(); // gw2 (#57): not recorded yet
     auto t0 = gw2::compileClock(); // gw2 (#5)
     state_mesh_ = device_->GetMTLDevice().newRenderPipelineState(info, err);
