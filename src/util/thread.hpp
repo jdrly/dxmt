@@ -35,6 +35,12 @@ enum class ThreadPriority : int32_t {
 };
 
 #ifdef _WIN32
+// gw2 (#137): pins the calling module (the DLL this static library is linked into) for the process,
+// once, before its first thread starts. Its threads run its own code, and some never end (the recipe
+// writer, the PSO archive's flusher, the control poller), so FreeLibrary must not unmap it.
+// DXMT_PIN_MODULE=0 skips the pin.
+void pinModuleForThreads();
+
 /**
  * \brief Thread helper class
  *
@@ -52,6 +58,7 @@ public:
     // Reference for the thread function
     this->incRef();
 
+    pinModuleForThreads(); // gw2 (#137)
     m_handle = ::CreateThread(nullptr, 0x100000, ThreadFn::threadProc, this,
                               STACK_SIZE_PARAM_IS_A_RESERVATION, nullptr);
 
