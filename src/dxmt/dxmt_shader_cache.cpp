@@ -1,30 +1,8 @@
 #include "dxmt_shader_cache.hpp"
 #include "util_env.hpp"
 #include "util_string.hpp"
-#include "dxmt_gw2_air_readers.hpp"
-#include "dxmt_gw2_switches.hpp"
-#include <cstdlib>
-#include <string>
 
 namespace dxmt {
-
-namespace {
-// gw2 (#95): AIR cache readers, 1-16 (anything else, or unset: 1, today's single reader)
-uint32_t
-parseReaders(const std::string &raw, const uint32_t &fallback) {
-  if (raw.empty())
-    return fallback;
-  char *end = nullptr;
-  unsigned long v = std::strtoul(raw.c_str(), &end, 10);
-  return end && *end == 0 && v >= 1 && v <= 16 ? uint32_t(v) : fallback;
-}
-sw::Switch<uint32_t> kAirReaders{"DXMT_AIR_READERS", 1, parseReaders};
-std::atomic<uint32_t> g_air_readers_open{gw2::kAirReadersUnopened};
-// the startup line shows the readers actually open: 0 with the cache off or its reader not opened,
-// "unopened" before any shader cache exists (#96 review)
-sw::Effective kAirReadersLine{"DXMT_AIR_READERS",
-                              [] { return gw2::airReadersEffective(g_air_readers_open.load(std::memory_order_relaxed)); }};
-} // namespace
 
 ShaderCache &
 ShaderCache::getInstance(WMTMetalVersion version) {
@@ -41,10 +19,8 @@ ShaderCache::getInstance(WMTMetalVersion version) {
 }
 
 ShaderCache::ShaderCache(WMTMetalVersion metal_version) {
-  if (env::getEnvVar("DXMT_SHADER_CACHE") == "0") {
-    g_air_readers_open.store(gw2::airReadersOpen(false, false, 0), std::memory_order_relaxed);
+  if (env::getEnvVar("DXMT_SHADER_CACHE") == "0")
     return;
-  }
   std::string path;
   if (path = env::getEnvVar("DXMT_SHADER_CACHE_PATH"); !path.empty() && path.starts_with("/")) {
     if (!path.ends_with('/'))
@@ -55,26 +31,6 @@ ShaderCache::ShaderCache(WMTMetalVersion metal_version) {
   path += str::format("shaders_", (unsigned int)metal_version, ".db");
   scache_writer_ = WMT::CacheWriter::alloc_init(path.c_str(), kDXMTShaderCacheVersion);
   scache_reader_ = WMT::CacheReader::alloc_init(path.c_str(), kDXMTShaderCacheVersion);
-  // gw2 (#95): DXMT_AIR_READERS=n > 1: n read-only connections (each a CacheReader: its own sqlite
-  // connection and statement), each behind its own lock. Fewer if a connection can't be opened.
-  uint32_t n = kAirReaders();
-  if (scache_reader_ && n > 1) {
-    auto first = std::make_unique<ReaderSlot>();
-    first->reader = scache_reader_;
-    readers_.push_back(std::move(first));
-    for (uint32_t i = 1; i < n; i++) {
-      auto reader = WMT::CacheReader::alloc_init(path.c_str(), kDXMTShaderCacheVersion);
-      if (reader == nullptr)
-        break;
-      auto slot = std::make_unique<ReaderSlot>();
-      slot->reader = std::move(reader);
-      readers_.push_back(std::move(slot));
-    }
-    if (readers_.size() == 1)
-      readers_.clear(); // only the one: today's path
-  }
-  g_air_readers_open.store(gw2::airReadersOpen(true, scache_reader_ != nullptr, readers_.size()),
-                           std::memory_order_relaxed);
 }
 
 } // namespace dxmt
