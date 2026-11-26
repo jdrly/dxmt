@@ -328,23 +328,34 @@ Mtl4Queue::addMetal3Present(uint64_t seq, WMT::CommandBuffer cmdbuf, uint64_t va
 // gw2 (#227): a Metal 3 present buffer completed. If it failed, `shown` may never reach its value, and
 // every later commit of this queue waits for it: the buffer is complete, nothing of it runs any more,
 // so the CPU signals `shown` in its place. Its error itself is reported from the chunk's records.
+// gw2 (#316): that CPU set can lower `shown` below a later present's GPU signal, so from then on every
+// present that completes raises `shown` to its own value if it is below it (ShownRepair).
 void
 Mtl4Queue::waitMetal3(const Metal3Present &present) {
   WMT::CommandBuffer cmdbuf = present.cmdbuf;
   cmdbuf.waitUntilCompleted();
-  if (cmdbuf.status() != WMTCommandBufferStatusError)
+  const bool failed = cmdbuf.status() == WMTCommandBufferStatusError;
+  if (failed)
+    g_errors.fetch_add(1, std::memory_order_relaxed);
+  // gw2 (#316): also for a buffer that succeeded, once the CPU has signalled: its own GPU signal may
+  // have been overwritten by the CPU's lower one (ShownRepair)
+  if (!shown_repair_.completed(shown_event_, present.value, failed))
     return;
-  g_errors.fetch_add(1, std::memory_order_relaxed);
-  if (shown_event_.signaledValue() >= present.value)
-    return;
-  shown_event_.signalValue(present.value);
   static std::atomic<uint32_t> s_lines{0};
   if (s_lines.fetch_add(1, std::memory_order_relaxed) < 8)
-    Logger::err(std::format(
-        "Metal 4: the Metal 3 present command buffer {} failed before signalling; signalled it from the CPU so "
-        "the Metal 4 queue goes on (DXMT_MTL4_PRESENT=mtl3; only the first 8 are logged)",
-        present.value
-    ));
+    Logger::err(
+        failed ? std::format(
+                     "Metal 4: the Metal 3 present command buffer {} failed before signalling; signalled it from "
+                     "the CPU so the Metal 4 queue goes on (DXMT_MTL4_PRESENT=mtl3; only the first 8 are logged)",
+                     present.value
+                 )
+               : std::format(
+                     "Metal 4: the shown event was below the completed Metal 3 present {}: a CPU signal for an "
+                     "earlier failed present overtook the GPU's; raised it (DXMT_MTL4_PRESENT=mtl3; only the first "
+                     "8 are logged)",
+                     present.value
+                 )
+    );
 }
 
 void

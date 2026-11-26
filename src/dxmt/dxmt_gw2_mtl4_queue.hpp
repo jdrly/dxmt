@@ -37,6 +37,7 @@
 // slow=<chunks the finish thread waited for over 1 s> errors=.
 
 #include "Metal4.hpp"
+#include "dxmt_gw2_shown_wait.hpp"
 #include <atomic>
 #include <cstdint>
 #include <memory>
@@ -252,6 +253,7 @@ private:
   WMT::Device device_;
   // gw2 (#227)
   WMT::Reference<WMT::SharedEvent> frame_event_, shown_event_;
+  ShownRepair shown_repair_; // gw2 (#316): finish thread, then waitIdle
   bool metal3_present_ = false;
   uint64_t metal3_value_ = 0; // encode thread
   WMT::Reference<WMT::MTL4CommandQueue> queue_;

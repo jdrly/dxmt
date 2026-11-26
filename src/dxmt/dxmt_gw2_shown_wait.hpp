@@ -24,6 +24,8 @@
 // swap chain, a resize) waits right after it, as without the switch, so a write to the earlier
 // texture can never be missed. `shown` only rises, so one wait covers every present before it.
 //
+// gw2 (#316): ShownRepair, below, keeps a CPU signal for a failed present from leaving `shown` lower.
+//
 // Pure C++: tests/gw2/shown_wait_test.cpp builds it natively.
 
 #include <cstdint>
@@ -74,6 +76,34 @@ private:
   const void *source_ = nullptr;
   uint64_t value_ = 0;  // the last flushed present's `shown` value
   uint64_t waited_ = 0; // the highest `shown` value the queue waits for
+};
+
+// gw2 (#316): the CPU's stand-in for a failed Metal 3 present's `shown` signal
+// (Mtl4Queue::waitMetal3). The event's setter assigns, and the GPU may signal a later present's
+// higher value between this read and this set, so a CPU set can lower `shown`. It can't be made
+// atomic against the GPU. Instead, once the CPU has signalled, every later present checks after
+// its buffer completed that `shown` is at least its own value. Presents are handled in rising
+// order by one thread at a time (the finish thread, then waitIdle), so the present whose signal
+// was overwritten always comes after the overwrite. A process without a failed present makes no
+// call on the event here.
+class ShownRepair {
+public:
+  // A present's buffer completed. failed: it reported an error, so it may never have signalled.
+  // True when this call signalled `value` from the CPU.
+  template <class Event>
+  bool
+  completed(Event &event, uint64_t value, bool failed) {
+    if (!failed && !cpu_signalled_)
+      return false;
+    if (event.signaledValue() >= value)
+      return false;
+    event.signalValue(value);
+    cpu_signalled_ = true;
+    return true;
+  }
+
+private:
+  bool cpu_signalled_ = false;
 };
 
 } // namespace dxmt::gw2
