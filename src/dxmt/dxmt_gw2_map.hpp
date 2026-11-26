@@ -22,9 +22,6 @@ namespace dxmt::gw2 {
 
 // DXMT_MAP_FAST (default on): the Map/Unmap fast path for dynamic and default-usage buffers.
 bool mapFast();
-// gw2 (#145): DXMT_UPDATE_ONE_CALL (default on, needs DXMT_MAP_FAST): the immediate context handles
-// UpdateSubresource's fast branch in one call, without the nested Map and Unmap.
-bool updateOneCall();
 
 // What a Map/Unmap is on, from the resource (D3D11ResourceCommon::gw2_map_kind_).
 enum class MapKind : uint8_t {
@@ -162,11 +159,12 @@ private:
   int64_t t0_ = 0;
 };
 
-// gw2 (#145): one UpdateSubresource of a buffer that DXMT_UPDATE_ONE_CALL handles without its Map and
-// Unmap. It counts both in MAP (`op`, then unmap) and PACE (`map`, twice), as their MapScopes and
-// ApiScopes did, and PACE leaves them to an outer scope as a nested ApiScope does. One draw decides
-// whether it times the update (as ApiScope samples Map: 1 in 64 since #150, scaled); both lines take
-// that interval, less the clock's floor, MAP on `op`'s bucket. With stats off it does nothing.
+// gw2 (#145): one UpdateSubresource of a buffer that the immediate context handles in one call,
+// without its Map and Unmap. It counts both in MAP (`op`, then unmap) and PACE (`map`, twice), as
+// their MapScopes and ApiScopes did, and PACE leaves them to an outer scope as a nested ApiScope does.
+// One draw decides whether it times the update (as ApiScope samples Map: 1 in 64 since #150, scaled);
+// both lines take that interval, less the clock's floor, MAP on `op`'s bucket. With stats off it does
+// nothing.
 class UpdateScope {
 public:
   UpdateScope(MapCounters &counters, MapKind kind, MapOp op, ApiThreadCache &cache) :

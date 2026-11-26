@@ -111,9 +111,9 @@ public:
               "rename, pages that grow up to 64 KB, default-usage buffers renamed into suballocated CPU-visible "
               "pages, Map/Unmap API time sampled 1 in 16"
           );
-        if (gw2_update_one_call_) // gw2 (#145)
+        if (gw2_map_fast_) // gw2 (#145): part of DXMT_MAP_FAST since #287
           Logger::info(
-              "UpdateSubresource one call: on (DXMT_UPDATE_ONE_CALL): a buffer update on the map fast path "
+              "UpdateSubresource one call: on (with DXMT_MAP_FAST): a buffer update on the map fast path "
               "maps and copies under one lock, without the nested Map and Unmap; MAP and PACE count both"
           );
       }
@@ -258,7 +258,7 @@ public:
                                                  SrcDepthPitch, 0);
   }
 
-  // gw2 (#145): DXMT_UPDATE_ONE_CALL: UpdateSubresource's fast branch (the base's, for a discard or
+  // gw2 (#145): with DXMT_MAP_FAST, UpdateSubresource's fast branch (for a discard or
   // no-overwrite update of a buffer with a DynamicBuffer) runs here under one device lock:
   // MapBufferFast, then the copy, without the virtual Map and Unmap, their scopes and locks, or a
   // reference count on the DynamicBuffer. MAP and PACE still count one Map and one Unmap per update
@@ -267,7 +267,7 @@ public:
   STDMETHODCALLTYPE
   UpdateSubresource1(ID3D11Resource *pDstResource, UINT DstSubresource, const D3D11_BOX *pDstBox,
                      const void *pSrcData, UINT SrcRowPitch, UINT SrcDepthPitch, UINT CopyFlags) override {
-    D3D11ResourceCommon *common = gw2_update_one_call_ && pDstResource ? GetResourceCommon(pDstResource) : nullptr;
+    D3D11ResourceCommon *common = gw2_map_fast_ && pDstResource ? GetResourceCommon(pDstResource) : nullptr;
     if (common && common->gw2_dynamic_) {
       uint32_t buffer_len = common->gw2_byte_width_;
       uint32_t copy_offset = 0;
@@ -1021,7 +1021,6 @@ private:
   bool ignore_map_flag_no_wait_;
   Com<MTLD3D11DeviceContextState, false> state_object_;
   gw2::MapCounters gw2_map_; // gw2 (#25): the MAP section, published at each commit
-  const bool gw2_update_one_call_ = gw2::updateOneCall(); // gw2 (#145): DXMT_UPDATE_ONE_CALL, cached
 };
 
 std::unique_ptr<MTLD3D11DeviceContextBase>
