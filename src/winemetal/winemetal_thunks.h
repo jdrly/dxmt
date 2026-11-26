@@ -354,6 +354,13 @@ struct unixcall_setmetalcachepath {
   uint64_t ret_success;
 };
 
+/* gw2 (#46) */
+struct unixcall_getmetalcachepath {
+  struct WMTMemoryPointer buf;
+  uint64_t size;
+  uint64_t ret_length;
+};
+
 struct unixcall_bootstrap {
   char name[128];
   uint32_t mach_port;

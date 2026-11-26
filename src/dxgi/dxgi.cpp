@@ -56,7 +56,22 @@ static void InitializeMetalCachePath() {
   // This is the framework cache (mainly for PSOs), not managed by DXMT
   auto metal_cache_path = str::format("dxmt/", env::getExeName(), "/com.apple.metal");
   if (!WMTSetMetalShaderCachePath(metal_cache_path.c_str())) {
-    Logger::info("Failed to set Metal cache path, fallback to system default");
+    // gw2 (#46): Metal fixes its shader cache path at its first device creation, and Wine's display
+    // code (winemac's GPU enumeration) creates Metal devices in every GUI process before dxgi.dll
+    // loads. So the set can't take; say where Metal's own (persistent) cache is instead.
+    char actual[1024];
+    uint32_t len = WMTGetMetalShaderCachePath(actual, sizeof(actual));
+    if (len)
+      Logger::info(str::format(
+          "Metal shader cache: ", actual, len >= sizeof(actual) ? "..." : "",
+          " (Metal fixed it before DXMT loaded: Wine creates Metal devices first, so dxmt/", env::getExeName(),
+          "/com.apple.metal is unused; DXMT_USE_DEFAULT_METAL_CACHE=1 skips the attempt)"
+      ));
+    else
+      Logger::info(str::format(
+          "Metal shader cache: Metal's default (dxmt/", env::getExeName(),
+          "/com.apple.metal didn't take, and this build can't read Metal's path: no private Metal API)"
+      ));
   }
 }
 

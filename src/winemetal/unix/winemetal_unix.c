@@ -3326,6 +3326,7 @@ NTSTATUS _CacheReader_get(void *obj);
 NTSTATUS _CacheWriter_alloc_init(void *obj);
 NTSTATUS _CacheWriter_set(void *obj);
 NTSTATUS _WMTSetMetalShaderCachePath(void *obj);
+NTSTATUS _WMTGetMetalShaderCachePath(void *obj); /* gw2 (#46) */
 
 const void *__wine_unix_call_funcs[] = {
     &_NSObject_retain,
@@ -3480,7 +3481,7 @@ const void *__wine_unix_call_funcs[] = {
     &_WMTPSOArchiveInit, /* 149-151: gw2 (#5) PSO archives */
     &_WMTPSOArchiveFlush,
     &_WMTPSOArchiveQuery,
-    NULL, /* 152: reserved for jdrly/dxmt #5 */
+    &_WMTGetMetalShaderCachePath, /* 152: gw2 (#46, under #5) */
     &_WMTSetThreadQoSClassSelf, /* 153, gw2 #9 */
     &_MTLCommandQueue_commandBufferWithUnretainedReferences, /* 154, gw2 (#31) */
 };
@@ -3639,7 +3640,7 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_WMTPSOArchiveInit, /* 149-151: gw2 (#5) PSO archives */
     &_WMTPSOArchiveFlush,
     &_WMTPSOArchiveQuery,
-    NULL, /* 152: reserved for jdrly/dxmt #5 */
+    &_WMTGetMetalShaderCachePath, /* 152: gw2 (#46, under #5) */
     &_WMTSetThreadQoSClassSelf, /* 153, gw2 #9 */
     &_MTLCommandQueue_commandBufferWithUnretainedReferences, /* 154, gw2 (#31) */
 };

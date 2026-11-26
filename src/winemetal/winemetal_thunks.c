@@ -1088,6 +1088,19 @@ WMTSetMetalShaderCachePath(const char *path) {
   return params.ret_success;
 }
 
+/* gw2 (#46): bridge call 152 (reserved for jdrly/dxmt #5) */
+WINEMETAL_API uint32_t
+WMTGetMetalShaderCachePath(char *buf, uint32_t size) {
+  struct unixcall_getmetalcachepath params;
+  WMT_MEMPTR_SET(params.buf, buf);
+  params.size = size;
+  params.ret_length = 0;
+  if (buf && size)
+    buf[0] = '\0';
+  UNIX_CALL(152, &params);
+  return (uint32_t)params.ret_length;
+}
+
 WINEMETAL_API obj_handle_t
 MTLDevice_newSharedTexture(obj_handle_t device, struct WMTTextureInfo *info) {
   struct unixcall_mtldevice_newtexture params;

@@ -65,7 +65,7 @@ public:
 
   void GetPipeline(MTL_COMPILED_GRAPHICS_PIPELINE *pPipeline) final {
     if (!ready_.load(std::memory_order_acquire)) {
-      gw2::CompileWaitScope wait; // gw2 (#5): the encode thread waits for this compile
+      gw2::CompileWaitScope wait(&compile_trace); // gw2 (#5, #46): the encode thread waits for this compile
       ready_.wait(false, std::memory_order_acquire);
     }
     *pPipeline = {state_mesh_};
@@ -135,6 +135,7 @@ public:
 
     info.raster_sample_count = SampleCount;
 
+    gw2::compileTraceBuild(compile_trace); // gw2 (#46)
     auto t0 = gw2::compileClock(); // gw2 (#5)
     state_mesh_ = device_->GetMTLDevice().newRenderPipelineState(info, err);
     gw2::compilePipelineBuilt(t0, state_mesh_ != nullptr); // gw2 (#5)

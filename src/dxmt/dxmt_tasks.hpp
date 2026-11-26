@@ -13,6 +13,7 @@ template <typename Task> struct task_trait {
   Task run_task(Task task);
   bool get_done(Task task);
   void set_done(Task task);
+  void on_submit(Task task); // gw2 (#46)
 };
 
 template <typename Task> class task_scheduler {
@@ -135,6 +136,7 @@ task_scheduler<Task>::worker_func() {
 template <typename Task>
 void
 task_scheduler<Task>::submit(Task task) {
+  task_trait<Task>{}.on_submit(task); // gw2 (#46): before any worker can take it
   std::unique_lock<dxmt::mutex> lock(worker_mutex_);
   task_queue_.push(task);
   gw2::compileQueue(1); // gw2 (#5): compile queue depth = submitted, not yet completed

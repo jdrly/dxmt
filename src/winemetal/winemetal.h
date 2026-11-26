@@ -2032,6 +2032,12 @@ WINEMETAL_API void CacheWriter_set(obj_handle_t writer, const void *key, uint64_
 
 WINEMETAL_API bool WMTSetMetalShaderCachePath(const char *path);
 
+/* gw2 (#46): the shader cache path Metal actually uses (MTLGetShaderCachePath, private API), as
+   UTF-8 into buf (truncated to size - 1, always NUL-terminated); returns the full length, 0 if
+   unknown. Metal fixes the path at its first device creation, which in Wine happens before
+   dxgi.dll loads (winemac's GPU enumeration), so WMTSetMetalShaderCachePath can't change it. */
+WINEMETAL_API uint32_t WMTGetMetalShaderCachePath(char *buf, uint32_t size);
+
 WINEMETAL_API obj_handle_t MTLDevice_newSharedTexture(obj_handle_t device, struct WMTTextureInfo *info);
 
 WINEMETAL_API bool WMTBootstrapRegister(const char *name, mach_port_t mach_port);

@@ -178,10 +178,18 @@ private:
 
 template <> struct task_trait<ThreadpoolWork *> {
   ThreadpoolWork *run_task(ThreadpoolWork *task) {
-    return task->RunThreadpoolWork();
+    gw2::compileTraceRun(task->compile_trace); // gw2 (#46)
+    auto next = task->RunThreadpoolWork();
+    if (next != task)
+      gw2::compileTraceParked(task->compile_trace, &next->compile_trace); // gw2 (#46)
+    return next;
   }
   bool get_done(ThreadpoolWork *task) { return task->GetIsDone(); }
-  void set_done(ThreadpoolWork *task) { task->SetIsDone(true); }
+  void set_done(ThreadpoolWork *task) {
+    gw2::compileTraceDone(task->compile_trace); // gw2 (#46): before the waiter wakes
+    task->SetIsDone(true);
+  }
+  void on_submit(ThreadpoolWork *task) { gw2::compileTraceSubmit(task->compile_trace); } // gw2 (#46)
 };
 
 class PipelineCache : public MTLD3D11PipelineCacheBase {
