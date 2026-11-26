@@ -16,7 +16,7 @@
 //   (WMT_MTL4_BYTES_RESIDENT).
 // - The binding state's counters go to the METAL4 section when the chunk is done.
 
-#include "Metal.hpp"
+#include "Metal4.hpp"
 #include "dxmt_gw2_mtl4_queue.hpp"
 #include <cstdint>
 #include <functional>

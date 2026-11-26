@@ -1,6 +1,6 @@
 /*
  * gw2 (#32): the Metal 4 bridge (DXMT_METAL4), unix side (call numbers: winemetal_calls.h);
- * the PE side is winemetal_thunks.c, the declarations and the contract are in winemetal.h.
+ * the PE side is winemetal_gw2_thunks.c, the declarations and the contract are in winemetal_gw2.h.
  *
  * DXMT's encode thread keeps building today's wmtcmd_* packets. The three replays below run them on
  * Metal 4 encoders: Metal 4 binds through argument tables (setAddress/setTexture, snapshotted at each

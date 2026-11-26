@@ -29,7 +29,7 @@
 // The RESIDENCY section (2 s): resident=<allocations> mb=<their bytes> adds= removes= commits=
 // devmb=<MTLDevice currentAllocatedSize>.
 
-#include "Metal.hpp"
+#include "Metal4.hpp"
 #include <cstdint>
 
 namespace dxmt::gw2 {

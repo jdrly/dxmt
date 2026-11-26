@@ -17,9 +17,9 @@ namespace dxmt::gw2 {
 // DXMT_METAL4 ("0" is Metal 3; anything else, or unset, asks for Metal 4: the default)
 bool metal4Requested();
 
-// gw2 (#60): DXMT_METALFX_SPATIAL_SWAPCHAIN=1 (exactly "1"), read from the environment at each call
-// (as both callers always did): CreateSwapChain makes the MetalFX spatial swapchain, and the device
-// stays on Metal 3.
+// gw2 (#60): DXMT_METALFX_SPATIAL_SWAPCHAIN=1 (exactly "1"), read from the environment at each call,
+// for metal4AttachQueue: the device stays on Metal 3. CreateSwapChain reads the variable with
+// upstream's own line (the same grammar) and makes the MetalFX spatial swapchain.
 bool metalfxSpatialSwapchain();
 
 // gw2 (#154): DXMT_MTL4_TIMESTAMP_REUSE (off unless exactly "1"), read once per process. On, a Metal 4

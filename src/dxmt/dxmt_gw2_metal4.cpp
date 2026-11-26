@@ -37,7 +37,7 @@ supportReason(WMTMetal4Support support) {
 } // namespace
 
 namespace {
-// gw2 (#60): =1 only; not on the startup line (it never was). CreateSwapChain reads it too, each time.
+// gw2 (#60): =1 only; not on the startup line (it never was). CreateSwapChain reads the variable itself, with upstream's line.
 sw::Switch<bool> kMetalfxSpatialSwapchain{
     "DXMT_METALFX_SPATIAL_SWAPCHAIN", false, sw::legacy::exactlyOne, sw::Line::Unlisted
 };

@@ -1,6 +1,6 @@
 /*
  * gw2 (#56): MetalFX spatial upscaling of GW2's Subsample pass (DXMT_SUBSAMPLE_METALFX), unix side.
- * Its call numbers are in winemetal_calls.h; the PE side is winemetal_thunks.c, the contract winemetal.h.
+ * Its call numbers are in winemetal_calls.h; the PE side is winemetal_gw2_thunks.c, the contract winemetal_gw2.h.
  *
  * Metal 3 encodes the scaler with the existing MTLCommandBuffer_encodeSpatialScale (slot 59). The
  * Metal 4 path needs an MTL4FXSpatialScaler: built with an MTL4Compiler, encoded into an
