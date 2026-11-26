@@ -2,13 +2,19 @@
 #include "dxmt_compile_recipe.hpp"
 #include "Metal.hpp"
 #include "airconv_public.h"
+#include "dxmt_gw2_recipe_use.hpp"
 #include "dxmt_gw2_stats.hpp"
+#include "dxmt_gw2_switches.hpp"
+#include "dxmt_gw2_warm.hpp"
+#include "dxmt_gw2_warm_bridge.hpp"
 #include "log/log.hpp"
 #include "thread.hpp"
 #include "util_env.hpp"
 #include "util_string.hpp"
 #include "winemetal.h"
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <format>
 #include <memory>
 #include <mutex>
@@ -22,6 +28,10 @@
 //   'V' + shader SHA-1 + variant digest (40) + target (4) -> schema (u32), target (u32), airconv (u32),
 //                                                           kind (u8), the variant's inputs
 //   'R' + SHA-1 of the recipe (20)                       -> the recipe: schema (u32), target (u32), ...
+//   'U' + SHA-1 of the recipe (20)                       -> schema, lastSession, sessionsUsed, firstUseMs
+//                                                           (u32 each; #124, rewritten in place)
+//   "Ssession"                                           -> schema, the last session's number (#124)
+// (dxmt_gw2_recipe_use.hpp). A U row is the one row the writer replaces: it merges the session's use.
 // The target (SM50_SHADER_METAL_VERSION) is a translation input, so it is part of the V identity and
 // of every recipe. AIRCONV_VERSION isn't: a warm stage translates the DXBC with its own airconv, so a
 // V row only notes the airconv it was first recorded with.
@@ -67,6 +77,11 @@ struct Recorder {
   // counters: exchanged by the RECORD section
   std::atomic<uint64_t> shaders{0}, variants{0}, recipes{0}, unsupported_variants{0}, unsupported_pipelines{0},
       written{0}, present{0}, failed{0}, dropped_queue{0}, dropped_seen{0}, dropped_stop{0};
+  std::atomic<uint64_t> uses{0}; // gw2 (#124): use rows written (merged)
+
+  // gw2 (#124): the session's start on the steady clock, for the first-use times. The recorder is
+  // created by the process's first record. The session's number is the writer's (UseLedger).
+  const std::chrono::steady_clock::time_point session_start = std::chrono::steady_clock::now();
 
   // the writer thread's log lines (it never calls the logger)
   dxmt::mutex lines_mutex;
@@ -251,6 +266,29 @@ writerThread() {
                                 shown, kRecipeSchema, AIRCONV_VERSION, accounted >> 20, kBudgetBytes >> 20));
   }
 
+  // gw2 (#124): the use data: every U row and the session counter, then this session's number,
+  // written back at once (a newer session always gets a larger number)
+  UseLedger ledger;
+  bool use_ok = false;
+  if (recipeUseRecording() && r.stop.load(std::memory_order_relaxed) == Stop::None) {
+    std::atomic<bool> never{false};
+    auto load = [&](const uint8_t *k, uint32_t kl, const uint8_t *v, uint32_t vl) { ledger.load(k, kl, v, vl); };
+    uint32_t err = warmReadRows(warmEnumeratePrefix(path, kUseTag), never, load);
+    if (!err)
+      err = warmReadRows(warmEnumeratePrefix(path, kSessionTag), never, load);
+    uint32_t session = ledger.begin();
+    auto value = sessionValue(session);
+    if (!err && writer.set(kSessionKey.data(), kSessionKey.size(), WMT::MakeDispatchData(value.data(), value.size()))) {
+      use_ok = true;
+      r.post(false, std::format("Recipes: session {} ({} recipes with use data; DXMT_PSO_RECORD_USE)", session,
+                                ledger.recipes.size()));
+    } else {
+      r.post(true, std::format("Recipes: can't read or start the use data (error {}); no use rows this session "
+                               "(DXMT_PSO_RECORD_USE)",
+                               err));
+    }
+  }
+
   unsigned consecutive_failures = 0;
   while (true) {
     Node *node = takeAll(r);
@@ -261,8 +299,37 @@ writerThread() {
     bool stored_any = false;
     while (node) {
       Node *next = node->next;
+      std::vector<uint8_t> use_value;
+      bool use_row = node->key.size() == kUseKeyBytes && node->key[0] == kUseTag && node->value.size() == 4;
       if (r.stop.load(std::memory_order_relaxed) != Stop::None) {
         r.dropped_stop.fetch_add(1, std::memory_order_relaxed);
+      } else if (use_row) {
+        // gw2 (#124): merge this session's use into the recipe's one U row (INSERT OR REPLACE)
+        uint32_t first_ms = uint32_t(node->value[0]) | uint32_t(node->value[1]) << 8 |
+                            uint32_t(node->value[2]) << 16 | uint32_t(node->value[3]) << 24;
+        std::string id = node->key.substr(1);
+        bool known = ledger.recipes.count(id) != 0;
+        if (!use_ok || !ledger.note(id, first_ms, use_value)) {
+          r.present.fetch_add(1, std::memory_order_relaxed); // counted already, or no use data this session
+        } else if (!known && accounted + node->key.size() + use_value.size() > kBudgetBytes) {
+          r.dropped_stop.fetch_add(1, std::memory_order_relaxed);
+          stopRecording(r, Stop::Budget,
+                        str::format("Recipes: ", shown, " reached its budget (", kBudgetBytes >> 20,
+                                    " MB); recording stops. Delete the file to start over"));
+        } else if (writer.set(node->key.data(), node->key.size(),
+                              WMT::MakeDispatchData(use_value.data(), use_value.size()))) {
+          if (!known)
+            accounted += node->key.size() + use_value.size();
+          stored_any = true;
+          consecutive_failures = 0;
+          r.uses.fetch_add(1, std::memory_order_relaxed);
+        } else {
+          r.failed.fetch_add(1, std::memory_order_relaxed);
+          if (++consecutive_failures >= kMaxConsecutiveFailures)
+            stopRecording(r, Stop::WriterFailed,
+                          str::format("Recipes: ", kMaxConsecutiveFailures, " writes in a row into ", shown,
+                                      " failed; recording stops (DXMT_PSO_RECORD)"));
+        }
       } else if (reader.get(node->key.data(), node->key.size()) != nullptr) {
         r.present.fetch_add(1, std::memory_order_relaxed); // an earlier session stored it
       } else if (accounted + node->key.size() + node->value.size() > kBudgetBytes) {
@@ -305,16 +372,17 @@ section(double, uint32_t) {
   uint64_t shaders = x(r.shaders), variants = x(r.variants), recipes = x(r.recipes),
            uv = x(r.unsupported_variants), up = x(r.unsupported_pipelines), written = x(r.written),
            present = x(r.present), failed = x(r.failed), dq = x(r.dropped_queue), ds = x(r.dropped_seen),
-           dst = x(r.dropped_stop);
+           dst = x(r.dropped_stop), uses = x(r.uses);
   size_t queued = r.queued.load(std::memory_order_relaxed);
   if (!shaders && !variants && !recipes && !uv && !up && !written && !present && !failed && !dq && !ds && !dst &&
-      !queued)
+      !queued && !uses)
     return {};
   auto stop = r.stop.load(std::memory_order_relaxed);
   return std::format("shaders={} variants={} recipes={} unsupported=variants:{},pipelines:{} written={} present={} "
                      "failed={} queued={} dropped=queue:{},seen:{},stopped:{}{}",
                      shaders, variants, recipes, uv, up, written, present, failed, queued, dq, ds, dst,
-                     stop == Stop::Budget ? " stopped=budget" : stop == Stop::WriterFailed ? " stopped=writer" : "");
+                     stop == Stop::Budget ? " stopped=budget" : stop == Stop::WriterFailed ? " stopped=writer" : "") +
+         std::format(" uses={}", uses); // gw2 (#124)
 }
 
 SectionRegistrar g_section("RECORD", section);
@@ -328,11 +396,43 @@ digestKey(char tag, const Sha1Digest &a, const Sha1Digest *b = nullptr) {
   return key;
 }
 
+// gw2 (#124): one use per recipe and process (the recorder's per-process dedup admits its key once);
+// the writer merges it into the recipe's U row. The queued value is the first use (u32 ms) only.
+void
+noteUse(const Sha1Digest &recipe_key) {
+  if (!recipeUseRecording())
+    return;
+  auto &r = recorder();
+  auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - r.session_start)
+                .count();
+  uint32_t first_ms = uint32_t(std::min<int64_t>(std::max<int64_t>(ms, 0), int64_t(UINT32_MAX)));
+  std::vector<uint8_t> value;
+  for (int i = 0; i < 4; i++)
+    value.push_back(uint8_t(first_ms >> (8 * i)));
+  enqueue(recipeUseKey(recipeUseId(recipe_key)), std::move(value));
+}
+
+// gw2 (#124): warm hits note their use through warming's seam (warmPipelineHit)
+struct InstallHitUse {
+  InstallHitUse() { setWarmHitUse(&recipeUse); }
+} g_install_hit_use;
+
 } // namespace
 
 bool
 recipeRecording() {
   static const bool on = env::getEnvVar("DXMT_PSO_RECORD") != "0";
+  return on;
+}
+
+// gw2 (#124): DXMT_PSO_RECORD_USE (on unless "0"), with recording on
+namespace {
+sw::Switch<bool> kRecordUse{"DXMT_PSO_RECORD_USE", true, sw::legacy::notZero};
+}
+
+bool
+recipeUseRecording() {
+  static const bool on = recipeRecording() && kRecordUse();
   return on;
 }
 
@@ -387,6 +487,13 @@ recipePipeline(const compile::PipelineRecipe &recipe) {
   auto key = Sha1HashState::compute(b.data.data(), b.data.size());
   if (enqueue(digestKey('R', key), std::move(b.data)) == Admit::Queued)
     recorder().recipes.fetch_add(1, std::memory_order_relaxed);
+  noteUse(key); // gw2 (#124)
+}
+
+void
+recipeUse(const Sha1Digest &recipe_key) {
+  if (recipeRecording())
+    noteUse(recipe_key);
 }
 
 void

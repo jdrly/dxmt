@@ -12,6 +12,7 @@
 #include "util_string.hpp"
 #include "dxmt_compile_recipe.hpp"
 #include "dxmt_gw2_warm.hpp"
+#include "dxmt_gw2_warm_bridge.hpp" // gw2 (#114)
 #include "log/log.hpp"
 #include "dxmt_gw2_subsample.hpp" // gw2 (#56)
 #include "sha1/sha1_util.hpp"
@@ -459,7 +460,7 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
     std::atomic_bool ready_{false};
   };
 
-  // The warm thread: reads the recipes (first-use order, call 193), plans and submits speculative
+  // The warm thread: reads the recipes (#124: ranked by use, call 193), plans and submits speculative
   // jobs. It never calls the logger (the WARM section reports it).
   void warmThread() {
     env::setThreadName("dxmt-warm");
@@ -470,26 +471,15 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
     uint32_t metal_version = uint32_t(device->GetDXMTDevice().metalVersion());
     auto path = str::format("dxmt/", env::getExeName(), "/recipes_", gw2::kRecipeSchema, ".db");
     gw2::WarmPlan plan;
-    std::vector<uint8_t> buffer(1 << 20);
-    uint64_t after = 0;
-    bool more = true;
-    while (more && !warm_stop_.load() && plan.recipes < max) {
-      uint64_t used = 0, last = after;
-      uint32_t n = CacheEnumerate(path.c_str(), gw2::kRecipeSchema, 'R', after, buffer.data(), buffer.size(), &used,
-                                  &last, &more);
-      for (uint64_t p = 0, i = 0; i < n && p + 8 <= used; i++) {
-        auto u32 = [&](uint64_t at) {
-          return uint32_t(buffer[at]) | uint32_t(buffer[at + 1]) << 8 | uint32_t(buffer[at + 2]) << 16 |
-                 uint32_t(buffer[at + 3]) << 24;
-        };
-        uint32_t key_length = u32(p);
-        uint32_t value_length = u32(p + 4 + key_length);
-        gw2::warmPlanAdd(plan, buffer.data() + p + 8 + key_length, value_length, metal_version, mode, max);
-        p += 8ull + key_length + value_length;
-      }
-      if (n == 0)
-        break;
-      after = last;
+    // gw2 (#114): errors, BUSY and oversized rows are handled in warmRead and reported in WARM
+    // gw2 (#124): the use rows first, then the plan by use (DXMT_WARM_ORDER=rowid: #88's oldest first)
+    if (gw2::warmOrderByUse()) {
+      gw2::WarmUseTable use;
+      gw2::warmReadUses(use, gw2::warmEnumerateUses(path), warm_stop_);
+      gw2::warmRead(plan, gw2::warmEnumerateRecipes(path), metal_version, mode, max, warm_stop_, gw2::kWarmRowMax,
+                    &use);
+    } else {
+      gw2::warmRead(plan, gw2::warmEnumerateRecipes(path), metal_version, mode, max, warm_stop_);
     }
     double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     gw2::warmPlanned(plan, ms);

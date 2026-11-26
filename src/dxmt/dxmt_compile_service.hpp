@@ -304,6 +304,9 @@ Service<Job, Traits>::stop() {
       detail::onComplete(traits_.record(job));
       traits_.setDone(job);
     }
+    // gw2 (#114): each was submitted (+1) and no worker completed it (-1): out of the COMPILE queue
+    // gauge, or queue= stays inflated for a later device in this process
+    gw2::compileQueue(-1);
   }
 }
 
