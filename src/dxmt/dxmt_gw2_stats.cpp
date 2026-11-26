@@ -39,12 +39,30 @@ hitchMs() {
   return ms;
 }
 
+// gw2 (#28): QueryPerformanceCounter, not std::chrono::steady_clock. mingw's libstdc++ builds
+// steady_clock on gettimeofday (the wall clock: 1 us steps in Wine on macOS, and it can step back,
+// which made a scope's unsigned delta wrap). Every clock with sub-ms steps is a crossing into Wine's
+// unix side; measured headless under the engine (tests/gw2/clock_bench.zsh, ns per call):
+// QueryPerformanceCounter 52.5 (100 ns steps, mach_continuous_time), steady_clock 55.1 (1 us),
+// GetSystemTimePreciseAsFileTime 51.2 (1 us, wall clock), clock_gettime(MONOTONIC) 56.5 (QPC).
+// KUSER_SHARED_DATA's interrupt time is a 1.4 ns memory read but the wineserver refreshes it only
+// when it wakes (every ~18 ms in an idle process), too coarse for a scope.
 int64_t
 nowNs() {
-  return std::chrono::duration_cast<std::chrono::nanoseconds>(
-             std::chrono::steady_clock::now().time_since_epoch()
-  )
-      .count();
+  static const struct Qpc {
+    int64_t freq, ns_per_tick; // ns_per_tick 0: the frequency doesn't divide 1e9 (not Wine's 10 MHz)
+    Qpc() {
+      LARGE_INTEGER f;
+      QueryPerformanceFrequency(&f);
+      freq = f.QuadPart > 0 ? f.QuadPart : 1;
+      ns_per_tick = 1'000'000'000 % freq == 0 ? 1'000'000'000 / freq : 0;
+    }
+  } qpc;
+  LARGE_INTEGER c;
+  QueryPerformanceCounter(&c);
+  if (qpc.ns_per_tick)
+    return c.QuadPart * qpc.ns_per_tick;
+  return c.QuadPart / qpc.freq * 1'000'000'000 + c.QuadPart % qpc.freq * 1'000'000'000 / qpc.freq;
 }
 
 // --- sections
@@ -103,7 +121,9 @@ std::vector<ApiThread *> g_all_threads; // every block ever made
 std::atomic<DWORD> g_fls = FLS_OUT_OF_INDEXES;
 std::atomic<bool> g_fls_failed = false;
 // a thread whose block isn't in the fiber-local slot (FlsAlloc or FlsSetValue failed): that block is
-// never released and never cached, so no other thread can take or match it
+// never released and never cached, so no other thread can take or match it. gw2 (#121): it is always
+// a new block, never a reclaimed one, which a cache may still point at: the fallback keeps its tid
+// after its thread dies, and a thread reusing that id would hit it through such a cache.
 thread_local ApiThread *t_thread = nullptr;
 
 void WINAPI
@@ -134,12 +154,14 @@ flsIndex() {
   return fls;
 }
 
+// fresh: a new block, never one a cache may point at (gw2 #121: for a fallback block)
 ApiThread *
-takeBlock(uint32_t tid) {
+takeBlock(uint32_t tid, bool fresh) {
   ApiThread *t = nullptr;
   {
     std::lock_guard lock(g_threads_mutex);
-    for (auto b : g_all_threads) {
+    for (size_t i = 0; !fresh && i < g_all_threads.size(); i++) {
+      auto b = g_all_threads[i];
       if (b->released.load(std::memory_order_acquire) && b->released.exchange(false, std::memory_order_acq_rel)) {
         t = b;
         break;
@@ -202,15 +224,23 @@ apiThread() {
   }
   if (auto t = t_thread)
     return *t;
-  auto t = takeBlock(uint32_t(GetCurrentThreadId()));
-  if (fls != FLS_OUT_OF_INDEXES && FlsSetValue(fls, t)) {
-    t->cacheable = true; // released at exit, so a cache may hold it
-  } else {
-    t_thread = t; // not released at exit: kept per thread, never cached
+  uint32_t tid = uint32_t(GetCurrentThreadId());
+  if (fls != FLS_OUT_OF_INDEXES) {
+    auto t = takeBlock(tid, false);
+    if (FlsSetValue(fls, t)) {
+      t->cacheable = true; // released at exit, so a cache may hold it
+      return *t;
+    }
+    // gw2 (#121): t may be a reclaimed block a cache still points at, so it can't be the fallback.
+    // Back to the pool (tid 0 again, so no cache returns it); no cache took it from this thread.
+    releaseThread(t);
     static std::atomic<bool> warned = false;
-    if (fls != FLS_OUT_OF_INDEXES && !warned.exchange(true))
+    if (!warned.exchange(true))
       Logger::warn("GW2 PACE: FlsSetValue failed; this thread's API time uses a TLS lookup per call");
   }
+  // not released at exit: kept per thread, never cached, and new (#121), so no cache points at it
+  auto t = takeBlock(tid, true);
+  t_thread = t;
   return *t;
 }
 
