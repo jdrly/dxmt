@@ -19,7 +19,6 @@ namespace {
 
 // gw2 (#7): the file is small; anything past this is ignored
 constexpr size_t kMaxFileBytes = 4096;
-constexpr double kMaxDeadlineMs = 1000.0;
 
 std::atomic<int32_t> g_present_deadline_us{kControlUnset};
 
@@ -82,7 +81,7 @@ struct Poller {
     }
     char *end = nullptr;
     double ms = std::strtod(value.c_str(), &end);
-    if (!value.empty() && end && *end == '\0' && std::isfinite(ms) && ms >= 0 && ms <= kMaxDeadlineMs) {
+    if (!value.empty() && end && *end == '\0' && presentDeadlineInRange(ms)) {
       if (ms == 0) {
         us = 0;
       } else {
@@ -96,7 +95,7 @@ struct Poller {
         std::format(
             "Control: present_deadline={} isn't refresh, default, 0 or a number of ms up to {:.0f}; ignored (the "
             "line counts as missing)",
-            value, kMaxDeadlineMs
+            value, kMaxPresentDeadlineMs
         )
     );
     return false;

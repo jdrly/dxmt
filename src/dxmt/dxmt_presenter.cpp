@@ -225,6 +225,10 @@ Presenter::encodeCommands(
   auto drawable = layer_.nextDrawable();
   if (stats)
     last_next_drawable_ = std::chrono::high_resolution_clock::now() - t0;
+  // gw2 (#324): no drawable. With DXMT_PRESENT_SKIP_NIL=1 nothing is encoded here and the caller
+  // skips the present (dxmt_context.cpp); without it the nil goes on as before
+  if (!drawable.handle && gw2::presentSkipNil())
+    return drawable;
 
   WMTRenderPassInfo info;
   WMT::InitializeRenderPassInfo(info);
@@ -274,6 +278,9 @@ Presenter::encodeCommandsMetal4(
   auto drawable = layer_.nextDrawable();
   if (stats)
     last_next_drawable_ = std::chrono::high_resolution_clock::now() - t0;
+  // gw2 (#324): as in encodeCommands, before the queue's wait for the drawable
+  if (!drawable.handle && gw2::presentSkipNil())
+    return drawable;
   encoding.waitForDrawable(drawable);
 
   WMTRenderPassInfo info;
