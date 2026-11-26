@@ -5,7 +5,9 @@
 // time its present was encoded, and (gw2 #224) the drawable's surface; the encode thread collects
 // the finished records at each present. Off with DXMT_STATS=0, like all of the fork's measuring.
 
+#include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <string>
 
@@ -29,14 +31,19 @@ void presentPassGpu(uint64_t frame, uint64_t gpu_start_ns, uint64_t gpu_end_ns);
 // isn't a whole number of refreshes), which missed vsyncs are counted against instead of vsyncs.
 void presentSetPacing(double refresh_ms, uint32_t vsyncs, double limiter_ms);
 
-// gw2 (#157): DXMT_PRESENT_QUEUE, parsed once per process. Default: the layer keeps its three
-// drawables and Present doesn't sleep. Two: the layer's maximumDrawableCount is 2. Pace: Present
-// sleeps when the last nextDrawable blocked (dxmt_gw2_present_pace.hpp); it needs DXMT_STATS, whose
-// presented records and nextDrawable timer it reads, and does nothing without it.
-enum class PresentQueue : uint8_t { Default, Two, Pace };
-PresentQueue presentQueue();
-// pace asked for and DXMT_STATS on: the encode thread counts skips per frame and reports its blocks
-bool presentPaceOn();
+// gw2 (#157): the PRESENT section's skip count on a whole-refresh grid (shared with its test's oracle)
+// Refreshes skipped between two shown frames `gap_ms` apart, beyond the `vsyncs` the pacing asks for.
+inline int64_t
+skippedRefreshes(double gap_ms, double refresh_ms, uint32_t vsyncs) {
+  return std::max<int64_t>(0, std::llround(gap_ms / refresh_ms) - (int64_t)vsyncs);
+}
+
+// Whether a frame encoded at `encode_ns` was queued when the previous shown frame reached the screen
+// at `last_presented_ns`: its skipped refreshes are `missed`, otherwise `starved`.
+inline bool
+skipWasQueued(uint64_t encode_ns, uint64_t last_presented_ns) {
+  return encode_ns < last_presented_ns;
+}
 
 // gw2 (#227): DXMT_MTL4_PRESENT's grammar: exactly `mtl3` presents through a Metal 3 command buffer on a
 // Metal 4 device; anything else, unset included, is the fallback, `mtl4` (today's Metal 4 present).
@@ -44,18 +51,5 @@ inline std::string
 mtl4PresentGrammar(const std::string &raw, const std::string &fallback) {
   return raw == "mtl3" ? raw : fallback;
 }
-
-// Encode thread, with presentPaceOn(): how long the nextDrawable of present `seq` blocked.
-void presentPaceBlocked(int64_t ns, uint64_t seq);
-
-// Render thread, with presentPaceOn(): the last block and the per-frame missed and starved totals.
-struct PaceSignals {
-  int64_t blocked_ns = 0;
-  uint64_t blocked_seq = 0;
-  uint64_t missed = 0, starved = 0;
-};
-PaceSignals presentPaceSignals();
-// Render thread: pace slept `ns` (0: it didn't), for the PRESENTQ section; gave_up once when it gave up.
-void presentPaceStep(int64_t ns, bool gave_up);
 
 } // namespace dxmt::gw2
