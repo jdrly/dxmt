@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- gw2 (#230): present_cursor_test's arm64 binary in a bundle with Game Mode's keys, as the game's process has them -->
+<plist version="1.0">
+<dict>
+	<key>CFBundleExecutable</key><string>present_cursor_test</string>
+	<key>CFBundleIdentifier</key><string>io.github.jdrly.dxmt.present-cursor-test</string>
+	<key>CFBundleName</key><string>present_cursor_test</string>
+	<key>CFBundlePackageType</key><string>APPL</string>
+	<key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+	<key>CFBundleShortVersionString</key><string>0.0.1</string>
+	<key>CFBundleVersion</key><string>0.0.1</string>
+	<key>LSApplicationCategoryType</key><string>public.app-category.games</string>
+	<key>LSSupportsGameMode</key><true/>
+	<key>GCSupportsGameMode</key><true/>
+</dict>
+</plist>
