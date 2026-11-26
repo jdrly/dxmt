@@ -17,6 +17,7 @@
 #include "dxmt_gw2_subsample.hpp" // gw2 (#56)
 #include "sha1/sha1_util.hpp"
 #include "util_env.hpp"
+#include "dxmt_gw2_switches.hpp" // gw2 (#146)
 #include "../d3d10/d3d10_shader.hpp"
 #include "../d3d10/d3d10_input_layout.hpp"
 #include <algorithm>
@@ -46,6 +47,28 @@ psoSettings() {
 }
 
 std::atomic<uint64_t> g_pso_counters[(unsigned)PsoCounter::Count];
+
+namespace {
+// gw2 (#146): on unless exactly "0"
+sw::Switch<bool> kSkipSameState{"DXMT_SKIP_SAME_STATE", true, sw::legacy::notZero};
+} // namespace
+
+bool
+skipSameState() {
+  static const bool on = kSkipSameState();
+  return on;
+}
+
+namespace {
+// gw2 (#147): off unless exactly "1"
+sw::Switch<bool> kSkipSameSrv{"DXMT_SKIP_SAME_SRV", false, sw::legacy::exactlyOne};
+} // namespace
+
+bool
+skipSameSrv() {
+  static const bool on = kSkipSameSrv();
+  return on;
+}
 
 namespace {
 
@@ -140,15 +163,22 @@ psoSection(double window_ms, uint32_t frames) {
   double wait = drain(g_pso_wait_ns) * double(kPsoSampleEvery) / 1e6;
   double held = drain(g_pso_held_ns) * double(kPsoSampleEvery) / 1e6;
   auto at = [&](PsoCounter k) { return double(c[(unsigned)k]); };
-  if (!at(PsoCounter::Build) && !at(PsoCounter::Lookup) && !at(PsoCounter::TopologyKept))
+  if (!at(PsoCounter::Build) && !at(PsoCounter::Lookup) && !at(PsoCounter::TopologyKept) &&
+      !at(PsoCounter::LayoutSame) && !at(PsoCounter::NullShaderEmpty) && !at(PsoCounter::VertexBufferSame) &&
+      !at(PsoCounter::IndexBufferSame) && !at(PsoCounter::SrvCall) && !at(PsoCounter::SamplerCall))
     return {};
   double n = std::max(frames, 1u);
   return std::format(
       "builds={:.1f} mru={:.1f} lookups={:.1f} equal={:.1f} depth={:.2f}/{} new={} topokept={:.1f} "
-      "lock={:.3f}/{:.3f}",
+      "lock={:.3f}/{:.3f} samelayout={:.1f} nullshader={:.1f} samevb={:.1f} sameib={:.1f} "
+      "srv={:.1f}/{:.1f}/{:.1f}/{:.1f}/{} smp={:.1f}/{:.1f}/{:.1f}",
       at(PsoCounter::Build) / n, at(PsoCounter::MruHit) / n, at(PsoCounter::Lookup) / n, at(PsoCounter::Equal) / n,
       samples ? double(depth_sum) / samples : 0.0, depth_max, c[(unsigned)PsoCounter::New],
-      at(PsoCounter::TopologyKept) / n, wait / n, held / n
+      at(PsoCounter::TopologyKept) / n, wait / n, held / n, at(PsoCounter::LayoutSame) / n,
+      at(PsoCounter::NullShaderEmpty) / n, at(PsoCounter::VertexBufferSame) / n, at(PsoCounter::IndexBufferSame) / n,
+      at(PsoCounter::SrvCall) / n, at(PsoCounter::SrvSlot) / n, at(PsoCounter::SrvSame) / n,
+      at(PsoCounter::SrvSet) / n, c[(unsigned)PsoCounter::SrvHazardMissed], at(PsoCounter::SamplerCall) / n,
+      at(PsoCounter::SamplerSlot) / n, at(PsoCounter::SamplerSet) / n
   );
 }
 
@@ -834,8 +864,10 @@ public:
     auto &pso = gw2::psoSettings();
     gw2::g_pso_stats.store(gw2::statsEnabled(), std::memory_order_relaxed); // gw2 (#149)
     Logger::info(std::format(
-        "PSO: blend hash {} (DXMT_PSO_BLEND_HASH), MRU {} (DXMT_PSO_MRU), topology keep {} (DXMT_PSO_TOPOLOGY_KEEP)",
-        pso.blend_hash ? "on" : "off", pso.mru ? "on, 4 entries" : "off", pso.topology_keep ? "on" : "off"
+        "PSO: blend hash {} (DXMT_PSO_BLEND_HASH), MRU {} (DXMT_PSO_MRU), topology keep {} (DXMT_PSO_TOPOLOGY_KEEP), "
+        "skip same state {} (DXMT_SKIP_SAME_STATE), skip same srv {} (DXMT_SKIP_SAME_SRV)",
+        pso.blend_hash ? "on" : "off", pso.mru ? "on, 4 entries" : "off", pso.topology_keep ? "on" : "off",
+        gw2::skipSameState() ? "on" : "off", gw2::skipSameSrv() ? "on" : "off"
     ));
 
     // gw2 (#5): DXMT_PSO_ARCHIVE=1 loads earlier sessions' pipeline archives (once per process)

@@ -47,10 +47,48 @@ psoBlendHash() {
   return g_pso_blend_hash.load(std::memory_order_relaxed);
 }
 
-enum class PsoCounter : unsigned { Build, MruHit, TopologyKept, Lookup, New, Equal, Count };
+// gw2 (#146): DXMT_SKIP_SAME_STATE (default on): IASetInputLayout with the bound layout, a null
+// shader on an empty stage, and vertex and index buffer binds that change nothing return before
+// they invalidate the pipeline or emit a command. Read once per process.
+bool skipSameState();
+
+// gw2 (#147): DXMT_SKIP_SAME_SRV (default off): XXSetShaderResources keeps a slot's hazard bit set
+// when a bound slot is replaced by a view that can be an output, and then leaves a slot whose bound
+// view is the incoming one and whose hazard bit is clear before it validates the view. Read once
+// per process.
+bool skipSameSrv();
+
+// gw2 (#146): LayoutSame, NullShaderEmpty, VertexBufferSame and IndexBufferSame count those setter
+// calls (a vertex buffer per slot), with the switch on or off.
+// gw2 (#147): Srv* and Sampler* count XXSetShaderResources and XXSetSamplers calls, their slots,
+// the slots the switch leaves (SrvSame: the bound view again, hazard bit clear; not counted for
+// samplers) and the slots
+// that emitted a bind or an unbind; SrvHazardMissed counts bound slots replaced by a view that can be
+// an output while the slot's hazard bit was clear. All with DXMT_SKIP_SAME_SRV on or off.
+enum class PsoCounter : unsigned {
+  Build,
+  MruHit,
+  TopologyKept,
+  Lookup,
+  New,
+  Equal,
+  LayoutSame,
+  NullShaderEmpty,
+  VertexBufferSame,
+  IndexBufferSame,
+  SrvCall,
+  SrvSlot,
+  SrvSame,
+  SrvSet,
+  SrvHazardMissed,
+  SamplerCall,
+  SamplerSlot,
+  SamplerSet,
+  Count
+};
 extern std::atomic<uint64_t> g_pso_counters[(unsigned)PsoCounter::Count];
 
-// gw2 (#149): a context's PSO counters (Build, MruHit, TopologyKept): plain increments, added to
+// gw2 (#149): a context's PSO counters (Build, MruHit, TopologyKept, and #146's four): plain increments, added to
 // g_pso_counters once a chunk (the immediate context's commit, a deferred context's
 // FinishCommandList), as MapCounters does, and what is left when the context goes.
 struct PsoContextCounters {
@@ -61,6 +99,11 @@ struct PsoContextCounters {
   count(PsoCounter c) {
     if (on)
       n[(unsigned)c]++;
+  }
+  void
+  add(PsoCounter c, uint32_t v) {
+    if (on)
+      n[(unsigned)c] += v;
   }
   void
   publish() {
