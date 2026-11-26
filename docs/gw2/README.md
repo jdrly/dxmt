@@ -3,6 +3,9 @@
 Everything the fork adds on top of upstream DXMT. A pull request that adds or changes a switch
 or a log line updates this file in the same PR.
 
+[SERIES.md](SERIES.md) sorts every commit of the fork into topics, with each topic's switches,
+evidence and whether I keep it.
+
 GW2 on Mac sets `DXMT_LOG_PATH` to its `work/logs`, so the lines below land in
 `Gw2-64_d3d11.log` there. The file is rewritten each time the game creates its device.
 
