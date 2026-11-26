@@ -21,6 +21,7 @@
 #include "dxmt_command_queue.hpp"
 #include "dxmt_deptrack.hpp"
 #include "dxmt_format.hpp"
+#include "dxmt_gw2_present.hpp"
 #include "dxmt_gw2_stats.hpp"
 #include "dxmt_names.hpp"
 #include "dxmt_occlusion_query.hpp"
@@ -1177,6 +1178,9 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer &cmdbuf, uint64_t seqI
       auto t1 = clock::now();
       currentFrameStatistics().drawable_blocking_interval += (t1 - t0);
       currentFrameStatistics().next_drawable_interval += data->presenter->lastNextDrawable();
+      // gw2 (#7): when the drawable reaches the screen, for the PRESENT section
+      if (gw2::statsEnabled())
+        gw2::presentTrack(drawable.handle, frame_id_);
       if (data->after > 0) {
         cmdbuf.presentDrawableAfterMinimumDuration(drawable, data->after);
         currentFrameStatistics().present_after++;

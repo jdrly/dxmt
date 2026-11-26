@@ -1,5 +1,6 @@
 #include <stdatomic.h>
 #include <dlfcn.h>
+#include <os/lock.h>
 #import <Cocoa/Cocoa.h>
 #import <ColorSync/ColorSync.h>
 #import <CoreFoundation/CFRunLoop.h>
@@ -1322,6 +1323,63 @@ _MTLCommandBuffer_presentDrawableWithDeadline(void *obj) {
   struct unixcall_generic_obj_obj_double_noret *params = obj;
   [(id<MTLCommandBuffer>)params->handle presentDrawable:(id<MTLDrawable>)params->arg0
                                                  atTime:CACurrentMediaTime() + params->arg1];
+  return STATUS_SUCCESS;
+}
+
+/* gw2 (#7): presentation times for the PRESENT statistics section. Presented handlers run on a
+   Metal/Core Animation thread and push into this ring; the encode thread drains it with a trylock,
+   so it never waits for a handler. The handler block captures two integers and nothing else (Metal
+   copies it), so nothing it refers to can go away before it runs. */
+#define PRESENTED_RING 64
+static os_unfair_lock g_presented_lock = OS_UNFAIR_LOCK_INIT;
+static struct WMTPresentedRecord g_presented_ring[PRESENTED_RING];
+static uint32_t g_presented_head, g_presented_count;
+static uint64_t g_presented_lost;
+
+static void
+presented_push(uint64_t frame, uint64_t encode_ns, uint64_t presented_ns) {
+  os_unfair_lock_lock(&g_presented_lock);
+  if (g_presented_count == PRESENTED_RING) {
+    /* full: drop the oldest */
+    g_presented_head = (g_presented_head + 1) % PRESENTED_RING;
+    g_presented_count--;
+    g_presented_lost++;
+  }
+  struct WMTPresentedRecord *r = &g_presented_ring[(g_presented_head + g_presented_count) % PRESENTED_RING];
+  r->frame = frame;
+  r->encode_ns = encode_ns;
+  r->presented_ns = presented_ns;
+  g_presented_count++;
+  os_unfair_lock_unlock(&g_presented_lock);
+}
+
+static NTSTATUS
+_MTLDrawable_trackPresented(void *obj) {
+  struct unixcall_mtldrawable_trackpresented *params = obj;
+  if (params->drawable) {
+    uint64_t frame = params->frame;
+    uint64_t encode_ns = (uint64_t)(CACurrentMediaTime() * 1e9);
+    [(id<MTLDrawable>)params->drawable addPresentedHandler:^(id<MTLDrawable> drawable) {
+      CFTimeInterval t = drawable.presentedTime;
+      presented_push(frame, encode_ns, t > 0 ? (uint64_t)(t * 1e9) : 0);
+    }];
+  }
+  params->count = 0;
+  params->lost = 0;
+  if (!os_unfair_lock_trylock(&g_presented_lock))
+    return STATUS_SUCCESS;
+  uint64_t n = params->capacity < WMT_PRESENTED_BATCH ? params->capacity : WMT_PRESENTED_BATCH;
+  if (n > g_presented_count)
+    n = g_presented_count;
+  for (uint64_t i = 0; i < n; i++) {
+    params->records[i] = g_presented_ring[g_presented_head];
+    g_presented_head = (g_presented_head + 1) % PRESENTED_RING;
+  }
+  g_presented_count -= (uint32_t)n;
+  params->count = n;
+  params->lost = g_presented_lost;
+  g_presented_lost = 0;
+  os_unfair_lock_unlock(&g_presented_lock);
   return STATUS_SUCCESS;
 }
 
@@ -3416,8 +3474,8 @@ const void *__wine_unix_call_funcs[] = {
     &_MTLTexture_getBytes,
     &_MTLCommandBuffer_presentDrawableWithDeadline,
     &_MetalView_visibility, /* 147, gw2 (#1) */
-    /* gw2: 148-152 are reserved for other fork issues (#7 148, #5 149-152) */
-    NULL,
+    &_MTLDrawable_trackPresented, /* 148: gw2 (#7) */
+    /* gw2: 149-152 are reserved for #5 */
     NULL,
     NULL,
     NULL,
@@ -3575,8 +3633,8 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_MTLTexture_getBytes,
     &_MTLCommandBuffer_presentDrawableWithDeadline,
     &_MetalView_visibility, /* 147, gw2 (#1) */
-    /* gw2: 148-152 are reserved for other fork issues (#7 148, #5 149-152) */
-    NULL,
+    &_MTLDrawable_trackPresented, /* 148: gw2 (#7) */
+    /* gw2: 149-152 are reserved for #5 */
     NULL,
     NULL,
     NULL,
