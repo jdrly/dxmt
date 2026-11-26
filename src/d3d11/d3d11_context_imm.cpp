@@ -33,16 +33,14 @@ template <>
 template <CommandWithContext<ArgumentEncodingContext> cmd>
 void
 ImmediateContextBase::EmitST(cmd &&fn) {
-  CommandChunk *chk = ctx_state.cmd_queue.CurrentChunk();
-  chk->emitcc(std::forward<cmd>(fn));
+  ctx_state.cmd_queue.Emit(std::forward<cmd>(fn)); // gw2 (#148)
 }
 
 template <>
 template <CommandWithContext<ArgumentEncodingContext> cmd>
 void
 ImmediateContextBase::EmitOP(cmd &&fn) {
-  CommandChunk *chk = ctx_state.cmd_queue.CurrentChunk();
-  chk->emitcc(std::forward<cmd>(fn));
+  ctx_state.cmd_queue.Emit(std::forward<cmd>(fn)); // gw2 (#148)
   ctx_state.has_dirty_op_since_last_event = true;
 }
 

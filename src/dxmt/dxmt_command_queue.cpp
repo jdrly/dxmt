@@ -257,6 +257,7 @@ CommandQueue::~CommandQueue() {
 
 void
 CommandQueue::CommitCurrentChunk() {
+  emit_window_.reset(); // gw2 (#148): the window's slab is this chunk's; the next chunk takes its own
   auto chunk_id = ready_for_encode.load(std::memory_order_relaxed);
   auto &chunk = chunks[chunk_id % chunk_count_];
   chunk.chunk_id = chunk_id;

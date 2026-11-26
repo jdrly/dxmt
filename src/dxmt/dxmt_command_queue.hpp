@@ -27,6 +27,7 @@
 #include "dxmt_context.hpp"
 #include "dxmt_counter.hpp"
 #include "dxmt_gw2_commit_record.hpp"
+#include "dxmt_gw2_emit_window.hpp"
 #include "dxmt_gw2_lifetime.hpp"
 #include "dxmt_gw2_mtl4_queue.hpp"
 #include "dxmt_gw2_retirement.hpp"
@@ -293,6 +294,9 @@ private:
   RingBumpState<GpuPrivateBufferBlockAllocator> copy_temp_allocator;
   RingBumpState<StagingBufferBlockAllocator, kCommandChunkGPUHeapSize> argbuf_allocator;
   RingBumpState<HostBufferBlockAllocator, kCommandChunkCPUHeapSize, dxmt::null_mutex> cpu_command_allocator;
+  // gw2 (#148): the current chunk's slab of cpu_command_allocator that Emit places commands in;
+  // CommitCurrentChunk empties it
+  gw2::EmitWindow<CommandChunk> emit_window_;
   RingBumpState<HostBufferBlockAllocator, 0x1000 /* 4kB */> reftracker_storage_allocator;
   CaptureState capture_state;
 
@@ -407,6 +411,16 @@ public:
 
   obj_handle_t GetSharedEventListener() {
     return shared_event_listener;
+  }
+
+  // gw2 (#148): records a command in the current chunk, its memory from the emit window (one
+  // CommandChunk::emitcc without a ring allocation per command). Same thread rules as CurrentChunk.
+  template <CommandWithContext<ArgumentEncodingContext> F>
+  void
+  Emit(F &&func) {
+    auto [chunk, ptr] =
+        emit_window_.place(*this, sizeof(impl::LambdaCommand<ArgumentEncodingContext, F>), 16);
+    chunk->list_enc.emit(std::forward<F>(func), ptr);
   }
 
   /**
