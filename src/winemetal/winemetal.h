@@ -2236,6 +2236,11 @@ struct WMTPSOArchiveStats {
   uint64_t unflushed;     // added since the last serialization
   uint64_t flushes;
   uint64_t flushed_bytes; // size of the last serialized archive
+  // gw2 (#52), since start:
+  uint64_t miss_known;    // lookup misses whose key an earlier session's .keys holds
+  uint64_t miss_new;      // lookup misses never archived before
+  uint64_t skipped;       // pipelines left out after Metal's packer named them
+  uint64_t rebuilds;      // flushes that succeeded only after a rebuild
 };
 
 WINEMETAL_API bool WMTPSOArchiveInit(

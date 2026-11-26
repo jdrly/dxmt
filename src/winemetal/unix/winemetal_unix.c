@@ -2579,6 +2579,27 @@ _MetalLayer_getEDRValue(void *obj) {
   return STATUS_SUCCESS;
 }
 
+/* gw2 (#52): the byte size of a function constant's value, for the archive key's label */
+static size_t
+wmt_constant_size(MTLDataType type) {
+  switch (type) {
+  case MTLDataTypeBool: case MTLDataTypeChar: case MTLDataTypeUChar: return 1;
+  case MTLDataTypeBool2: case MTLDataTypeChar2: case MTLDataTypeUChar2: return 2;
+  case MTLDataTypeBool3: case MTLDataTypeChar3: case MTLDataTypeUChar3: return 3;
+  case MTLDataTypeBool4: case MTLDataTypeChar4: case MTLDataTypeUChar4: return 4;
+  case MTLDataTypeShort: case MTLDataTypeUShort: case MTLDataTypeHalf: return 2;
+  case MTLDataTypeShort2: case MTLDataTypeUShort2: case MTLDataTypeHalf2: return 4;
+  case MTLDataTypeShort3: case MTLDataTypeUShort3: case MTLDataTypeHalf3: return 6;
+  case MTLDataTypeShort4: case MTLDataTypeUShort4: case MTLDataTypeHalf4: return 8;
+  case MTLDataTypeInt: case MTLDataTypeUInt: case MTLDataTypeFloat: return 4;
+  case MTLDataTypeInt2: case MTLDataTypeUInt2: case MTLDataTypeFloat2: return 8;
+  case MTLDataTypeInt3: case MTLDataTypeUInt3: case MTLDataTypeFloat3: return 12;
+  case MTLDataTypeInt4: case MTLDataTypeUInt4: case MTLDataTypeFloat4: return 16;
+  case MTLDataTypeLong: case MTLDataTypeULong: return 8;
+  default: return 4;
+  }
+}
+
 static NTSTATUS
 _MTLLibrary_newFunctionWithConstants(void *obj) {
   struct unixcall_mtllibrary_newfunction_with_constants *params = obj;
@@ -2592,6 +2613,22 @@ _MTLLibrary_newFunctionWithConstants(void *obj) {
 
   params->ret = (obj_handle_t)[library newFunctionWithName:name constantValues:values error:&err];
   params->ret_error = (obj_handle_t)[err retain];
+  if (params->ret && pso_archive_enabled()) {
+    /* gw2 (#52): the PSO archive's pipeline key tells functions apart by name; one made with
+       constant values gets "<name>#c<FNV-1a of index, type and value bytes>" as its label
+       (only with DXMT_PSO_ARCHIVE=1) */
+    uint64_t h = 0xcbf29ce484222325ull;
+    for (uint64_t i = 0; i < params->num_constants; i++) {
+      uint64_t idx = constants[i].index, type = constants[i].type;
+      size_t size = wmt_constant_size((MTLDataType)constants[i].type);
+      const uint8_t *parts[3] = {(const uint8_t *)&idx, (const uint8_t *)&type, (const uint8_t *)constants[i].data.ptr};
+      size_t lens[3] = {sizeof(idx), sizeof(type), constants[i].data.ptr ? size : 0};
+      for (int p = 0; p < 3; p++)
+        for (size_t k = 0; k < lens[p]; k++)
+          h = (h ^ parts[p][k]) * 0x100000001b3ull;
+    }
+    ((id<MTLFunction>)params->ret).label = [NSString stringWithFormat:@"%@#c%016llx", name, (unsigned long long)h];
+  }
   [name release];
   [values release];
   return STATUS_SUCCESS;
