@@ -211,6 +211,8 @@ The decisions these rules rest on, and the ones a change must stay consistent wi
   the shown wait before the first back-buffer write (ADR 0009) is the default.
 - [ADR 0018](../docs/gw2/adr/0018-a-metal-3-present-s-fences-go-to-the-metal-4-queue-behind-a-switch.md):
   a Metal 3 present's fences go to the Metal 4 queue, behind `DXMT_MTL4_PRESENT_FENCES`.
+- [ADR 0019](../docs/gw2/adr/0019-the-air-reader-pool-is-dropped.md): the AIR reader pool
+  (`DXMT_AIR_READERS`) is dropped.
 
 ## Definition of Done
 

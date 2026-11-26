@@ -48,7 +48,8 @@ commit, not a rebase tool.
   dev list writes is a break, and those rows say so.
 - **Evidence.** Notes named by file are in the GW2 on Mac workspace's `docs/research/`.
 - **Verdict.** Keep, drop or decide. A drop is a proposal, and I decide every one. I propose one
-  only where a note records that the change doesn't pay. Everything undecided is "decide".
+  only where a note records that the change doesn't pay. Once I decide it, the verdict says
+  "dropped" with the date. Everything undecided is "decide".
 
 ## Topics
 
@@ -75,7 +76,7 @@ commit, not a rebase tool.
 | `metalfx-subsample` | 1 | Upscales GW2's Subsample 3D pass with MetalFX and keeps the UI native (#59) | `DXMT_SUBSAMPLE_METALFX` (off), `DXMT_SUBSAMPLE_METALFX_PS` (unset) | `DXMT_SUBSAMPLE_METALFX=1` set while the MetalFX row is on. The row is off by default, so unset for most players | Release: `DXMT_SUBSAMPLE_METALFX`. A dev build turns the row on (`DEV_ROWS`) | None in game. It still needs a capture of the pass (`metalfx-subsample-2026-11-04.md`) | **keep.** The app has a row that writes it. Whether the row should exist before the capture is for me to decide in the app |
 | `shader-warming` | 10 | Records each pipeline's recipe and its use (W1, #124), and a later session builds the most recently used ones in the background (W2, W3, #128). Fixes to the reader, the cap count and the plan, more than one speculative job on a cold cache (#195), and #286, which removes `DXMT_WARM_ORDER` | `DXMT_PSO_RECORD` (on), `DXMT_PSO_RECORD_USE` (on), `DXMT_WARM` (off), `DXMT_WARM_MAX` (8192), `DXMT_WARM_JOBS` (1) | `DXMT_WARM=all` set, since the Shader warming row is on by default. The others shipped, unset | Release: `DXMT_WARM`. Dev list: `DXMT_WARM_JOBS=2`. The session report reads `WARM` | The first UAT failed on the rowid plan, and #128's plan by recent use hasn't had a UAT, only normal play (`warm-uat-2026-11-04.md`, `warm-miss-2026-11-04.md`). Metal keeps compiled stages on disk itself, so warming can't remove a wait for a shader this Mac never compiled (`perf-review-2026-11-10.html`) | **keep.** The app's default writes it. Whether it pays is still open, and that is a question for the app's row, not for the series |
 | `compile-service` | 8 | One owner for compile jobs (C1), the lost wakeup at stop fixed (#72), declared dependencies and a demand lane (C2), one recipe for the recorder and the build (C3), and four test commits | `DXMT_COMPILE_DEMAND` (off) | shipped, unset. Warming turns the declared policy on, so with the default Shader warming row it runs | Dev list: `DXMT_COMPILE_DEMAND=1` | The stop hung about 1 time in 20 before #72 (the workspace's `AGENTS.md`). No measurement of the declared policy alone | **keep.** The service replaced upstream's scheduler, and warming needs it |
-| `air-readers` | 2 | A pool of read connections for the AIR cache, and the count on the startup line | `DXMT_AIR_READERS` (1, upstream's one reader) | shipped, unset | no | Natively the shared reader's lock dominates from 4 workers (the workspace's `AGENTS.md`). In play it doesn't: the reader lock took 3.6 ms in all of the 48-minute dev.23 session (`upstream-watch-triage-2026-11-25.md`) | **drop, proposed.** It never left 1, the app never names it, and my own log says the lock costs nothing in play. The switch table has it waiting for #159 |
+| `air-readers` | 2 | A pool of read connections for the AIR cache, and the count on the startup line | `DXMT_AIR_READERS` (1, upstream's one reader) | shipped, unset | no | Natively the shared reader's lock dominates from 4 workers (the workspace's `AGENTS.md`). In play it doesn't: the reader lock took 3.6 ms in all of the 48-minute dev.23 session (`upstream-watch-triage-2026-11-25.md`) | **dropped** on 2026-11-26 (#361, ADR 0019). It never left 1, the app never names it, and my own log says the lock costs nothing in play |
 | `gone-pso-archive` | 7 | The PSO archive after its first version: every pipeline kept (#55), generations (#84, #90), the native tool (#112, #142), a test path fix, and #276, which deletes all of it | none at head | not in play | Gone list: `DXMT_PSO_ARCHIVE`, `DXMT_PSO_GENERATIONS` | With it on the game crashed at exit, and Metal's own cache already keeps what it saved (ADR 0011, `perf-review-2026-11-10.html`) | **keep as history.** No file named `pso_archive` is left at head. The first archive came in `1de145b` (`compile-diagnostics`), and `9eb7668` (`cache-dir`) touched its files |
 | `bridge` | 5 | The real unix side linked natively for tests (#62), every call number written once in a manifest (B2, B3), a reused visibility slot kept free of stale callbacks (#41), and a release that drains its own autorelease pool (#270) | `DXMT_RELEASE_POOL` (on) | shipped, unset | no | `autorelease_count_test` shows `release 0 in 101` on a real Mac (`dxmt-metal-run-2026-11-12.md`) | **keep.** Always on, and the tests build on it |
 | `switch-registry` | 3 | Switches declared in a registry that writes the startup line (#63), a status for every row of the table (#321), and Lint holding the table to the sources (#323) | none of its own | shipped | no | It is what makes this inventory checkable | **keep.** Structure and docs |
@@ -98,11 +99,13 @@ commit, not a rebase tool.
 Sum: 9 + 4 + 1 + 7 + 6 + 3 + 2 + 1 + 4 + 4 + 4 + 1 + 10 + 10 + 5 + 3 + 1 + 10 + 8 + 2 + 7 + 5 + 3 +
 9 + 6 + 5 + 6 + 2 + 4 + 12 + 4 + 5 + 2 + 2 + 1 + 1 + 8 + 0 = 177.
 
-## Proposed drops
+## Dropped
 
-- **`air-readers`** (2 commits, `DXMT_AIR_READERS`). The only topic alive at head that I'd leave
-  behind. The switch never left upstream's value, the app never names it, and the lock it would
-  relieve took 3.6 ms in 48 minutes of play.
+- **`air-readers`** (2 commits, `DXMT_AIR_READERS`), dropped on 2026-11-26 (#361,
+  [ADR 0019](adr/0019-the-air-reader-pool-is-dropped.md)). The switch never left upstream's value,
+  the app never names it, and the lock it would relieve took 3.6 ms in 48 minutes of play. The
+  shader cache files are upstream's text again. The removal commit joins the topic when the series
+  is next built, so its code squashes to nothing.
 
 In DXMT a drop is a removal commit on `gw2-on-mac`, as #276 to #288 were, because DXMT moves by
 merge and its topics share files.
