@@ -29,6 +29,7 @@ Mtl4Encoding::open() {
     return *commit;
   auto &commit = queue_.begin(seq_);
   segments_.push_back({&commit, position_});
+  waited_ = false;
   return commit;
 }
 
@@ -36,6 +37,12 @@ void
 Mtl4Encoding::commitOpen() {
   if (queue_.current(seq_))
     queue_.commit(seq_);
+}
+
+void
+Mtl4Encoding::openForTimestamps(bool extra) {
+  if (extra || segments_.empty() || waited_)
+    open();
 }
 
 void
@@ -53,7 +60,7 @@ Mtl4Encoding::prepare(Kind kind, uint32_t flags) {
   } else if (kind == Kind::Compute) {
     state_.tables[WMTMtl4TableCompute] = tables.compute.handle;
   }
-  state_.flags = flags;
+  state_.flags = flags | bytes_flags_;
   if (state_.bytes_end - state_.bytes_offset < kBytesReserve)
     newArena(kBytesArena);
 }
@@ -61,10 +68,12 @@ Mtl4Encoding::prepare(Kind kind, uint32_t flags) {
 void
 Mtl4Encoding::newArena(uint64_t size) {
   size = std::max(size, kBytesArena);
-  auto [buffer, offset] = bytes_(size);
-  state_.bytes_buffer = buffer.handle;
-  state_.bytes_offset = offset;
-  state_.bytes_end = offset + size;
+  auto bytes = bytes_(size);
+  state_.bytes_buffer = bytes.buffer.handle;
+  state_.bytes_offset = bytes.offset;
+  state_.bytes_end = bytes.offset + size;
+  bytes_flags_ = bytes.resident ? WMT_MTL4_BYTES_RESIDENT : 0; // gw2 (#153)
+  state_.flags = (state_.flags & ~WMT_MTL4_BYTES_RESIDENT) | bytes_flags_;
 }
 
 void
@@ -116,6 +125,7 @@ void
 Mtl4Encoding::encodeWaitForEvent(WMT::Event event, uint64_t value) {
   commitOpen();
   queue_.waitForEvent(event, value);
+  waited_ = true; // gw2 (#154)
 }
 
 void

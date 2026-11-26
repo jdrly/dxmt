@@ -3271,6 +3271,14 @@ _MTLResidencySet_commit(void *obj) {
   return STATUS_SUCCESS;
 }
 
+/* gw2 (#153) */
+static NTSTATUS
+_MTLResidencySet_allocationCount(void *obj) {
+  struct unixcall_generic_obj_uint64_ret *params = obj;
+  params->ret = [(id<MTLResidencySet>)params->handle allocationCount];
+  return STATUS_SUCCESS;
+}
+
 static NTSTATUS
 _MTLCommandQueue_addResidencySet(void *obj) {
   struct unixcall_generic_obj_obj_noret *params = obj;

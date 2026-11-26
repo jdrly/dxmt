@@ -26,6 +26,7 @@
 #include "dxmt_deptrack.hpp"
 #include "dxmt_gw2_cmds.hpp"
 #include "dxmt_gw2_rebind.hpp"
+#include "dxmt_gw2_residency.hpp"
 #include "dxmt_gw2_mtl4_encoding.hpp"
 #include "dxmt_occlusion_query.hpp"
 #include "dxmt_presenter.hpp"
@@ -203,6 +204,7 @@ struct RenderEncoderData : EncoderData {
   wmtcmd_base *cmd_tail;
   WMT::Buffer allocated_argbuf;
   uint64_t allocated_argbuf_offset;
+  bool allocated_argbuf_resident = false; // gw2 (#153): the device's residency set holds it
   uint64_t encoder_id_vertex;
   FenceSet fence_wait_vertex;
   FenceSet fence_update_vertex;
@@ -227,6 +229,7 @@ struct ComputeEncoderData : EncoderData {
   WMT::Buffer allocated_argbuf;
   uint64_t allocated_argbuf_offset;
   void *allocated_argbuf_mapping;
+  bool allocated_argbuf_resident = false; // gw2 (#153)
 };
 
 struct BlitEncoderData : EncoderData {
@@ -523,6 +526,21 @@ public:
     return {ibuf_alloc->buffer(), offset};
   };
 
+  // gw2 (#153): after currentIndexBuffer, for an indexed draw's packet: when the device's residency
+  // set holds the index buffer (and `others_resident`, the packet's other buffers) on Metal 4, the
+  // packet says so (WMT_CMD_RESIDENT) and carries the buffer's address and length, so Metal 4's
+  // replay neither asks Metal for them nor adds the buffer to the chunk's set
+  template <typename Cmd>
+  void
+  gw2IndexResident(Cmd &cmd, bool others_resident = true) {
+    auto allocation = ibuf_->current();
+    if (!others_resident || !allocation->gw2Resident || !gw2::mtl4DeviceResidency())
+      return;
+    cmd.index_buffer_address = allocation->gpuAddress();
+    cmd.index_buffer_length = allocation->pageLength();
+    WMT::setPacketFlags(cmd, WMT_CMD_RESIDENT); // 0 until here (encodeRenderCommand)
+  }
+
   void clearState() {
     vbuf_ = {{}};
     ibuf_ = {};
@@ -659,6 +677,7 @@ public:
     encoder->cmd_tail->next.set(storage);
     encoder->cmd_tail = (wmtcmd_base *)storage;
     storage->next.set(nullptr);
+    WMT::setPacketFlags(*storage, 0); // gw2 (#153): WMT_CMD_RESIDENT only where the builder sets it
     return *storage;
   }
 
@@ -668,8 +687,9 @@ public:
   // blend color, viewports and scissors are commands of their own, emitted by their dirty flags
   // whether or not the bind happens). bound_pso starts empty in every encoder and is cleared by any
   // other pipeline bind, so a skip only ever drops a bind that would set the bound pipeline again.
+  // gw2 (#153): resident: the device's residency set holds pso (MTL_COMPILED_GRAPHICS_PIPELINE)
   void
-  bindDrawPipeline(WMT::RenderPipelineState pso) {
+  bindDrawPipeline(WMT::RenderPipelineState pso, bool resident = false) {
     auto encoder = currentRenderEncoder();
     encoder->last_pso = pso;
     bool same = encoder->bound_pso.handle == pso.handle;
@@ -689,6 +709,8 @@ public:
     auto &cmd = encodeRenderCommand<wmtcmd_render_setpso>();
     cmd.type = WMTRenderCommandSetPSO;
     cmd.pso = pso;
+    if (resident)
+      WMT::setPacketFlags(cmd, WMT_CMD_RESIDENT);
     encoder->bound_pso = pso;
   }
 
@@ -729,6 +751,7 @@ public:
     encoder->cmd_tail->next.set(storage);
     encoder->cmd_tail = (wmtcmd_base *)storage;
     storage->next.set(nullptr);
+    WMT::setPacketFlags(*storage, 0); // gw2 (#153): WMT_CMD_RESIDENT only where the builder sets it
     return *storage;
   }
 
@@ -743,6 +766,7 @@ public:
     encoder->cmd_tail->next.set(storage);
     encoder->cmd_tail = (wmtcmd_base *)storage;
     storage->next.set(nullptr);
+    WMT::setPacketFlags(*storage, 0); // gw2 (#153): WMT_CMD_RESIDENT only where the builder sets it
     return *storage;
   }
 
@@ -968,6 +992,7 @@ private:
   // gw2 (#4): was isEncoderSignatureMatched; returns why the two can't merge, Refuse::None if they can
   gw2::Refuse encoderSignatureMismatch(RenderEncoderData* former, RenderEncoderData* latter);
   void gw2CountAttachments(RenderEncoderData *data);
+  bool gw2AttachmentsResident(RenderEncoderData *data); // gw2 (#153)
   RenderEncoderColorAttachmentData *isClearColorSignatureMatched(ClearEncoderData* former, RenderEncoderData* latter);
   RenderEncoderDepthAttachmentData *isClearDepthSignatureMatched(ClearEncoderData* former, RenderEncoderData* latter);
   RenderEncoderStencilAttachmentData *isClearStencilSignatureMatched(ClearEncoderData* former, RenderEncoderData* latter);

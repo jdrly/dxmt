@@ -1330,6 +1330,15 @@ MTLResidencySet_commit(obj_handle_t residency_set) {
   UNIX_CALL(MTLResidencySet_commit, &params);
 }
 
+WINEMETAL_API uint64_t
+MTLResidencySet_allocationCount(obj_handle_t residency_set) {
+  struct unixcall_generic_obj_uint64_ret params;
+  params.handle = residency_set;
+  params.ret = 0;
+  UNIX_CALL(MTLResidencySet_allocationCount, &params);
+  return params.ret;
+}
+
 WINEMETAL_API void
 MTLCommandQueue_addResidencySet(obj_handle_t queue, obj_handle_t residency_set) {
   struct unixcall_generic_obj_obj_noret params;

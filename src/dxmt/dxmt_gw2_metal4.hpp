@@ -21,6 +21,11 @@ bool metal4Requested();
 // stays on Metal 3.
 bool metalfxSpatialSwapchain();
 
+// gw2 (#154): DXMT_MTL4_TIMESTAMP_REUSE (off unless exactly "1"), read once per process. On, a Metal 4
+// chunk's timestamp queries read its last command buffer, the present's after a present. Off (the
+// default) gives them an empty command buffer of their own after it, as before #154.
+bool mtl4TimestampReuse();
+
 // Whether this process's queues take the Metal 4 path (DXMT_METAL4 on, on a device that has it).
 bool metal4Active();
 

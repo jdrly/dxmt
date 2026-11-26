@@ -8,6 +8,7 @@
 #include "dxmt_gw2_compile.hpp"
 #include "dxmt_gw2_warm.hpp"
 #include "dxmt_gw2_recipe.hpp"
+#include "dxmt_gw2_residency.hpp"
 #include <atomic>
 
 namespace dxmt {
@@ -50,9 +51,16 @@ public:
     }
   }
 
+  // gw2 (#153): out of the device's residency set. The device destroys its pipelines only after
+  // every chunk it committed retired (MTLD3D11DeviceImpl: Metal 4 needs DXMT_UNRETAINED=1).
+  ~MTLCompiledGraphicsPipelineImpl() {
+    if (resident_)
+      gw2::residencyRemovePipeline(state_.handle);
+  }
+
   void GetPipeline(MTL_COMPILED_GRAPHICS_PIPELINE *pPipeline) final {
     compile::demand(compile_job, ready_); // gw2 (#5, #46, C1): the encode thread waits for this compile
-    *pPipeline = {state_};
+    *pPipeline = {state_, resident_};
   }
 
   // gw2 (C2): what RunThreadpoolWork probes, in its order (the declared policy waits for them)
@@ -123,6 +131,7 @@ public:
     if (shared_->pipelines.find(key, &state, &owner) != decltype(shared_->pipelines)::Claim::Done)
       return false;
     state_ = state;
+    EnterResidencySet();
     compile::completedWithoutRun(compile_job);
     gw2::warmPipelineHit(key); // gw2 (#124): the live hit, and the recipe's use (it never reaches recipePipeline)
     SetIsDone(true);
@@ -178,6 +187,7 @@ public:
         switch (shared_->pipelines.claim(key, this, &state, &owner)) {
         case decltype(shared_->pipelines)::Claim::Done:
           state_ = state;
+          EnterResidencySet();
           gw2::warmPipelineHit(key); // gw2 (#124)
           return this;
         case decltype(shared_->pipelines)::Claim::Busy:
@@ -205,6 +215,7 @@ public:
       ERR("Failed to create PSO: ", err.description().getUTF8String());
       return this;
     }
+    EnterResidencySet();
 
     TRACE("Compiled 1 PSO");
 
@@ -219,6 +230,12 @@ public:
   }
 
 private:
+  // gw2 (#153): once state_ is final, before SetIsDone publishes it
+  void EnterResidencySet() {
+    if (!resident_ && state_)
+      resident_ = gw2::residencyAddPipeline(device_->GetMTLDevice(), state_.handle);
+  }
+
   UINT num_rtvs;
   UINT ps_valid_render_targets;
   WMTPixelFormat rtv_formats[8];
@@ -231,6 +248,7 @@ private:
   CompiledShader *PixelShader;
   IMTLD3D11BlendState *pBlendState;
   WMT::Reference<WMT::RenderPipelineState> state_;
+  bool resident_ = false; // gw2 (#153)
   bool RasterizationEnabled;
   UINT SampleCount;
 };
@@ -254,9 +272,15 @@ public:
     tgsize_is_multiple_of_sgwidth = (total_tgsize % 32) == 0;
   }
 
+  // gw2 (#153): as MTLCompiledGraphicsPipelineImpl's
+  ~MTLCompiledComputePipelineImpl() {
+    if (resident_)
+      gw2::residencyRemovePipeline(state_.handle);
+  }
+
   void GetPipeline(MTL_COMPILED_COMPUTE_PIPELINE *pPipeline) final {
     compile::demand(compile_job, ready_); // gw2 (#5, #46, C1): the encode thread waits for this compile
-    *pPipeline = {state_};
+    *pPipeline = {state_, resident_};
   }
 
   // gw2 (C2): what RunThreadpoolWork probes, in its order (the declared policy waits for them)
@@ -292,6 +316,7 @@ public:
       ERR("Failed to create compute PSO: ", err.description().getUTF8String());
       return this;
     }
+    resident_ = gw2::residencyAddPipeline(device_->GetMTLDevice(), state_.handle); // gw2 (#153)
 
     TRACE("Compiled 1 PSO");
 
@@ -310,6 +335,7 @@ private:
   std::atomic_bool ready_;
   CompiledShader *ComputeShader;
   WMT::Reference<WMT::ComputePipelineState> state_;
+  bool resident_ = false; // gw2 (#153)
   bool tgsize_is_multiple_of_sgwidth;
 };
 

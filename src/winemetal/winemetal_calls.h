@@ -243,6 +243,8 @@ WMT_RESERVED(198, "lane C, jdrly/dxmt #64")
 WMT_RESERVED(199, "lane C, jdrly/dxmt #64")
 /* gw2 (#151): DXMT_THREAD_PRIORITY=utility */
 WMT_CALL(200, WMTSetThreadBasePrioritySelf, _WMTSetThreadBasePrioritySelf)
+/* gw2 (#153): Metal 4 uses a chunk's residency set only when it has allocations */
+WMT_CALL(201, MTLResidencySet_allocationCount, _MTLResidencySet_allocationCount)
 
 /* clang-format on */
 

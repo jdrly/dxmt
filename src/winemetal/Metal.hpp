@@ -8,6 +8,14 @@
 
 namespace WMT {
 
+// gw2 (#153): a typed packet's wmtcmd_base::flags (WMT_CMD_*), which is its own reserved[0]; set
+// through the packet's own type, not a wmtcmd_base reference (strict aliasing)
+template <typename Cmd>
+inline void
+setPacketFlags(Cmd &cmd, uint16_t flags) {
+  cmd.reserved[0] = flags;
+}
+
 class String;
 
 #ifdef DXMT_GW2_LIFETIME_CHECK
@@ -375,10 +383,12 @@ public:
     MTLRenderCommandEncoder_encodeCommands(handle, (const wmtcmd_base *)cmd_head);
   }
 
+  // gw2 (#153): flags as MTL4RenderCommandEncoder's (flushCommands serves both); Metal 3 ignores them
   void
-  setVertexBuffer(Buffer buffer, uint64_t offset, uint8_t index) {
+  setVertexBuffer(Buffer buffer, uint64_t offset, uint8_t index, uint16_t flags = 0) {
     struct wmtcmd_render_setbuffer cmd;
     cmd.type = WMTRenderCommandSetVertexBuffer;
+    setPacketFlags(cmd, flags);
     cmd.next.set(nullptr);
     cmd.buffer = buffer;
     cmd.offset = offset;
@@ -387,9 +397,10 @@ public:
   }
 
   void
-  setFragmentBuffer(Buffer buffer, uint64_t offset, uint8_t index) {
+  setFragmentBuffer(Buffer buffer, uint64_t offset, uint8_t index, uint16_t flags = 0) {
     struct wmtcmd_render_setbuffer cmd;
     cmd.type = WMTRenderCommandSetFragmentBuffer;
+    setPacketFlags(cmd, flags);
     cmd.next.set(nullptr);
     cmd.buffer = buffer;
     cmd.offset = offset;
@@ -398,9 +409,10 @@ public:
   }
 
   void
-  setMeshBuffer(Buffer buffer, uint64_t offset, uint8_t index) {
+  setMeshBuffer(Buffer buffer, uint64_t offset, uint8_t index, uint16_t flags = 0) {
     struct wmtcmd_render_setbuffer cmd;
     cmd.type = WMTRenderCommandSetMeshBuffer;
+    setPacketFlags(cmd, flags);
     cmd.next.set(nullptr);
     cmd.buffer = buffer;
     cmd.offset = offset;
@@ -409,9 +421,10 @@ public:
   }
 
   void
-  setObjectBuffer(Buffer buffer, uint64_t offset, uint8_t index) {
+  setObjectBuffer(Buffer buffer, uint64_t offset, uint8_t index, uint16_t flags = 0) {
     struct wmtcmd_render_setbuffer cmd;
     cmd.type = WMTRenderCommandSetObjectBuffer;
+    setPacketFlags(cmd, flags);
     cmd.next.set(nullptr);
     cmd.buffer = buffer;
     cmd.offset = offset;
@@ -669,6 +682,12 @@ public:
   commit() {
     MTLResidencySet_commit(handle);
   }
+
+  // gw2 (#153): its allocations, committed or not
+  uint64_t
+  allocationCount() {
+    return MTLResidencySet_allocationCount(handle);
+  }
 };
 
 class CommandBuffer : public Object {
@@ -849,24 +868,25 @@ public:
     replay(MTL4RenderCommandEncoder_encodeCommands, (const wmtcmd_base *)cmd_head);
   }
 
+  // gw2 (#153): flags: WMT_CMD_RESIDENT when the device's residency set holds the buffer
   void
-  setVertexBuffer(Buffer buffer, uint64_t offset, uint8_t index) {
-    setBuffer(WMTRenderCommandSetVertexBuffer, buffer, offset, index);
+  setVertexBuffer(Buffer buffer, uint64_t offset, uint8_t index, uint16_t flags = 0) {
+    setBuffer(WMTRenderCommandSetVertexBuffer, buffer, offset, index, flags);
   }
 
   void
-  setFragmentBuffer(Buffer buffer, uint64_t offset, uint8_t index) {
-    setBuffer(WMTRenderCommandSetFragmentBuffer, buffer, offset, index);
+  setFragmentBuffer(Buffer buffer, uint64_t offset, uint8_t index, uint16_t flags = 0) {
+    setBuffer(WMTRenderCommandSetFragmentBuffer, buffer, offset, index, flags);
   }
 
   void
-  setMeshBuffer(Buffer buffer, uint64_t offset, uint8_t index) {
-    setBuffer(WMTRenderCommandSetMeshBuffer, buffer, offset, index);
+  setMeshBuffer(Buffer buffer, uint64_t offset, uint8_t index, uint16_t flags = 0) {
+    setBuffer(WMTRenderCommandSetMeshBuffer, buffer, offset, index, flags);
   }
 
   void
-  setObjectBuffer(Buffer buffer, uint64_t offset, uint8_t index) {
-    setBuffer(WMTRenderCommandSetObjectBuffer, buffer, offset, index);
+  setObjectBuffer(Buffer buffer, uint64_t offset, uint8_t index, uint16_t flags = 0) {
+    setBuffer(WMTRenderCommandSetObjectBuffer, buffer, offset, index, flags);
   }
 
   void
@@ -895,6 +915,7 @@ public:
   setRenderPipelineState(RenderPipelineState pso) {
     struct wmtcmd_render_setpso cmd;
     cmd.type = WMTRenderCommandSetPSO;
+    setPacketFlags(cmd, 0); // gw2 (#153): not WMT_CMD_RESIDENT
     cmd.next.set(nullptr);
     cmd.pso = pso;
     submit(&cmd);
@@ -963,9 +984,10 @@ private:
   }
 
   void
-  setBuffer(WMTRenderCommandType type, Buffer buffer, uint64_t offset, uint8_t index) {
+  setBuffer(WMTRenderCommandType type, Buffer buffer, uint64_t offset, uint8_t index, uint16_t flags) {
     struct wmtcmd_render_setbuffer cmd;
     cmd.type = type;
+    setPacketFlags(cmd, flags); // gw2 (#153)
     cmd.next.set(nullptr);
     cmd.buffer = buffer;
     cmd.offset = offset;

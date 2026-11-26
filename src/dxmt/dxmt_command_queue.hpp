@@ -486,9 +486,12 @@ public:
     return {block.buffer, offset, block.gpu_address};
   }
 
+  // gw2 (#153): *gw2_resident: the device's residency set holds the buffer (Metal 4)
   std::tuple<void *, WMT::Buffer, uint64_t>
-  AllocateArgumentBuffer(uint64_t seq, size_t size) {
+  AllocateArgumentBuffer(uint64_t seq, size_t size, bool *gw2_resident = nullptr) {
     auto [block, offset] = argbuf_allocator.allocate(seq, cpu_coherent.signaledValue(), size, 64);
+    if (gw2_resident)
+      *gw2_resident = block.gw2_resident_bytes != 0;
     return {ptr_add(block.mapped_address, offset), block.buffer, offset};
   }
 

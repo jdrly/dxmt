@@ -168,7 +168,8 @@ CommandQueue::CommandQueue(WMT::Device device) :
     copy_temp_allocator({device, WMTResourceHazardTrackingModeUntracked | WMTResourceStorageModePrivate}),
     argbuf_allocator({
         device,
-        WMTResourceHazardTrackingModeUntracked | WMTResourceCPUCacheModeWriteCombined | WMTResourceStorageModeShared
+        WMTResourceHazardTrackingModeUntracked | WMTResourceCPUCacheModeWriteCombined | WMTResourceStorageModeShared,
+        true, true // gw2 (#153): its blocks are in the device's residency set on Metal 4
     }),
     cpu_command_allocator({}),
     reftracker_storage_allocator({}),
@@ -199,6 +200,17 @@ CommandQueue::CommandQueue(WMT::Device device) :
           "Metal 4: on (DXMT_METAL4=1, the default): this device's chunks go to an MTL4CommandQueue, with ", chunk_count_,
           " command allocators (one per chunk slot) and commit feedback"
       ));
+      // gw2 (#184): the queue holds only the device's set; a queue takes at most 32
+      Logger::info("Metal 4: drawables stay resident through their layer's residency set, used by each present's "
+                   "command buffer; the queue holds no layer's set");
+      // gw2 (#154)
+      Logger::info(
+          gw2::mtl4TimestampReuse()
+              ? "Metal 4: timestamp queries read the chunk's last command buffer, the present's after a present "
+                "(DXMT_MTL4_TIMESTAMP_REUSE=1)"
+              : "Metal 4: a chunk with timestamp queries commits an empty command buffer for them after its last one "
+                "(DXMT_MTL4_TIMESTAMP_REUSE=0, the default)"
+      );
     }
   }
   // gw2 (#78): Metal 3, unless the queue is on Metal 4
@@ -372,8 +384,9 @@ CommandQueue::CommitChunkInternal(CommandChunk &chunk, uint64_t seq) {
     void
     encode(gw2::Mtl4Queue &mtl4) override {
       gw2::Mtl4Encoding encoding(mtl4, seq, [this](uint64_t size) {
-        auto [mapped, buffer, offset] = queue.AllocateArgumentBuffer(seq, size);
-        return std::pair<WMT::Buffer, uint64_t>{buffer, offset};
+        bool resident = false;
+        auto [mapped, buffer, offset] = queue.AllocateArgumentBuffer(seq, size, &resident);
+        return gw2::Mtl4Encoding::Bytes{buffer, offset, resident};
       });
       chunk.encodeMetal4(encoding, queue.argument_encoding_ctx);
     }

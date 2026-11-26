@@ -309,7 +309,10 @@ _MTL4CommandBuffer_computeCommandEncoder(void *obj) {
 
 /* gw2 (#32 part 3): residency. Metal 4 makes nothing resident by itself, not even what an encoder
    names directly, so every allocation a packet names goes into the state's residency set (the
-   chunk's). A small direct-mapped cache skips repeats within one call; the set ignores the rest. */
+   chunk's). A small direct-mapped cache skips repeats within one call; the set ignores the rest.
+   gw2 (#153): except what the device's set (on the queue) already holds: a packet with
+   WMT_CMD_RESIDENT (its pipeline, buffers, index buffer), the bytes buffer with
+   WMT_MTL4_BYTES_RESIDENT. */
 struct replay {
   struct WMTMtl4BindingState *state;
   obj_handle_t recent[64];
@@ -391,21 +394,44 @@ resident_resource(struct replay *r, obj_handle_t handle) {
 }
 
 /* a one-entry cache of a buffer's GPU address and length: DXMT binds its per-encoder argument
-   buffer at several indices, and draws reuse their index buffer. A miss makes the buffer resident. */
+   buffer at several indices, and draws reuse their index buffer. A miss makes the buffer resident,
+   unless the packet said it is (gw2 #153). */
 struct buffer_cache {
   obj_handle_t buffer;
   uint64_t address;
   uint64_t length;
 };
 
+static inline bool
+packet_resident(const struct wmtcmd_base *cmd) {
+  return cmd->flags & WMT_CMD_RESIDENT;
+}
+
 static inline void
-buffer_lookup(struct replay *r, struct buffer_cache *cache, obj_handle_t buffer) {
+buffer_lookup(struct replay *r, struct buffer_cache *cache, obj_handle_t buffer, bool resident) {
   if (cache->buffer == buffer)
     return;
   cache->buffer = buffer;
   cache->address = buffer ? [(id<MTLBuffer>)buffer gpuAddress] : 0;
   cache->length = buffer ? [(id<MTLBuffer>)buffer length] : 0;
-  resident_buffer(r, buffer);
+  if (!resident)
+    resident_buffer(r, buffer);
+}
+
+/* gw2 (#153): a resident indexed draw carries its index buffer's address and length; Metal isn't
+   asked. A cache entry from it is right for any later packet: residency is the buffer's own. */
+static inline void
+index_lookup(
+    struct replay *r, struct buffer_cache *cache, obj_handle_t buffer, bool resident, uint64_t address,
+    uint64_t length
+) {
+  if (resident && buffer) {
+    cache->buffer = buffer;
+    cache->address = address;
+    cache->length = length;
+    return;
+  }
+  buffer_lookup(r, cache, buffer, false);
 }
 
 static inline void
@@ -422,9 +448,9 @@ set_address(struct WMTMtl4BindingState *state, unsigned stage, unsigned index, u
 static inline void
 set_buffer(
     struct replay *r, struct buffer_cache *cache, unsigned stage, obj_handle_t buffer, uint64_t offset,
-    unsigned index
+    unsigned index, bool resident
 ) {
-  buffer_lookup(r, cache, buffer);
+  buffer_lookup(r, cache, buffer, resident);
   if (index < WMT_MTL4_MAX_BUFFERS)
     r->state->buffer_base[stage][index] = cache->address;
   set_address(r->state, stage, index, cache->address ? cache->address + offset : 0);
@@ -454,7 +480,8 @@ set_bytes(struct replay *r, unsigned stage, const void *bytes, uint64_t length, 
   id<MTLBuffer> buffer = (id<MTLBuffer>)state->bytes_buffer;
   memcpy((char *)[buffer contents] + offset, bytes, length);
   state->bytes_offset = offset + length;
-  resident_buffer(r, state->bytes_buffer);
+  if (!(state->flags & WMT_MTL4_BYTES_RESIDENT)) /* gw2 (#153) */
+    resident_buffer(r, state->bytes_buffer);
   if (index < WMT_MTL4_MAX_BUFFERS)
     state->buffer_base[stage][index] = 0; /* an offset at this index has no buffer to move in */
   set_address(state, stage, index, [buffer gpuAddress] + offset);
@@ -476,8 +503,8 @@ set_texture(struct replay *r, unsigned stage, obj_handle_t texture, unsigned ind
 }
 
 static inline uint64_t
-buffer_address(struct replay *r, struct buffer_cache *cache, obj_handle_t buffer, uint64_t offset) {
-  buffer_lookup(r, cache, buffer);
+buffer_address(struct replay *r, struct buffer_cache *cache, obj_handle_t buffer, uint64_t offset, bool resident) {
+  buffer_lookup(r, cache, buffer, resident);
   return cache->address + offset;
 }
 
@@ -529,7 +556,7 @@ _MTL4RenderCommandEncoder_encodeCommands(void *obj) {
       break;
     case WMTRenderCommandSetVertexBuffer: {
       struct wmtcmd_render_setbuffer *body = (struct wmtcmd_render_setbuffer *)next;
-      set_buffer(r, &bound, V, body->buffer, body->offset, body->index);
+      set_buffer(r, &bound, V, body->buffer, body->offset, body->index, packet_resident(next));
       break;
     }
     case WMTRenderCommandSetVertexBufferOffset: {
@@ -539,7 +566,7 @@ _MTL4RenderCommandEncoder_encodeCommands(void *obj) {
     }
     case WMTRenderCommandSetFragmentBuffer: {
       struct wmtcmd_render_setbuffer *body = (struct wmtcmd_render_setbuffer *)next;
-      set_buffer(r, &bound, F, body->buffer, body->offset, body->index);
+      set_buffer(r, &bound, F, body->buffer, body->offset, body->index, packet_resident(next));
       break;
     }
     case WMTRenderCommandSetFragmentBufferOffset: {
@@ -549,7 +576,7 @@ _MTL4RenderCommandEncoder_encodeCommands(void *obj) {
     }
     case WMTRenderCommandSetMeshBuffer: {
       struct wmtcmd_render_setbuffer *body = (struct wmtcmd_render_setbuffer *)next;
-      set_buffer(r, &bound, M, body->buffer, body->offset, body->index);
+      set_buffer(r, &bound, M, body->buffer, body->offset, body->index, packet_resident(next));
       break;
     }
     case WMTRenderCommandSetMeshBufferOffset: {
@@ -559,7 +586,7 @@ _MTL4RenderCommandEncoder_encodeCommands(void *obj) {
     }
     case WMTRenderCommandSetObjectBuffer: {
       struct wmtcmd_render_setbuffer *body = (struct wmtcmd_render_setbuffer *)next;
-      set_buffer(r, &bound, O, body->buffer, body->offset, body->index);
+      set_buffer(r, &bound, O, body->buffer, body->offset, body->index, packet_resident(next));
       break;
     }
     case WMTRenderCommandSetObjectBufferOffset: {
@@ -601,7 +628,8 @@ _MTL4RenderCommandEncoder_encodeCommands(void *obj) {
     }
     case WMTRenderCommandSetPSO: {
       struct wmtcmd_render_setpso *body = (struct wmtcmd_render_setpso *)next;
-      resident_object(r, body->pso);
+      if (!packet_resident(next))
+        resident_object(r, body->pso);
       [encoder setRenderPipelineState:(id<MTLRenderPipelineState>)body->pso];
       break;
     }
@@ -648,7 +676,9 @@ _MTL4RenderCommandEncoder_encodeCommands(void *obj) {
     }
     case WMTRenderCommandDrawIndexed: {
       struct wmtcmd_render_draw_indexed *body = (struct wmtcmd_render_draw_indexed *)next;
-      buffer_lookup(r, &index, body->index_buffer);
+      index_lookup(
+          r, &index, body->index_buffer, packet_resident(next), body->index_buffer_address, body->index_buffer_length
+      );
       [encoder drawIndexedPrimitives:(MTLPrimitiveType)body->primitive_type
                           indexCount:body->index_count
                            indexType:(MTLIndexType)body->index_type
@@ -662,17 +692,23 @@ _MTL4RenderCommandEncoder_encodeCommands(void *obj) {
     case WMTRenderCommandDrawIndirect: {
       struct wmtcmd_render_draw_indirect *body = (struct wmtcmd_render_draw_indirect *)next;
       [encoder drawPrimitives:(MTLPrimitiveType)body->primitive_type
-               indirectBuffer:buffer_address(r, &indirect, body->indirect_args_buffer, body->indirect_args_offset)];
+               indirectBuffer:buffer_address(
+                                  r, &indirect, body->indirect_args_buffer, body->indirect_args_offset, false
+                              )];
       break;
     }
     case WMTRenderCommandDrawIndexedIndirect: {
       struct wmtcmd_render_draw_indexed_indirect *body = (struct wmtcmd_render_draw_indexed_indirect *)next;
-      buffer_lookup(r, &index, body->index_buffer);
-      [encoder drawIndexedPrimitives:(MTLPrimitiveType)body->primitive_type
-                           indexType:(MTLIndexType)body->index_type
-                         indexBuffer:index.address + body->index_buffer_offset
-                   indexBufferLength:index.length - body->index_buffer_offset
-                      indirectBuffer:buffer_address(r, &indirect, body->indirect_args_buffer, body->indirect_args_offset)];
+      bool resident = packet_resident(next);
+      index_lookup(r, &index, body->index_buffer, resident, body->index_buffer_address, body->index_buffer_length);
+      [encoder
+          drawIndexedPrimitives:(MTLPrimitiveType)body->primitive_type
+                      indexType:(MTLIndexType)body->index_type
+                    indexBuffer:index.address + body->index_buffer_offset
+              indexBufferLength:index.length - body->index_buffer_offset
+                 indirectBuffer:buffer_address(
+                                    r, &indirect, body->indirect_args_buffer, body->indirect_args_offset, resident
+                                )];
       break;
     }
     case WMTRenderCommandDrawMeshThreadgroups: {
@@ -696,7 +732,8 @@ _MTL4RenderCommandEncoder_encodeCommands(void *obj) {
           (struct wmtcmd_render_draw_meshthreadgroups_indirect *)next;
       [encoder
           drawMeshThreadgroupsWithIndirectBuffer:buffer_address(
-                                                     r, &indirect, body->indirect_args_buffer, body->indirect_args_offset
+                                                     r, &indirect, body->indirect_args_buffer,
+                                                     body->indirect_args_offset, false
                                                  )
                      threadsPerObjectThreadgroup:MTLSizeMake(
                                                      body->object_threadgroup_size.width,
@@ -729,7 +766,7 @@ _MTL4RenderCommandEncoder_encodeCommands(void *obj) {
     }
     case WMTRenderCommandDXMTGeometryDrawIndexed: {
       struct wmtcmd_render_dxmt_geometry_draw_indexed *body = (struct wmtcmd_render_dxmt_geometry_draw_indexed *)next;
-      set_buffer(r, &bound, O, body->index_buffer, body->index_buffer_offset, SM50_BINDING_INDEX_INDEX_BUFFER);
+      set_buffer(r, &bound, O, body->index_buffer, body->index_buffer_offset, SM50_BINDING_INDEX_INDEX_BUFFER, false);
       set_buffer_offset(state, O, body->draw_arguments_offset, SM50_BINDING_INDEX_DRAW_ARGUMENTS);
       [encoder drawMeshThreadgroups:MTLSizeMake(body->warp_count, body->instance_count, 1)
           threadsPerObjectThreadgroup:MTLSizeMake(body->vertex_per_warp, 1, 1)
@@ -740,32 +777,32 @@ _MTL4RenderCommandEncoder_encodeCommands(void *obj) {
       struct wmtcmd_render_dxmt_geometry_draw_indirect *body = (struct wmtcmd_render_dxmt_geometry_draw_indirect *)next;
       set_buffer(
           r, &bound, O, body->indirect_args_buffer, body->indirect_args_offset,
-          SM50_BINDING_INDEX_INDIRECT_ARGUMENTS
+          SM50_BINDING_INDEX_INDIRECT_ARGUMENTS, false
       );
       [encoder drawMeshThreadgroupsWithIndirectBuffer:buffer_address(
                                                           r, &indirect, body->dispatch_args_buffer,
-                                                          body->dispatch_args_offset
+                                                          body->dispatch_args_offset, false
                                                       )
                           threadsPerObjectThreadgroup:MTLSizeMake(body->vertex_per_warp, 1, 1)
                             threadsPerMeshThreadgroup:MTLSizeMake(1, 1, 1)];
-      set_buffer(r, &bound, O, body->imm_draw_arguments, 0, SM50_BINDING_INDEX_DRAW_ARGUMENTS);
+      set_buffer(r, &bound, O, body->imm_draw_arguments, 0, SM50_BINDING_INDEX_DRAW_ARGUMENTS, false);
       break;
     }
     case WMTRenderCommandDXMTGeometryDrawIndexedIndirect: {
       struct wmtcmd_render_dxmt_geometry_draw_indexed_indirect *body =
           (struct wmtcmd_render_dxmt_geometry_draw_indexed_indirect *)next;
-      set_buffer(r, &bound, O, body->index_buffer, body->index_buffer_offset, SM50_BINDING_INDEX_INDEX_BUFFER);
+      set_buffer(r, &bound, O, body->index_buffer, body->index_buffer_offset, SM50_BINDING_INDEX_INDEX_BUFFER, false);
       set_buffer(
           r, &bound, O, body->indirect_args_buffer, body->indirect_args_offset,
-          SM50_BINDING_INDEX_INDIRECT_ARGUMENTS
+          SM50_BINDING_INDEX_INDIRECT_ARGUMENTS, false
       );
       [encoder drawMeshThreadgroupsWithIndirectBuffer:buffer_address(
                                                           r, &indirect, body->dispatch_args_buffer,
-                                                          body->dispatch_args_offset
+                                                          body->dispatch_args_offset, false
                                                       )
                           threadsPerObjectThreadgroup:MTLSizeMake(body->vertex_per_warp, 1, 1)
                             threadsPerMeshThreadgroup:MTLSizeMake(1, 1, 1)];
-      set_buffer(r, &bound, O, body->imm_draw_arguments, 0, SM50_BINDING_INDEX_DRAW_ARGUMENTS);
+      set_buffer(r, &bound, O, body->imm_draw_arguments, 0, SM50_BINDING_INDEX_DRAW_ARGUMENTS, false);
       break;
     }
     case WMTRenderCommandDXMTTessellationMeshDraw: {
@@ -779,7 +816,7 @@ _MTL4RenderCommandEncoder_encodeCommands(void *obj) {
     case WMTRenderCommandDXMTTessellationMeshDrawIndexed: {
       struct wmtcmd_render_dxmt_tessellation_mesh_draw_indexed *body =
           (struct wmtcmd_render_dxmt_tessellation_mesh_draw_indexed *)next;
-      set_buffer(r, &bound, O, body->index_buffer, body->index_buffer_offset, SM50_BINDING_INDEX_INDEX_BUFFER);
+      set_buffer(r, &bound, O, body->index_buffer, body->index_buffer_offset, SM50_BINDING_INDEX_INDEX_BUFFER, false);
       set_buffer_offset(state, O, body->draw_arguments_offset, SM50_BINDING_INDEX_DRAW_ARGUMENTS);
       [encoder drawMeshThreadgroups:MTLSizeMake(body->patch_per_mesh_instance, body->instance_count, 1)
           threadsPerObjectThreadgroup:MTLSizeMake(body->threads_per_patch, body->patch_per_group, 1)
@@ -791,32 +828,32 @@ _MTL4RenderCommandEncoder_encodeCommands(void *obj) {
           (struct wmtcmd_render_dxmt_tessellation_mesh_draw_indirect *)next;
       set_buffer(
           r, &bound, O, body->indirect_args_buffer, body->indirect_args_offset,
-          SM50_BINDING_INDEX_INDIRECT_ARGUMENTS
+          SM50_BINDING_INDEX_INDIRECT_ARGUMENTS, false
       );
       [encoder drawMeshThreadgroupsWithIndirectBuffer:buffer_address(
                                                           r, &indirect, body->dispatch_args_buffer,
-                                                          body->dispatch_args_offset
+                                                          body->dispatch_args_offset, false
                                                       )
                           threadsPerObjectThreadgroup:MTLSizeMake(body->threads_per_patch, body->patch_per_group, 1)
                             threadsPerMeshThreadgroup:MTLSizeMake(32, 1, 1)];
-      set_buffer(r, &bound, O, body->imm_draw_arguments, 0, SM50_BINDING_INDEX_DRAW_ARGUMENTS);
+      set_buffer(r, &bound, O, body->imm_draw_arguments, 0, SM50_BINDING_INDEX_DRAW_ARGUMENTS, false);
       break;
     }
     case WMTRenderCommandDXMTTessellationMeshDrawIndexedIndirect: {
       struct wmtcmd_render_dxmt_tessellation_mesh_draw_indexed_indirect *body =
           (struct wmtcmd_render_dxmt_tessellation_mesh_draw_indexed_indirect *)next;
-      set_buffer(r, &bound, O, body->index_buffer, body->index_buffer_offset, SM50_BINDING_INDEX_INDEX_BUFFER);
+      set_buffer(r, &bound, O, body->index_buffer, body->index_buffer_offset, SM50_BINDING_INDEX_INDEX_BUFFER, false);
       set_buffer(
           r, &bound, O, body->indirect_args_buffer, body->indirect_args_offset,
-          SM50_BINDING_INDEX_INDIRECT_ARGUMENTS
+          SM50_BINDING_INDEX_INDIRECT_ARGUMENTS, false
       );
       [encoder drawMeshThreadgroupsWithIndirectBuffer:buffer_address(
                                                           r, &indirect, body->dispatch_args_buffer,
-                                                          body->dispatch_args_offset
+                                                          body->dispatch_args_offset, false
                                                       )
                           threadsPerObjectThreadgroup:MTLSizeMake(body->threads_per_patch, body->patch_per_group, 1)
                             threadsPerMeshThreadgroup:MTLSizeMake(32, 1, 1)];
-      set_buffer(r, &bound, O, body->imm_draw_arguments, 0, SM50_BINDING_INDEX_DRAW_ARGUMENTS);
+      set_buffer(r, &bound, O, body->imm_draw_arguments, 0, SM50_BINDING_INDEX_DRAW_ARGUMENTS, false);
       break;
     }
     case WMTRenderCommandUpdateFence: {
@@ -899,21 +936,22 @@ _MTL4ComputeCommandEncoder_encodeCommands(void *obj) {
       struct wmtcmd_compute_dispatch_indirect *body = (struct wmtcmd_compute_dispatch_indirect *)next;
       [encoder dispatchThreadgroupsWithIndirectBuffer:buffer_address(
                                                           r, &indirect, body->indirect_args_buffer,
-                                                          body->indirect_args_offset
+                                                          body->indirect_args_offset, false
                                                       )
                                 threadsPerThreadgroup:state_threadgroup(state)];
       break;
     }
     case WMTComputeCommandSetPSO: {
       struct wmtcmd_compute_setpso *body = (struct wmtcmd_compute_setpso *)next;
-      resident_object(r, body->pso);
+      if (!packet_resident(next))
+        resident_object(r, body->pso);
       [encoder setComputePipelineState:(id<MTLComputePipelineState>)body->pso];
       state->threadgroup_size = body->threadgroup_size;
       break;
     }
     case WMTComputeCommandSetBuffer: {
       struct wmtcmd_compute_setbuffer *body = (struct wmtcmd_compute_setbuffer *)next;
-      set_buffer(r, &bound, C, body->buffer, body->offset, body->index);
+      set_buffer(r, &bound, C, body->buffer, body->offset, body->index, packet_resident(next));
       break;
     }
     case WMTComputeCommandSetBufferOffset: {

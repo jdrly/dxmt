@@ -122,10 +122,12 @@ struct MTL_COMPUTE_PIPELINE_DESC {
 
 struct MTL_COMPILED_GRAPHICS_PIPELINE {
   WMT::RenderPipelineState PipelineState;
+  bool Resident = false; // gw2 (#153): in the device's residency set (Metal 4)
 };
 
 struct MTL_COMPILED_COMPUTE_PIPELINE {
   WMT::ComputePipelineState PipelineState;
+  bool Resident = false; // gw2 (#153)
 };
 
 struct MTL_COMPILED_TESSELLATION_MESH_PIPELINE {

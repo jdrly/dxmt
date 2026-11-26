@@ -1403,6 +1403,7 @@ public:
       cmd.base_vertex = BaseVertexLocation;
       cmd.base_instance = 0;
       cmd.instance_count = 1;
+      enc.gw2IndexResident(cmd); // gw2 (#153)
     });
   }
 
@@ -1499,6 +1500,7 @@ public:
       cmd.base_vertex = BaseVertexLocation;
       cmd.base_instance = StartInstanceLocation;
       cmd.instance_count = InstanceCount;
+      enc.gw2IndexResident(cmd); // gw2 (#153)
     });
   }
 
@@ -1695,6 +1697,7 @@ public:
         cmd.indirect_args_offset = AlignedByteOffsetForArgs + buffer_offset;
         cmd.index_buffer = index_buffer;
         cmd.index_buffer_offset = IndexBufferOffset + index_sub_offset;
+        enc.gw2IndexResident(cmd, buffer->gw2Resident); // gw2 (#153): the arguments' buffer too
       });
     }
   }
@@ -5373,7 +5376,8 @@ public:
       pso->GetPipeline(&GraphicsPipeline); // may block
       if (!GraphicsPipeline.PipelineState)
         return;
-      enc.bindDrawPipeline(GraphicsPipeline.PipelineState); // gw2 (#30): skips a rebind
+      // gw2 (#30): skips a rebind; gw2 (#153): Resident marks the bind for Metal 4's replay
+      enc.bindDrawPipeline(GraphicsPipeline.PipelineState, GraphicsPipeline.Resident);
     });
 
     cmdbuf_state = CommandBufferState::RenderPipelineReady;
@@ -5532,6 +5536,8 @@ public:
         return;
       auto &cmd = enc.encodeComputeCommand<wmtcmd_compute_setpso>();
       cmd.type = WMTComputeCommandSetPSO;
+      if (ComputePipeline.Resident) // gw2 (#153): the device's residency set holds it
+        WMT::setPacketFlags(cmd, WMT_CMD_RESIDENT);
       cmd.pso = ComputePipeline.PipelineState;
       cmd.threadgroup_size = tg_size;
     });
