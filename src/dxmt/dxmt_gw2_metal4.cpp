@@ -2,6 +2,7 @@
 #include "dxmt_gw2_lifetime.hpp"
 #include "dxmt_gw2_present.hpp"
 #include "dxmt_gw2_residency.hpp"
+#include "dxmt_gw2_shown_wait.hpp"
 #include "dxmt_gw2_switches.hpp"
 #include "log/log.hpp"
 #include "util_env.hpp"
@@ -47,14 +48,18 @@ sw::Switch<bool> kMtl4TimestampReuse{"DXMT_MTL4_TIMESTAMP_REUSE", true, sw::lega
 sw::Switch<std::string> kMtl4Present{"DXMT_MTL4_PRESENT", "mtl4", mtl4PresentGrammar};
 // gw2 (#204): on unless exactly "0" (the default since #301)
 sw::Switch<bool> kMtl4AllocatorPool{"DXMT_MTL4_ALLOCATOR_POOL", true, sw::legacy::notZero};
-// gw2 (#271): `next` (the default) or `write`. The startup line shows `unused` for `write` without
-// DXMT_MTL4_PRESENT=mtl3 on Metal 4
-sw::Switch<std::string> kMtl4ShownWait{"DXMT_MTL4_SHOWN_WAIT", "next", mtl4ShownWaitGrammar};
+// gw2 (#271): `write` (the default since #332, ADR 0017) or `next`. The startup line shows `unused`
+// for `write` without DXMT_MTL4_PRESENT=mtl3 on Metal 4
+sw::Switch<std::string> kMtl4ShownWait{"DXMT_MTL4_SHOWN_WAIT", "write", mtl4ShownWaitGrammar};
 sw::Effective kMtl4ShownWaitLine{"DXMT_MTL4_SHOWN_WAIT", [] {
   if (kMtl4ShownWait() != "write")
     return std::string("next");
   return std::string(mtl4ShownWaitWrite() && metal4Active() ? "write" : "unused");
 }};
+// gw2 (#353): =1 only, off by default (ADR 0018). The startup line shows `unused` for 1 without
+// DXMT_MTL4_PRESENT=mtl3 on Metal 4
+sw::Switch<bool> kMtl4PresentFences{"DXMT_MTL4_PRESENT_FENCES", false, sw::legacy::exactlyOne};
+sw::Effective kMtl4PresentFencesLine{"DXMT_MTL4_PRESENT_FENCES", [] { return std::string(mtl4PresentFencesState()); }};
 } // namespace
 
 bool
@@ -78,6 +83,19 @@ bool
 mtl4ShownWaitWrite() {
   static const bool on = kMtl4ShownWait() == "write" && mtl4PresentMetal3();
   return on;
+}
+
+bool
+mtl4PresentFences() {
+  static const bool on = kMtl4PresentFences();
+  return on;
+}
+
+const char *
+mtl4PresentFencesState() {
+  if (!mtl4PresentFences())
+    return "0";
+  return mtl4PresentMetal3() && metal4Active() ? "1" : "unused";
 }
 
 bool

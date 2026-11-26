@@ -1,4 +1,5 @@
 #include "dxmt_gw2_deps.hpp"
+#include "dxmt_gw2_metal4.hpp" // gw2 (#353)
 #include "dxmt_deptrack.hpp"
 #include "dxmt_gw2_stats.hpp"
 #include "dxmt_gw2_switches.hpp"
@@ -34,13 +35,16 @@ section(double, uint32_t frames) {
   auto checkpoints = x(c.checkpoints), gaps = x(c.gaps), ns = x(c.ns);
   auto checks = x(c.relation_checks), relation_ns = x(c.relation_ns), encoded = x(c.encoded);
   auto waits = x(c.waits), updates = x(c.updates), checkpoint_waits = x(c.checkpoint_waits);
+  auto present_checkpoints = x(c.present_checkpoints), present_stale = x(c.present_stale); // gw2 (#353)
   int state = g_state.load(std::memory_order_relaxed);
   return std::format(
       "policy={} stages/f={:.1f} strong/f={:.1f} full/f={:.1f} simplified/f={:.1f} checkpoints/f={:.2f} gaps={} "
       "simplify_us/f={:.1f} relation_checks/f={:.1f} relation_us/f={:.1f} encoders/f={:.1f} waits/f={:.1f} "
-      "updates/f={:.1f} checkpoint_waits/f={:.2f}",
+      "updates/f={:.1f} checkpoint_waits/f={:.2f}{}",
       state == 2 ? "compressed" : "legacy", stages / f, strong / f, full / f, simplified / f, checkpoints / f, gaps,
-      ns / 1e3 / f, checks / f, relation_ns / 1e3 / f, encoded / f, waits / f, updates / f, checkpoint_waits / f
+      ns / 1e3 / f, checks / f, relation_ns / 1e3 / f, encoded / f, waits / f, updates / f, checkpoint_waits / f,
+      // gw2 (#353): Metal 4 only
+      metal4Active() ? std::format(" presentcp={} presentstale={}", present_checkpoints, present_stale) : std::string()
   );
 }
 
