@@ -28,10 +28,16 @@
 //   service doesn't know (never submitted) isn't waited for: the job runs and parks on it as before;
 // - lanes: a demand queue first, then released parked jobs (as legacy's continuations), then normal
 //   FIFO, then speculative jobs (warming, W2/W3): at most one speculative job runs at a time, and none
-//   starts while a demand is pending;
+//   starts while a demand is pending (#159: up to Options::speculative_jobs while they are slow, below);
 // - a demand promotes the job and its unfinished dependency closure, once each: a queued job moves to
 //   the demand queue, a waiting one goes there when it becomes runnable. Running jobs finish as they
 //   are; nothing is built twice.
+//
+// #159: with Options::speculative_jobs N above 1 (DXMT_WARM_JOBS), up to N speculative jobs run at once
+// while their builds are slow, which is how a cold Metal cache shows: a moving average (1/8) of the
+// completed speculative runs' time at or above kSpeculativeSlowNs. While it is below, or before any has
+// completed, one at a time as before. Never while a demand waits. The service starts N + 1 workers,
+// so speculative jobs never hold them all. N = 1 is the admission above, with no clock read.
 //
 // Not yet: owning jobs (the variant and pipeline maps keep owning them) and stable keys and shared
 // results (C3/C4), which warming needs to submit jobs without live D3D11 objects.
@@ -172,7 +178,12 @@ struct Options {
   unsigned max_workers = 0; // 0: 2 x CPUs
   gw2::ThreadPriority priority = gw2::ThreadPriority::Critical; // gw2 (#152): each worker's, at its start
   Policy policy = Policy::Legacy;
+  unsigned speculative_jobs = 1; // gw2 (#159): declared: speculative jobs at once while they are slow
 };
+
+// gw2 (#159): speculative runs this slow on average are a cold Metal cache's (a warm cache builds a
+// pipeline in 0.03-0.12 ms, a cold one in 6-17 ms; perf review 2026-11-10, finding C2)
+constexpr int64_t kSpeculativeSlowNs = 1'000'000;
 
 template <typename Job, typename Traits = JobTraits<Job>> class Service final : public DemandSink {
 public:
@@ -214,6 +225,7 @@ private:
   void promoteRecord(const JobRecord *record);
   void release(Job job);
   bool takeable() const;
+  void speculativeDone(int64_t run_ns);
 
   Traits traits_;
   std::unordered_map<Job, Node> nodes_;                  // submitted, not complete
@@ -224,6 +236,11 @@ private:
   std::deque<Job> demand_q_, released_q_, normal_q_, speculative_q_;
   uint64_t demands_ = 0;           // demands waiting now
   uint32_t speculative_running_ = 0;
+  // gw2 (#159): speculative jobs admitted at once while slow (Options::speculative_jobs, at most the
+  // workers minus one), the completed runs' moving average (-1: none yet), and whether it is slow
+  uint32_t speculative_jobs_ = 1;
+  int64_t speculative_avg_ns_ = -1;
+  bool speculative_slow_ = false;
 
   Options options_;
   dxmt::mutex worker_mutex_;
@@ -246,6 +263,11 @@ template <typename Job, typename Traits> Service<Job, Traits>::Service(Options o
   max_threads_ = options_.max_workers ? options_.max_workers : dxmt::thread::hardware_concurrency() * 2;
   workers_.reserve(max_threads_);
   threads_ = options_.initial_workers;
+  // gw2 (#159): a worker more than the speculative jobs, so they never hold every worker
+  if (options_.policy == Policy::Declared && options_.speculative_jobs > 1 && max_threads_ > 1) {
+    speculative_jobs_ = uint32_t(std::min<uint64_t>(options_.speculative_jobs, max_threads_ - 1));
+    threads_ = std::max<uint64_t>(threads_, speculative_jobs_ + 1);
+  }
 
   for (unsigned i = 0; i < threads_; i++) {
     workers_.emplace_back([this]() { workerLoop(); });
@@ -525,7 +547,16 @@ template <typename Job, typename Traits>
 bool
 Service<Job, Traits>::takeable() const {
   return !demand_q_.empty() || !released_q_.empty() || !normal_q_.empty() ||
-         (!speculative_q_.empty() && demands_ == 0 && speculative_running_ == 0);
+         (!speculative_q_.empty() && demands_ == 0 &&
+          speculative_running_ < (speculative_slow_ ? speculative_jobs_ : 1u));
+}
+
+// gw2 (#159): a speculative job completed after a run of `run_ns` (worker_mutex_ held)
+template <typename Job, typename Traits>
+void
+Service<Job, Traits>::speculativeDone(int64_t run_ns) {
+  speculative_avg_ns_ = speculative_avg_ns_ < 0 ? run_ns : speculative_avg_ns_ + (run_ns - speculative_avg_ns_) / 8;
+  speculative_slow_ = speculative_avg_ns_ >= kSpeculativeSlowNs;
 }
 
 template <typename Job, typename Traits>
@@ -555,12 +586,17 @@ Service<Job, Traits>::workerLoopDeclared() {
         speculative_q_.pop_front();
         speculative = true;
         speculative_running_++;
+        gw2::warmJobsRunning(speculative_running_); // gw2 (#159)
       }
     }
     running_.fetch_add(1, std::memory_order_relaxed);
+    // gw2 (#159): a speculative run's time, only when more than one may run
+    bool timed = speculative && speculative_jobs_ > 1;
     while (true) {
       detail::onRun(traits_.record(job));
+      int64_t t0 = timed ? gw2::compileNowNs() : 0;
       Job next = traits_.run(job);
+      int64_t run_ns = timed ? gw2::compileNowNs() - t0 : 0;
       if (next == job) {
         {
           std::unique_lock<dxmt::mutex> lock(deps_mutex_);
@@ -585,8 +621,12 @@ Service<Job, Traits>::workerLoopDeclared() {
             nodes_.erase(it);
           }
           by_record_.erase(&traits_.record(job));
-          if (speculative)
+          if (speculative) {
             speculative_running_--;
+            gw2::warmJobsRunning(speculative_running_);
+            if (timed)
+              speculativeDone(run_ns);
+          }
         }
         worker_cond_.notify_all();
         released.clear();
@@ -600,8 +640,10 @@ Service<Job, Traits>::workerLoopDeclared() {
         lock.unlock();
         {
           std::unique_lock<dxmt::mutex> wlock(worker_mutex_);
-          if (speculative)
+          if (speculative) {
             speculative_running_--; // it resumes through admission again
+            gw2::warmJobsRunning(speculative_running_);
+          }
           // a demanded job's demand reaches what it parked on
           if (auto it = nodes_.find(job); it != nodes_.end() && it->second.promoted)
             promoteRecord(&traits_.record(next));

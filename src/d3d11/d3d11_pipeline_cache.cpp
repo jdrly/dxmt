@@ -858,7 +858,9 @@ public:
       scheduler_(compile::Options{.priority = gw2::compilePriority(),
                                   .policy = gw2::compileDemand() || gw2::warmMode() != gw2::WarmMode::Off
                                                 ? compile::Policy::Declared
-                                                : compile::Policy::Legacy}),
+                                                : compile::Policy::Legacy,
+                                  // gw2 (#159): only warming submits speculative jobs
+                                  .speculative_jobs = gw2::warmMode() != gw2::WarmMode::Off ? gw2::warmJobs() : 1u}),
       device(pDevice),
       blend_states(pDevice),
       so_layouts(pDevice) {
