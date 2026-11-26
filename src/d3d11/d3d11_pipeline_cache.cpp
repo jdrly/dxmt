@@ -7,12 +7,129 @@
 #include "dxmt_tasks.hpp"
 #include "log/log.hpp"
 #include "sha1/sha1_util.hpp"
+#include "util_env.hpp"
 #include "../d3d10/d3d10_shader.hpp"
 #include "../d3d10/d3d10_input_layout.hpp"
+#include <algorithm>
 #include <cstring>
+#include <format>
 #include <shared_mutex>
 
 namespace dxmt {
+
+// gw2 (#6): the pipeline lookup's switches and its PSO section.
+namespace gw2 {
+
+const PsoSettings &
+psoSettings() {
+  static const PsoSettings settings = {
+      .blend_hash = env::getEnvVar("DXMT_PSO_BLEND_HASH") != "0",
+      .mru = env::getEnvVar("DXMT_PSO_MRU") != "0",
+      .topology_keep = env::getEnvVar("DXMT_PSO_TOPOLOGY_KEEP") != "0",
+  };
+  return settings;
+}
+
+std::atomic<uint64_t> g_pso_counters[(unsigned)PsoCounter::Count];
+
+namespace {
+
+// Sampled lookups (one in 16 per thread, like Draw in PACE): bucket depth and lock time.
+constexpr uint32_t kPsoSampleEvery = 16;
+thread_local uint32_t t_pso_sample_counter = 0;
+std::atomic<uint64_t> g_pso_samples;
+std::atomic<uint64_t> g_pso_depth_sum;
+std::atomic<uint64_t> g_pso_depth_max;
+std::atomic<uint64_t> g_pso_wait_ns;
+std::atomic<uint64_t> g_pso_held_ns;
+
+uint64_t
+drain(std::atomic<uint64_t> &v) {
+  return v.exchange(0, std::memory_order_relaxed);
+}
+
+// Constructed before the cache's lock is taken, told when it is held; the destructor runs after
+// the lock_guard's (declared later), so `held` ends after the unlock.
+class PsoLookupSample {
+public:
+  PsoLookupSample() {
+    if (!statsEnabled())
+      return;
+    stats_ = true;
+    if ((t_pso_sample_counter++ % kPsoSampleEvery) == 0)
+      t0_ = nowNs();
+  }
+
+  template <typename Map, typename Key>
+  void
+  locked(const Map &map, const Key &key) {
+    if (!stats_)
+      return;
+    g_pso_counters[(unsigned)PsoCounter::Lookup].fetch_add(1, std::memory_order_relaxed);
+    if (!t0_)
+      return;
+    int64_t acquired = nowNs();
+    g_pso_wait_ns.fetch_add(uint64_t(acquired - t0_), std::memory_order_relaxed);
+    uint64_t depth = map.bucket_count() ? map.bucket_size(map.bucket(key)) : 0;
+    g_pso_samples.fetch_add(1, std::memory_order_relaxed);
+    g_pso_depth_sum.fetch_add(depth, std::memory_order_relaxed);
+    uint64_t prev = g_pso_depth_max.load(std::memory_order_relaxed);
+    while (depth > prev && !g_pso_depth_max.compare_exchange_weak(prev, depth, std::memory_order_relaxed)) {
+    }
+    t1_ = nowNs(); // the depth probe (one more hash) stays out of `held`
+  }
+
+  ~PsoLookupSample() {
+    if (!t1_)
+      return;
+    g_pso_held_ns.fetch_add(uint64_t(nowNs() - t1_), std::memory_order_relaxed);
+  }
+
+  PsoLookupSample(const PsoLookupSample &) = delete;
+  PsoLookupSample &operator=(const PsoLookupSample &) = delete;
+
+private:
+  bool stats_ = false;
+  int64_t t0_ = 0;
+  int64_t t1_ = 0;
+};
+
+// The caches' key equality: equal_to<MTL_GRAPHICS_PIPELINE_DESC>, counted. The context MRU's own
+// compares use equal_to directly and are not counted.
+struct PsoKeyEqual {
+  bool
+  operator()(const MTL_GRAPHICS_PIPELINE_DESC &x, const MTL_GRAPHICS_PIPELINE_DESC &y) const {
+    psoCount(PsoCounter::Equal);
+    return std::equal_to<MTL_GRAPHICS_PIPELINE_DESC>{}(x, y);
+  }
+};
+
+std::string
+psoSection(double window_ms, uint32_t frames) {
+  (void)window_ms;
+  uint64_t c[(unsigned)PsoCounter::Count];
+  for (unsigned i = 0; i < (unsigned)PsoCounter::Count; i++)
+    c[i] = drain(g_pso_counters[i]);
+  uint64_t samples = drain(g_pso_samples), depth_sum = drain(g_pso_depth_sum), depth_max = drain(g_pso_depth_max);
+  double wait = drain(g_pso_wait_ns) * double(kPsoSampleEvery) / 1e6;
+  double held = drain(g_pso_held_ns) * double(kPsoSampleEvery) / 1e6;
+  auto at = [&](PsoCounter k) { return double(c[(unsigned)k]); };
+  if (!at(PsoCounter::Build) && !at(PsoCounter::Lookup) && !at(PsoCounter::TopologyKept))
+    return {};
+  double n = std::max(frames, 1u);
+  return std::format(
+      "builds={:.1f} mru={:.1f} lookups={:.1f} equal={:.1f} depth={:.2f}/{} new={} topokept={:.1f} "
+      "lock={:.3f}/{:.3f}",
+      at(PsoCounter::Build) / n, at(PsoCounter::MruHit) / n, at(PsoCounter::Lookup) / n, at(PsoCounter::Equal) / n,
+      samples ? double(depth_sum) / samples : 0.0, depth_max, c[(unsigned)PsoCounter::New],
+      at(PsoCounter::TopologyKept) / n, wait / n, held / n
+  );
+}
+
+SectionRegistrar g_pso_section("PSO", psoSection);
+
+} // namespace
+} // namespace gw2
 
 class MTLD3D11InputLayout final
     : public MTLD3D11DeviceChild<IMTLD3D11InputLayout> {
@@ -205,13 +322,19 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
   std::unordered_map<Sha1Digest, std::unique_ptr<CachedSM50Shader>> shaders_;
   std::shared_mutex mutex_shares;
 
-  std::unordered_map<MTL_GRAPHICS_PIPELINE_DESC, std::unique_ptr<MTLCompiledGraphicsPipeline>> pipelines_;
+  // gw2 (#6): the key equality is counted (PSO equal=).
+  template <typename Pipeline>
+  using PipelineMap = std::unordered_map<
+      MTL_GRAPHICS_PIPELINE_DESC, std::unique_ptr<Pipeline>, std::hash<MTL_GRAPHICS_PIPELINE_DESC>,
+      gw2::PsoKeyEqual>;
+
+  PipelineMap<MTLCompiledGraphicsPipeline> pipelines_;
   dxmt::mutex mutex_;
 
-  std::unordered_map<MTL_GRAPHICS_PIPELINE_DESC, std::unique_ptr<MTLCompiledGeometryPipeline>> pipelines_gs_;
+  PipelineMap<MTLCompiledGeometryPipeline> pipelines_gs_;
   dxmt::mutex mutex_gs_;
 
-  std::unordered_map<MTL_GRAPHICS_PIPELINE_DESC, std::unique_ptr<MTLCompiledTessellationMeshPipeline>> pipelines_ts_;
+  PipelineMap<MTLCompiledTessellationMeshPipeline> pipelines_ts_;
   dxmt::mutex mutex_ts_;
 
   std::unordered_map<ManagedShader, std::unique_ptr<MTLCompiledComputePipeline>> pipelines_cs_;
@@ -379,7 +502,9 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
 
   void GetGraphicsPipeline(MTL_GRAPHICS_PIPELINE_DESC *pDesc,
                            MTLCompiledGraphicsPipeline **ppPipeline) override {
+    gw2::PsoLookupSample sample; // gw2 (#6)
     std::lock_guard<dxmt::mutex> lock(mutex_);
+    sample.locked(pipelines_, *pDesc);
 
     if (auto iter = pipelines_.find(*pDesc); iter != pipelines_.end()) {
       *ppPipeline = iter->second.get();
@@ -390,6 +515,7 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
       D3D11_ASSERT(0 && "duplicated graphics pipeline");
     } else {
       scheduler_.submit(iter->second.get());
+      gw2::psoCount(gw2::PsoCounter::New);
     }
     *ppPipeline = iter->second.get();
   }
@@ -397,7 +523,9 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
   void GetGeometryPipeline(
       MTL_GRAPHICS_PIPELINE_DESC *pDesc,
       MTLCompiledGeometryPipeline **ppPipeline) override {
+    gw2::PsoLookupSample sample; // gw2 (#6)
     std::lock_guard<dxmt::mutex> lock(mutex_gs_);
+    sample.locked(pipelines_gs_, *pDesc);
 
     if (auto iter = pipelines_gs_.find(*pDesc); iter != pipelines_gs_.end()) {
       *ppPipeline = iter->second.get();
@@ -408,6 +536,7 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
       D3D11_ASSERT(0 && "duplicated geometry pipeline");
     } else {
       scheduler_.submit(iter->second.get());
+      gw2::psoCount(gw2::PsoCounter::New);
     }
     *ppPipeline = iter->second.get();
   }
@@ -415,7 +544,9 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
   void GetTessellationPipeline(MTL_GRAPHICS_PIPELINE_DESC * pDesc,
                                    MTLCompiledTessellationMeshPipeline *
                                        *ppPipeline) override {
+    gw2::PsoLookupSample sample; // gw2 (#6)
     std::lock_guard<dxmt::mutex> lock(mutex_ts_);
+    sample.locked(pipelines_ts_, *pDesc);
 
     if (auto iter = pipelines_ts_.find(*pDesc); iter != pipelines_ts_.end()) {
       *ppPipeline = iter->second.get();
@@ -426,6 +557,7 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
       D3D11_ASSERT(0 && "duplicated tessellation pipeline");
     } else {
       scheduler_.submit(iter->second.get());
+      gw2::psoCount(gw2::PsoCounter::New);
     }
     *ppPipeline = iter->second.get();
   }
@@ -452,7 +584,15 @@ public:
       scache_(ShaderCache::getInstance(pDevice->GetDXMTDevice().metalVersion())),
       device(pDevice),
       blend_states(pDevice),
-      so_layouts(pDevice) {};
+      so_layouts(pDevice) {
+    // gw2 (#6): the effective pipeline lookup settings, once per device (the log is rewritten
+    // per device).
+    auto &pso = gw2::psoSettings();
+    Logger::info(std::format(
+        "PSO: blend hash {} (DXMT_PSO_BLEND_HASH), MRU {} (DXMT_PSO_MRU), topology keep {} (DXMT_PSO_TOPOLOGY_KEEP)",
+        pso.blend_hash ? "on" : "off", pso.mru ? "on, 4 entries" : "off", pso.topology_keep ? "on" : "off"
+    ));
+  };
 };
 
 std::unique_ptr<MTLD3D11PipelineCacheBase>
