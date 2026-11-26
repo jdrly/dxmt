@@ -2226,6 +2226,11 @@ struct WMTPSOArchiveConfig {
   struct WMTConstMemoryPointer base_dir; // absolute unix directory, or null for the user cache dir
   uint32_t keep_sessions;
   uint32_t max_pipelines; // per session archive
+  // gw2 (#75): DXMT_PSO_GENERATIONS=1: the generation publisher (immutable shards, checksummed
+  // manifests, an atomically replaced index) and the exact-shape failure policy; 0: one file per
+  // session, as #52 left it
+  uint32_t generations;
+  uint32_t padding;
 };
 
 struct WMTPSOArchiveStats {
@@ -2244,6 +2249,12 @@ struct WMTPSOArchiveStats {
   uint64_t miss_new;      // lookup misses never archived before
   uint64_t skipped;       // pipelines left out after Metal's packer named them
   uint64_t rebuilds;      // flushes that succeeded only after a rebuild
+  // gw2 (#75), with generations only (0 otherwise):
+  uint64_t mode;          // 0: session files (or off), 1: generations, 2: generations, lookup only
+  uint64_t miss_excluded; // lookup misses of a failing shape an earlier generation excluded
+  uint64_t excluded;      // adds refused as a failing shape (exact-shape policy)
+  uint64_t generation;    // the generation loaded, then the last one published
+  uint64_t published;     // pipelines in this session's shard of the last published generation
 };
 
 WINEMETAL_API bool WMTPSOArchiveInit(
