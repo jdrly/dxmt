@@ -24,6 +24,34 @@ dxmt_src = [
   'dxmt_fence.cpp',
   'dxmt_keyed_mutex.cpp',
 ]
+# gw2: my fork's sources, in a list of their own so upstream's list ends as upstream wrote it
+dxmt_src += [
+  'dxmt_gw2_stats.cpp',
+  'dxmt_gw2_switches.cpp',
+  'dxmt_gw2_thread_priority.cpp', # gw2 (#151, #152)
+  'dxmt_compile_builder.cpp',
+  'dxmt_compile_recipe.cpp',
+  'dxmt_gw2_compile.cpp',
+  'dxmt_gw2_present.cpp',
+  'dxmt_gw2_cmds.cpp',
+  'dxmt_gw2_timestamp.cpp',
+  'dxmt_gw2_map.cpp',
+  'dxmt_gw2_rebind.cpp',
+  'dxmt_gw2_control.cpp',
+  'dxmt_gw2_residency.cpp',
+  'dxmt_gw2_lifetime.cpp',
+  'dxmt_gw2_recipe.cpp',
+  'dxmt_gw2_warm.cpp',
+  'dxmt_gw2_metal4.cpp',
+  'dxmt_gw2_mtl4_queue.cpp',
+  'dxmt_gw2_submission.cpp', # gw2 (#78)
+  'dxmt_gw2_queue_setup.cpp', # gw2 (#312)
+  'dxmt_gw2_mtl4_encoding.cpp',
+  'dxmt_gw2_subsample.cpp', # gw2 (#56)
+  'dxmt_gw2_deps.cpp', # gw2 (#132)
+  'dxmt_gw2_present_fences.cpp', # gw2 (#353)
+  'dxmt_gw2_cache_dir.cpp', # gw2 (#134)
+]
 
 dxmt_shaders = [
   'dxmt_command.metal'

@@ -1,7 +1,67 @@
-winemetal_unix_src = [
+# gw2 (B1, #61): the bridge's unix side, listed once. Both builds use this list: the Wine unix
+# library below (the cross build) and src/nativemetal's dylib (the native build, DXMT_NATIVE). A new
+# unix source goes here and nowhere else.
+winemetal_unix_src = files(
   'winemetal_unix.c',
   'cache.c',
+  'mtl4.c', # gw2 (#32)
+  'mtl4fx.c', # gw2 (#56)
+  'winemetal_gw2.c', # gw2 (#291)
+)
+# ... and the frameworks and libraries it links, for the same targets
+winemetal_unix_link_args = [
+  '-weak_framework', 'CoreFoundation', '-weak_framework', 'Metal',
+  '-framework', 'MetalFX', '-weak_framework', 'Foundation',
+  '-weak_framework', 'CoreGraphics', '-weak_framework', 'QuartzCore',
+  '-weak_framework', 'ColorSync', '-weak_framework', 'Cocoa',
+  '-lsqlite3',
 ]
+
+# gw2 (B1, #61): the native smoke test. The PE side and the real unix side linked into one macOS
+# executable with DXMT_NATIVE, so its calls reach __wine_unix_call_funcs through wmt_native_dispatch
+# (B3, #76). It is built with the x86_64 Wine build (a missing handler source fails the build) and
+# is never installed; run it with `meson test -C <build> bridge-native-smoke` (suite gw2-metal).
+bridge_native_smoke = executable('bridge_native_smoke',
+  winemetal_unix_src,
+  files('../winemetal_thunks.c', '../../../tests/gw2/bridge_native_smoke.c'),
+  dependencies        : [ airconv_dep_darwin ],
+  # nativemetal first: its wineunixlib.h (wmt_native_dispatch), not src/winemetal's (Wine's)
+  include_directories : [ dxmt_include_path, include_directories('../../nativemetal', '..') ],
+  # -Wno-unused-function: DXMT_NATIVE compiles out the wow64 thunks, the only users of
+  # winemetal_unix.c's UInt32ToPtr
+  c_args              : ['-ObjC', '-DDXMT_NATIVE=1', '-Wno-unused-function'],
+  link_args           : winemetal_unix_link_args,
+  native              : true,
+  install             : false,
+)
+test('bridge-native-smoke', bridge_native_smoke, suite : ['gw2', 'gw2-metal'])
+
+# gw2 (B2, #67): the call manifest's test through the real __wine_unix_call_funcs (no Metal device
+# needed: it reads the table, it calls nothing). tests/gw2/run.zsh builds the same file without the
+# unix side for its own checks.
+bridge_manifest_test = executable('bridge_manifest_test',
+  winemetal_unix_src,
+  files('../../../tests/gw2/bridge_manifest_test.c'),
+  dependencies        : [ airconv_dep_darwin ],
+  include_directories : [ dxmt_include_path, include_directories('../../nativemetal', '..') ],
+  c_args              : ['-ObjC', '-DDXMT_NATIVE=1', '-Wno-unused-function'],
+  link_args           : winemetal_unix_link_args,
+  native              : true,
+  install             : false,
+)
+test('bridge-manifest', bridge_manifest_test, suite : ['gw2'])
+
+# gw2 (#161): the vertex stage of a geometry-shader draw without an index buffer, converted by the
+# native airconv of src/airconv/darwin (airconv_cli_darwin; no Metal device needed). It lives here so
+# that file ends as upstream's does.
+test('airconv-gs-vertex', find_program('../../../tests/gw2/airconv_gs_vertex.zsh'),
+  args  : [ airconv_cli_darwin, meson.current_build_dir() / 'airconv-gs-vertex' ],
+  suite : [ 'gw2' ]
+)
+
+if not dxmt_crossbuild
+  subdir_done()
+endif
 
 if wine_build_path != ''
   winemac_so = join_paths(wine_build_path, 'dlls/winemac.drv/winemac.so')
@@ -16,12 +76,7 @@ endif
 winemetal_unix_ld_args = [
   '-Wl,-install_name,@rpath/winemetal.so',
   winemac_so, ntdll_so,
-  '-weak_framework', 'CoreFoundation', '-weak_framework', 'Metal',
-  '-framework', 'MetalFX', '-weak_framework', 'Foundation',
-  '-weak_framework', 'CoreGraphics', '-weak_framework', 'QuartzCore',
-  '-weak_framework', 'ColorSync',  '-weak_framework', 'Cocoa',
-  '-lsqlite3',
-]
+] + winemetal_unix_link_args
 winemetal_unix_link_depends = []
 
 shared_library('winemetal', winemetal_unix_src,

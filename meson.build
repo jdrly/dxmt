@@ -139,6 +139,11 @@ endif
 
 add_project_arguments('-DDXMT_PAGE_SIZE=4096', language: 'cpp')
 
+# gw2 (#31): DXMT_LIFETIME_CHECK exists only in a build with -Dgw2_lifetime_check=true
+if get_option('gw2_lifetime_check')
+add_project_arguments('-DDXMT_GW2_LIFETIME_CHECK=1', language: 'cpp')
+endif
+
 dxmt_version = vcs_tag(
   command: ['git', 'describe', '--always'],
   input:  'version.h.in',
