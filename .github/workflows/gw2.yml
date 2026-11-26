@@ -1,0 +1,684 @@
+# gw2 (#162): my fork's checks, on GitHub's runners instead of my Mac. Upstream's ci.yml stays as it
+# is (it runs for main only), so an upstream sync doesn't conflict with this file.
+#
+# build (x86_64, and i386 for a push only since #347): the build scripts/build-dxmt.zsh (GW2 on
+#   Mac) makes, release, NVEXT off, with Homebrew's mingw-w64, meson $MESON_VERSION and LLVM
+#   $LLVM_VERSION for macOS $MACOSX_DEPLOYMENT_TARGET. A compiler warning that
+#   .github/gw2/warnings-<arch>.txt doesn't list fails it. Wine's import libraries, winebuild and winemac.so come from 3Shain's Wine
+#   $WINE_VERSION, as in upstream's CI, since the CrossOver engine I build against locally isn't
+#   downloadable. .github/gw2/unix-call.py shows what a bridge thunk calls (#205).
+#   .github/gw2/footprint.zsh prints the fork's footprint in upstream's files into the summary.
+# arm64 (#182): the build for GW2 on Mac 0.2's engine, Mach9 $MACH9_VERSION, the way Mach9 builds its
+#   DXMT: one ARM64X tree (build-arm64ec.txt, so the arm64 winemetal.so too; the DLLs for armv8.4-a
+#   since #200) and one i386 tree, with llvm-mingw $LLVM_MINGW_VERSION (Mach9's pin), linked against the engine's own Wine files from its
+#   release tarball. unix-call.py checks that the ARM64EC thunks call winecrt0's
+#   __wine_unix_call_arm64ec directly (#205). Then .github/gw2/check-mach9.zsh compares the result
+#   with the engine's DXMT and ntdll.dll without running anything, counts the exclusive pairs
+#   left in the ARM64X DLLs (#200) and checks that no x64 entry's ARM64EC code reaches another
+#   (#248). Artifact dxmt-arm64-<commit>:
+#   aarch64-windows, i386-windows, aarch64-unix, VERSION, kept 7 days.
+# tests: zsh -n for the zsh scripts, the self-checks of warnings.zsh and tools/gw2/upstream-bridge-calls.py, then tests/gw2/run.zsh all:
+#   pure, and metal on the runner's Metal device. The display tests only build here (#225). A push skips
+#   this job when a green pull request run tested the same tree and the push's parent is in that
+#   pull request's head (the tested job, #273, #310).
+#   .github/gw2/switch-table.py holds docs/gw2/README.md's switch table to the switches src/ reads.
+# ccache (#305): the three builds compile through ccache (.github/gw2/ccache.zsh). A pull request
+#   reads the newest cache of its toolchain. A push never reads one, so what Publish uploads is
+#   always compiled in its own run: it compiles through an empty ccache and saves it under its
+#   commit (#346), except Build i386's, which no pull request reads.
+# lint: actionlint for the workflows.
+# artifact: the installable build of the commit (as build-dxmt.zsh stages it: x86_64-windows,
+#   i386-windows, x86_64-unix, VERSION), kept 7 days, for scripts/dxmt-use.zsh save. A pull
+#   request's has no i386-windows.
+# publish (#194, #215): after every other job is green, packs dxmt-arm64-<commit> into
+#   dxmt-arm64-<commit>.tar.xz and prints its files and sha256. For a push to gw2-on-mac it adds the
+#   archive to the pre-release arm64-builds, the one release this workflow makes, never marked latest,
+#   never replaces an asset, and keeps the 30 newest. The only job with contents: write.
+name: GW2
+
+on:
+  pull_request:
+    branches: [gw2-on-mac]
+  push:
+    branches: [gw2-on-mac]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gw2-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # The PR's own commit, not GitHub's merge commit, so VERSION and the startup line name it
+  COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+  # The xcode-27 image (macOS 27) has the Xcode I build with locally
+  XCODE_VERSION: "27.2"
+  MACOSX_DEPLOYMENT_TARGET: "26.0"
+  MESON_VERSION: 1.12.1
+  NINJA_VERSION: 1.13.0
+  # Homebrew's mingw-w64 can't be pinned. The x86_64 and i386 builds (0.1.x) stop when its GCC
+  # isn't this one, so a new GCC arrives in a pull request of its own, with new warnings lists.
+  MINGW_GCC_VERSION: "16.2"
+  LLVM_VERSION: 15.0.7
+  LLVM_SHA256: 8b5fcb24b4128cf04df1b0b9410ce8b1a729cb3c544e6da885d234280dedeac6
+  # Raise it when toolchain.zsh builds LLVM differently, so the cache doesn't keep the old build
+  LLVM_BUILD: 1
+  WINE_VERSION: v8.16-3shain
+  WINE_SHA256: 289c7f19e270a3d3d0a6fdb07691b176c70a0795f6811e5255cba82425de4f10
+  # The arm64 job takes only winebuild from it (--builtin marks a DLL the same way in any version):
+  # nothing of Mach9's engine is ever run
+  WINE_ARM64EC_VERSION: wine-11.2
+  WINE_ARM64EC_SHA256: 834ec0d4f1dff94de187f29891dc9938306ea2602d0fff603b407225c916d881
+  # Mach9's pins/redist.env (athei/mach9) at the engine's release
+  LLVM_MINGW_VERSION: "20261104"
+  LLVM_MINGW_SHA256: 66cbd5178c4a71b0d473e68ede172f8eb7d15d023e67f39201d0a69e21f6bf3c
+  MACH9_VERSION: v0.4.0
+  MACH9_SHA256: 3b81aac9b93d5652872673b400769ec525f3bc2f1f7e2ec82c9f851d0a0db05d
+  # ccache's own macOS release (a universal binary), for the three builds
+  CCACHE_VERSION: 4.14.3
+  CCACHE_SHA256: 764dd2a8100ff83e6bbd7b9a1e2016cc401be34bee8a70ea99698186622c34d5
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Build ${{ matrix.arch }}
+    runs-on: xcode-27
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        # gw2 (#347): i386 for a push only. A pull request's run has no Build i386 job, so
+        # Artifact and Publish don't wait for one.
+        include: >-
+          ${{ fromJSON(github.event_name == 'push' &&
+          '[{"arch":"x86_64","cross":"build-win64.txt"},{"arch":"i386","cross":"build-win32.txt"}]' ||
+          '[{"arch":"x86_64","cross":"build-win64.txt"}]') }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.COMMIT }}
+          fetch-depth: 0
+          submodules: true
+          persist-credentials: false
+      # gw2 (#318): what this commit adds to and rewrites in upstream's files, for the review
+      # (CONTRIBUTING, Code rules). A number, never a failure. Once, not per arch.
+      - name: Fork footprint in upstream's files
+        if: matrix.arch == 'x86_64'
+        continue-on-error: true
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: .github/gw2/footprint.zsh origin/main HEAD "${BASE_REF:+origin/$BASE_REF}" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Select Xcode
+        run: sudo xcode-select -s "/Applications/Xcode_$XCODE_VERSION.app"
+      # Some runners of the image have Xcode without its Metal Toolchain component, and the shader
+      # compile then fails (run 44025579828). Such a runner downloads it instead.
+      - name: Metal Toolchain
+        run: |
+          if ! xcrun -sdk macosx metal --version >/dev/null 2>&1; then
+            echo "::warning::this runner's Xcode can't run metal, so the job downloads its Metal Toolchain"
+            xcodebuild -downloadComponent MetalToolchain
+          fi
+          xcrun -sdk macosx metal --version
+
+      - name: Restore Wine
+        id: wine
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: wine-x86_64-${{ env.WINE_VERSION }}
+          path: toolchains/wine
+      - name: Download Wine
+        if: steps.wine.outputs.cache-hit != 'true'
+        run: .github/gw2/toolchain.zsh fetch "https://github.com/3Shain/wine/releases/download/$WINE_VERSION/wine.tar.gz" "$WINE_SHA256" toolchains/wine
+      - name: Save Wine
+        if: steps.wine.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: wine-x86_64-${{ env.WINE_VERSION }}
+          path: toolchains/wine
+
+      - name: Restore LLVM
+        if: matrix.arch == 'x86_64'
+        id: llvm
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: llvm-${{ env.LLVM_VERSION }}-x86_64-macos${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ env.LLVM_BUILD }}
+          path: toolchains/llvm
+      - name: Build LLVM
+        if: matrix.arch == 'x86_64' && steps.llvm.outputs.cache-hit != 'true'
+        run: |
+          pip3 install --break-system-packages "ninja==$NINJA_VERSION"
+          .github/gw2/toolchain.zsh llvm x86_64 toolchains/llvm
+      - name: Save LLVM
+        if: matrix.arch == 'x86_64' && steps.llvm.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: llvm-${{ env.LLVM_VERSION }}-x86_64-macos${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ env.LLVM_BUILD }}
+          path: toolchains/llvm
+
+      - name: Install mingw-w64 and meson
+        run: |
+          brew install mingw-w64
+          pip3 install --break-system-packages "meson==$MESON_VERSION" "ninja==$NINJA_VERSION"
+      - name: Toolchain versions
+        run: |
+          {
+            echo "### ${{ matrix.arch }} toolchain"
+            echo '```'
+            xcodebuild -version
+            xcrun -sdk macosx --show-sdk-version
+            brew list --versions mingw-w64
+            x86_64-w64-mingw32-gcc --version | head -1
+            echo "meson $(meson --version), ninja $(ninja --version)"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: The mingw GCC is the one the warnings lists are for
+        run: |
+          v=$(x86_64-w64-mingw32-gcc -dumpfullversion)
+          if [[ $v != "$MINGW_GCC_VERSION".* ]]; then
+            echo "::error::Homebrew's mingw-w64 has GCC $v, and this workflow expects $MINGW_GCC_VERSION.x. Move MINGW_GCC_VERSION and .github/gw2/warnings-x86_64.txt and warnings-i386.txt in a pull request of their own."
+            exit 1
+          fi
+          echo "mingw GCC $v"
+
+      # ccache (#305, #346). A pull request reads the newest cache of its toolchain. A push never
+      # reads one: it compiles through an empty ccache and saves it under its commit.
+      - name: Fetch ccache
+        run: .github/gw2/toolchain.zsh fetch "https://github.com/ccache/ccache/releases/download/v$CCACHE_VERSION/ccache-$CCACHE_VERSION-darwin.tar.gz" "$CCACHE_SHA256" toolchains/ccache --strip-components 1 "ccache-$CCACHE_VERSION-darwin/ccache"
+      - name: Compiler cache settings
+        id: ccache
+        run: .github/gw2/ccache.zsh setup ${{ matrix.arch }} ${{ matrix.cross }}
+      - name: Restore the compiler cache
+        if: github.event_name == 'pull_request'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: ${{ steps.ccache.outputs.key }}
+          restore-keys: ${{ steps.ccache.outputs.prefix }}
+          path: ${{ runner.temp }}/ccache
+
+      - name: Build
+        run: |
+          llvm=()
+          # relative: meson refuses an absolute include path inside the source tree
+          [[ ${{ matrix.arch }} == x86_64 ]] && llvm=(-Dnative_llvm_path=toolchains/llvm)
+          export PATH="$CCACHE_LINKS:$PATH"
+          meson setup build --cross-file ${{ matrix.cross }} --buildtype release --strip \
+            --prefix "$PWD/install" -Dwine_install_path="$PWD/toolchains/wine" -Ddxmt_debug=false "${llvm[@]}"
+          meson compile -C build 2>&1 | tee build.log
+      - name: Compiler cache statistics
+        run: |
+          { echo '```'; .github/gw2/ccache.zsh stats; echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Save the compiler cache
+        if: github.event_name == 'push' && github.ref == 'refs/heads/gw2-on-mac' && matrix.arch != 'i386'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: ${{ steps.ccache.outputs.key }}
+          path: ${{ runner.temp }}/ccache
+      - name: What a bridge thunk calls
+        run: |
+          { echo '```'; python3 -I .github/gw2/unix-call.py build __wine_unix_call_dispatcher; echo '```'; } |
+            tee -a "$GITHUB_STEP_SUMMARY"
+      - name: No new warnings
+        run: .github/gw2/warnings.zsh build.log .github/gw2/warnings-${{ matrix.arch }}.txt
+      # with gw2-metal since #326: bridge-native-smoke runs on the runner's Metal 3 device
+      # and exits 77 (skipped) without one
+      - name: Meson tests (gw2 suite)
+        if: matrix.arch == 'x86_64'
+        run: meson test -C build --suite gw2 --print-errorlogs
+
+      - name: Stage
+        run: |
+          meson install -C build --quiet
+          rm -f install/*/*.dll.a
+          if [[ ${{ matrix.arch }} == x86_64 ]]; then
+            git -c diff.ignoreSubmodules=all describe --always --dirty >install/VERSION
+            cp COPYING.LIB LICENSE install/
+            # winemetal.so has to find the engine's winemac.so and ntdll.so, not this runner's copies
+            otool -L install/x86_64-unix/winemetal.so | tee /dev/stderr |
+              grep -c -E '^[[:space:]]+@rpath/(winemac|ntdll)\.so ' | grep -qx 2
+          fi
+          find install -type f | sort
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: part-${{ matrix.arch }}-${{ env.COMMIT }}
+          path: install
+          retention-days: 1
+          if-no-files-found: error
+
+  artifact:
+    name: Artifact
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/upload-artifact/merge@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dxmt-${{ env.COMMIT }}
+          pattern: part-*-${{ env.COMMIT }}
+          retention-days: 7
+
+  arm64:
+    name: Build arm64
+    runs-on: xcode-27
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.COMMIT }}
+          fetch-depth: 0
+          submodules: true
+          persist-credentials: false
+      - name: Select Xcode
+        run: sudo xcode-select -s "/Applications/Xcode_$XCODE_VERSION.app"
+      # Some runners of the image have Xcode without its Metal Toolchain component, and the shader
+      # compile then fails (run 44025579828). Such a runner downloads it instead.
+      - name: Metal Toolchain
+        run: |
+          if ! xcrun -sdk macosx metal --version >/dev/null 2>&1; then
+            echo "::warning::this runner's Xcode can't run metal, so the job downloads its Metal Toolchain"
+            xcodebuild -downloadComponent MetalToolchain
+          fi
+          xcrun -sdk macosx metal --version
+
+      # What the build links against and what the checks compare with: the engine's winemac.so and
+      # ntdll.so, its ntdll.dll and import libraries for both arches and its own DXMT (the tree and
+      # the winemetal.so the tree links to). Read, never run.
+      - name: Restore Mach9
+        id: mach9
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: mach9-${{ env.MACH9_VERSION }}-ntdll
+          path: toolchains/mach9
+      - name: Download Mach9
+        if: steps.mach9.outputs.cache-hit != 'true'
+        run: |
+          w=wine/lib/wine
+          .github/gw2/toolchain.zsh fetch \
+            "https://github.com/athei/mach9/releases/download/$MACH9_VERSION/wine-$MACH9_VERSION-macos-arm64.tar.xz" \
+            "$MACH9_SHA256" toolchains/mach9 --strip-components 1 \
+            $w/aarch64-unix/winemac.so $w/aarch64-unix/ntdll.so $w/aarch64-unix/winemetal.so $w/dxgi/dxmt \
+            $w/aarch64-windows/libwinecrt0.a $w/aarch64-windows/libntdll.a $w/aarch64-windows/libdbghelp.a \
+            $w/i386-windows/libwinecrt0.a $w/i386-windows/libntdll.a $w/i386-windows/libdbghelp.a \
+            $w/aarch64-windows/ntdll.dll $w/i386-windows/ntdll.dll
+          find toolchains/mach9 | sort
+      - name: Save Mach9
+        if: steps.mach9.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: mach9-${{ env.MACH9_VERSION }}-ntdll
+          path: toolchains/mach9
+
+      - name: Restore Wine
+        id: wine
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: wine-arm64ec-${{ env.WINE_ARM64EC_VERSION }}
+          path: toolchains/wine
+      - name: Download Wine
+        if: steps.wine.outputs.cache-hit != 'true'
+        run: .github/gw2/toolchain.zsh fetch "https://github.com/3Shain/wine/releases/download/$WINE_ARM64EC_VERSION/$WINE_ARM64EC_VERSION.tar.gz" "$WINE_ARM64EC_SHA256" toolchains/wine --strip-components 2
+      - name: Save Wine
+        if: steps.wine.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: wine-arm64ec-${{ env.WINE_ARM64EC_VERSION }}
+          path: toolchains/wine
+
+      - name: Restore llvm-mingw
+        id: mingw
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: llvm-mingw-${{ env.LLVM_MINGW_VERSION }}
+          path: toolchains/llvm-mingw
+      - name: Download llvm-mingw
+        if: steps.mingw.outputs.cache-hit != 'true'
+        run: .github/gw2/toolchain.zsh fetch "https://github.com/mstorsjo/llvm-mingw/releases/download/$LLVM_MINGW_VERSION/llvm-mingw-$LLVM_MINGW_VERSION-ucrt-macos-universal.tar.xz" "$LLVM_MINGW_SHA256" toolchains/llvm-mingw --strip-components 1
+      - name: Save llvm-mingw
+        if: steps.mingw.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: llvm-mingw-${{ env.LLVM_MINGW_VERSION }}
+          path: toolchains/llvm-mingw
+
+      - name: Install meson
+        run: pip3 install --break-system-packages "meson==$MESON_VERSION" "ninja==$NINJA_VERSION"
+      - name: Restore LLVM
+        id: llvm
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: llvm-${{ env.LLVM_VERSION }}-arm64-macos${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ env.LLVM_BUILD }}
+          path: toolchains/llvm
+      - name: Build LLVM
+        if: steps.llvm.outputs.cache-hit != 'true'
+        run: .github/gw2/toolchain.zsh llvm arm64 toolchains/llvm
+      - name: Save LLVM
+        if: steps.llvm.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: llvm-${{ env.LLVM_VERSION }}-arm64-macos${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ env.LLVM_BUILD }}
+          path: toolchains/llvm
+
+      # ccache (#305, #346). A pull request reads the newest cache of its toolchain. A push never
+      # reads one: it compiles through an empty ccache and saves it under its commit.
+      - name: Fetch ccache
+        run: .github/gw2/toolchain.zsh fetch "https://github.com/ccache/ccache/releases/download/v$CCACHE_VERSION/ccache-$CCACHE_VERSION-darwin.tar.gz" "$CCACHE_SHA256" toolchains/ccache --strip-components 1 "ccache-$CCACHE_VERSION-darwin/ccache"
+      - name: Compiler cache settings
+        id: ccache
+        run: PATH="$PATH:$PWD/toolchains/llvm-mingw/bin" .github/gw2/ccache.zsh setup arm64 build-arm64ec.txt build-win32.txt
+      - name: Restore the compiler cache
+        if: github.event_name == 'pull_request'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: ${{ steps.ccache.outputs.key }}
+          restore-keys: ${{ steps.ccache.outputs.prefix }}
+          path: ${{ runner.temp }}/ccache
+
+      - name: Build
+        run: |
+          # appended, as Mach9 does: llvm-mingw's unprefixed clang mustn't replace Apple's, which
+          # builds winemetal.so and airconv
+          export PATH="$CCACHE_LINKS:$PATH:$PWD/toolchains/llvm-mingw/bin"
+          # meson takes <wine_install_path>/bin/winebuild; the engine's own is never run
+          mkdir -p toolchains/mach9/bin
+          ln -sf "$PWD/toolchains/wine/bin/winebuild" toolchains/mach9/bin/winebuild
+          arm64ec-w64-mingw32-gcc --version | head -1
+          # ccache (#307): each tree logs its own statistics. clang refuses -marm64x together with -E
+          # ("unsupported option '-marm64x' for target 'arm64ec-w64-mingw32'"), so ccache can't
+          # preprocess the ARM64X tree's cross compiles and counts each as "Preprocessing failed".
+          # Depend mode takes the headers from the -MD file the compile writes and never preprocesses.
+          stats=${CCACHE_STATSLOG%.log}
+          export CCACHE_STATSLOG=$stats-build-arm64.log CCACHE_DEPEND=1
+          meson setup build-arm64 --cross-file build-arm64ec.txt --buildtype release --strip --prefix "$PWD/install" \
+            -Dwine_install_path=toolchains/mach9 -Dnative_llvm_path=toolchains/llvm
+          meson compile -C build-arm64
+          meson install -C build-arm64 --quiet
+          unset CCACHE_DEPEND
+          export CCACHE_STATSLOG=$stats-build-i386.log
+          meson setup build-i386 --cross-file build-win32.txt --buildtype release --strip --prefix "$PWD/install" \
+            -Dwine_install_path=toolchains/mach9
+          meson compile -C build-i386
+          meson install -C build-i386 --quiet
+      - name: Compiler cache statistics
+        run: |
+          { echo '```'; .github/gw2/ccache.zsh stats; echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Save the compiler cache
+        if: github.event_name == 'push' && github.ref == 'refs/heads/gw2-on-mac'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: ${{ steps.ccache.outputs.key }}
+          path: ${{ runner.temp }}/ccache
+      - name: What a bridge thunk calls
+        run: |
+          export PATH="$PATH:$PWD/toolchains/llvm-mingw/bin"
+          # the build trees' winemetal.dll still has its symbols; meson install stripped the copies
+          {
+            echo '```'
+            python3 -I .github/gw2/unix-call.py build-arm64 __wine_unix_call_arm64ec toolchains/llvm-mingw/bin/llvm-objdump
+            python3 -I .github/gw2/unix-call.py build-i386 __wine_unix_call_dispatcher
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Stage
+        run: |
+          rm -f install/*/*.dll.a
+          find install -type f | sort
+          mkdir dist
+          mv install/aarch64-windows install/i386-windows install/aarch64-unix dist/
+          rmdir install
+          wine=$(strings -a toolchains/mach9/lib/wine/aarch64-unix/ntdll.so | grep -oE 'wine-[0-9]+\.[0-9]+(-[0-9]+-g[0-9a-f]+)?' | sort -u)
+          {
+            git -c diff.ignoreSubmodules=all describe --always --dirty
+            echo "commit: $COMMIT"
+            echo "engine: Mach9 $MACH9_VERSION (wine-$MACH9_VERSION-macos-arm64.tar.xz, sha256 $MACH9_SHA256), $wine"
+            echo "toolchain: llvm-mingw $LLVM_MINGW_VERSION, Xcode $XCODE_VERSION (macOS SDK $(xcrun -sdk macosx --show-sdk-version)), LLVM $LLVM_VERSION, macOS $MACOSX_DEPLOYMENT_TARGET, meson $MESON_VERSION"
+          } >dist/VERSION
+          cp COPYING.LIB LICENSE dist/
+          cat dist/VERSION
+          find dist -type f | sort
+      - name: Checks without Wine
+        run: .github/gw2/check-mach9.zsh dist toolchains/mach9 toolchains/llvm-mingw/bin/llvm-readobj | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: The checks fail on a broken copy
+        env:
+          # #200: the published build of 2483559, from before build-arm64ec.txt targeted armv8.4-a
+          UNFLAGGED: https://github.com/jdrly/dxmt/releases/download/mach9-builds/dxmt-mach9-2483559b9ebe6c4b4e851ddd6df9dc7d603da561.tar.xz
+          UNFLAGGED_SHA256: e4fa20097890b4c6d441b4d2feb2b5a8d87840b6163c14487b30c8153b245d47
+        run: |
+          # an export without an address in each tree, an i386 DLL where an ARM64X one belongs (which
+          # has no ARM64 code to count exclusive pairs in or x64 entries to read), an import from
+          # ntdll.dll that the engine's doesn't export (the name renamed in place), and a dxgi.dll
+          # built without LSE, from before #248 (CreateSwapChain enters CreateSwapChainForHwnd)
+          cp -R dist "$RUNNER_TEMP/broken"
+          .github/gw2/toolchain.zsh fetch "$UNFLAGGED" "$UNFLAGGED_SHA256" "$RUNNER_TEMP/unflagged" aarch64-windows/dxgi.dll aarch64-windows/d3d11.dll
+          cp "$RUNNER_TEMP/unflagged/aarch64-windows/dxgi.dll" "$RUNNER_TEMP/broken/aarch64-windows/dxgi.dll"
+          python3 -I .github/gw2/zero-export.py "$RUNNER_TEMP/broken/aarch64-windows/d3d11.dll" D3D11CreateDevice
+          python3 -I .github/gw2/zero-export.py "$RUNNER_TEMP/broken/i386-windows/dxgi.dll" CreateDXGIFactory
+          cp "$RUNNER_TEMP/broken/i386-windows/d3d10core.dll" "$RUNNER_TEMP/broken/aarch64-windows/d3d10core.dll"
+          perl -0777 -pi -e 's/NtQueryVirtualMemory\0/NtQueryVirtualMemorz\0/' "$RUNNER_TEMP/broken/i386-windows/winemetal.dll"
+          status=0
+          .github/gw2/check-mach9.zsh "$RUNNER_TEMP/broken" toolchains/mach9 toolchains/llvm-mingw/bin/llvm-readobj >"$RUNNER_TEMP/broken.txt" || status=$?
+          grep FAIL "$RUNNER_TEMP/broken.txt"
+          [[ $status == 1 ]] && [[ $(grep -c '^FAIL' "$RUNNER_TEMP/broken.txt") == 9 ]]
+          grep -q '^FAIL  i386-windows/winemetal.dll imports from ntdll.dll' "$RUNNER_TEMP/broken.txt"
+          grep -q '^FAIL  aarch64-windows/dxgi.dll has [0-9]* exclusive-pair instructions' "$RUNNER_TEMP/broken.txt"
+          grep -q "^FAIL  aarch64-windows/dxgi.dll: an x64 entry's ARM64EC code enters another" "$RUNNER_TEMP/broken.txt"
+          grep -qxF '      dxmt::MTLDXGIFactory::CreateSwapChain(IUnknown*, DXGI_SWAP_CHAIN_DESC*, IDXGISwapChain**) -> dxmt::MTLDXGIFactory::CreateSwapChainForHwnd(IUnknown*, HWND__*, DXGI_SWAP_CHAIN_DESC1 const*, DXGI_SWAP_CHAIN_FULLSCREEN_DESC const*, IDXGIOutput*, IDXGISwapChain1**)' "$RUNNER_TEMP/broken.txt"
+          # #248: the same build's d3d11.dll, where Present entered Present1 and ResizeBuffers1 entered
+          # ResizeBuffers, in both swap chains (with and without MetalFX)
+          python3 -I .github/gw2/patchable-calls.py toolchains/llvm-mingw/bin/llvm-readobj "$RUNNER_TEMP/unflagged/aarch64-windows/d3d11.dll" |
+            tee "$RUNNER_TEMP/crossings.txt"
+          [[ $(head -1 "$RUNNER_TEMP/crossings.txt") =~ ^d3d11\.dll\ [0-9]+\ 4$ ]]
+          grep -qxF 'dxmt::MTLD3D11SwapChain<true>::Present(unsigned int, unsigned int) -> dxmt::MTLD3D11SwapChain<true>::Present1(unsigned int, unsigned int, DXGI_PRESENT_PARAMETERS const*)' "$RUNNER_TEMP/crossings.txt"
+          grep -qxF 'dxmt::MTLD3D11SwapChain<false>::Present(unsigned int, unsigned int) -> dxmt::MTLD3D11SwapChain<false>::Present1(unsigned int, unsigned int, DXGI_PRESENT_PARAMETERS const*)' "$RUNNER_TEMP/crossings.txt"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dxmt-arm64-${{ env.COMMIT }}
+          path: dist
+          retention-days: 7
+          if-no-files-found: error
+
+  # gw2 (#273): whether a green pull request run tested this push's tree. Then the push skips
+  # Native tests, which that run ran on the same files: every job checks out the pull request's
+  # head, not GitHub's merge. The job also asks that gw2-on-mac before the push (the commit's
+  # parent) is an ancestor of that head (#310). A pull request's run takes its workflow from the
+  # merge into gw2-on-mac, so only then were the run's steps the head's own. Any other push, and a
+  # lookup that fails, run the tests.
+  tested:
+    name: Tested tree
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    outputs:
+      green: ${{ steps.look.outputs.green }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Whether a green pull request tested this tree
+        id: look
+        run: |
+          green=0
+          if [[ $GITHUB_EVENT_NAME == push ]]; then
+            tree=$(gh api "repos/$GH_REPO/commits/$COMMIT" -q .commit.tree.sha) || tree=""
+            parent=$(gh api "repos/$GH_REPO/commits/$COMMIT" -q '.parents[0].sha // empty') || parent=""
+            while read -r pr head; do
+              [[ -n $pr && -n $tree && -n $parent ]] || continue
+              [[ $(gh api "repos/$GH_REPO/commits/$head" -q .commit.tree.sha) == "$tree" ]] || continue
+              [[ $(gh api "repos/$GH_REPO/compare/$parent...$head" -q .status) == ahead ]] || continue
+              run=$(gh api "repos/$GH_REPO/actions/workflows/gw2.yml/runs?event=pull_request&status=success&head_sha=$head" \
+                -q '.workflow_runs[0].html_url // empty') || run=""
+              if [[ -n $run ]]; then
+                green=1
+                echo "pull request #$pr's green run tested this tree: $run" | tee -a "$GITHUB_STEP_SUMMARY"
+                break
+              fi
+            done < <(gh api "repos/$GH_REPO/commits/$COMMIT/pulls" -q '.[] | select(.merged_at != null) | "\(.number) \(.head.sha)"')
+            if (( !green )); then
+              echo "::warning::no green pull request run tested the tree of $COMMIT, so this push runs Native tests" |
+                tee -a "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+          echo "green=$green" >>"$GITHUB_OUTPUT"
+
+  tests:
+    name: Native tests
+    needs: tested
+    if: needs.tested.outputs.green != '1'
+    runs-on: xcode-27
+    timeout-minutes: 30
+    env:
+      GW2_TEST_DIR: ${{ github.workspace }}/gw2-tests
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.COMMIT }}
+          persist-credentials: false
+      # here, not in lint: macOS has zsh, so no package mirror can fail the check (#174)
+      - name: zsh syntax
+        run: |
+          for f in tests/gw2/*.zsh .github/gw2/*.zsh; do zsh -n "$f"; echo "ok $f"; done
+      - name: warnings.zsh self-check
+        run: |
+          # a warning with a location (through nt/../), one without, and a line that isn't one
+          log=$RUNNER_TEMP/warnings.log base=$RUNNER_TEMP/warnings.txt
+          printf '%s\n' "../../src/airconv/nt/../air_type.hpp:12:3: warning: x [-Wreturn-type]" \
+            "warning: unknown warning option '-Wfoo' [-Wunknown-warning-option]" "[3/9] Compiling C++ object" >"$log"
+          printf '%s\n' "src/airconv/air_type.hpp: warning: x [-Wreturn-type]" \
+            "warning: unknown warning option '-Wfoo' [-Wunknown-warning-option]" >"$base"
+          .github/gw2/warnings.zsh "$log" "$base"
+          ! .github/gw2/warnings.zsh "$log" /dev/null
+      # the sync's helper (docs/agents/upstream-sync.md): its parsing and numbering, no git needed
+      - name: upstream-bridge-calls self-test
+        run: python3 -I tools/gw2/upstream-bridge-calls.py --self-test
+      # docs/gw2/README.md's switch table names exactly the switches src/ reads, with the declared
+      # bool and number defaults and a status for each; text only, no build
+      - name: Switch table against the sources
+        run: |
+          python3 -I .github/gw2/switch-table.py --self-test
+          python3 -I .github/gw2/switch-table.py
+      - name: Select Xcode
+        run: sudo xcode-select -s "/Applications/Xcode_$XCODE_VERSION.app"
+      # it runs on the Mac, with the game's recipes and AIR; here it only has to build (#159)
+      - name: Cold-cache benchmark builds
+        run: clang -x objective-c -fobjc-arc -O1 -Wall -arch x86_64 tests/gw2/stagecache_bench.m -framework Metal -framework Foundation -lsqlite3 -o "$RUNNER_TEMP/stagecache"
+      # they need a GUI session, a display and Metal 4; they run on my Mac (#225)
+      - name: Display tests build
+        run: tests/gw2/run.zsh display --build-only
+      # one call (#308): run.zsh builds every program first, several at a time, and then runs them
+      # one after the other
+      - name: Pure and Metal tests
+        run: |
+          status=0
+          tests/gw2/run.zsh all | tee "$RUNNER_TEMP/tests.txt" || status=$?
+          # each skipped test's own reason, and the device it saw
+          awk '$1 == "skip" { print $2 }' "$RUNNER_TEMP/tests.txt" | while read -r t; do
+            echo "== $t"
+            grep -i -E 'skip|device' "$GW2_TEST_DIR/$t.log" | head -4 || true
+          done
+          exit "$status"
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.COMMIT }}
+          persist-credentials: false
+      - name: actionlint
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          f="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/$f" "https://github.com/rhysd/actionlint/releases/download/v$ACTIONLINT_VERSION/$f"
+          echo "$ACTIONLINT_SHA256  $RUNNER_TEMP/$f" | sha256sum -c
+          tar -xzf "$RUNNER_TEMP/$f" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" -color .github/workflows/gw2.yml
+
+  publish:
+    name: Publish
+    needs: [tested, build, artifact, arm64, tests, lint]
+    # Native tests may be skipped, and only when a green pull request ran them on this tree
+    if: >-
+      ${{ !cancelled() && needs.build.result == 'success' && needs.artifact.result == 'success' &&
+      needs.arm64.result == 'success' && needs.lint.result == 'success' &&
+      (needs.tests.result == 'success' ||
+      (needs.tests.result == 'skipped' && needs.tested.outputs.green == '1')) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    # Two pushes never upload at once: the workflow's concurrency group runs one push to gw2-on-mac
+    # at a time and never cancels it. A group of this job's own would let a pull request's pending
+    # job cancel a push's.
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE: arm64-builds
+      NAME: dxmt-arm64-${{ github.event.pull_request.head.sha || github.sha }}.tar.xz
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dxmt-arm64-${{ env.COMMIT }}
+          path: dist
+      - name: Pack
+        run: |
+          # VERSION as the arm64 job wrote it: git describe of this commit (no lightweight tag
+          # such as arm64-builds), then commit:
+          describe=$(head -1 dist/VERSION)
+          [[ $describe =~ ^v[0-9][^[:space:]]*-[0-9]+-g([0-9a-f]{7,})$ ]]
+          [[ $COMMIT == "${BASH_REMATCH[1]}"* ]]
+          grep -qx "commit: $COMMIT" dist/VERSION
+          # the artifact keeps no modes: directories and .so 755, the rest 644
+          chmod -R u=rwX,go=rX dist
+          find dist -name '*.so' -exec chmod 755 {} +
+          (cd dist && find . -type f | sort | xargs sha256sum) >"$RUNNER_TEMP/files.sha256"
+          tar --sort=name --owner=0 --group=0 --numeric-owner -C dist -cJf "$NAME" \
+            aarch64-windows i386-windows aarch64-unix VERSION LICENSE COPYING.LIB
+          tar -tvJf "$NAME"
+          # the archive unpacks to the artifact's files, sha256 for sha256, and nothing else
+          mkdir "$RUNNER_TEMP/unpacked"
+          tar -xJf "$NAME" -C "$RUNNER_TEMP/unpacked"
+          (cd "$RUNNER_TEMP/unpacked" && find . -type f | sort | xargs sha256sum) | diff "$RUNNER_TEMP/files.sha256" -
+          cat "$RUNNER_TEMP/files.sha256"
+          sha256sum "$NAME" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Upload to the pre-release ${{ env.RELEASE }}
+        if: github.event_name == 'push' && github.ref == 'refs/heads/gw2-on-mac'
+        run: |
+          if ! gh release view "$RELEASE" >/dev/null 2>&1; then
+            gh release create "$RELEASE" --prerelease --latest=false --target "$COMMIT" --title "arm64 builds of my DXMT fork" \
+              --notes "CI output for GW2 on Mac's arm64 line, not a release of DXMT: my fork's build for the arm64 engine (athei's Mach9 $MACH9_VERSION), built and checked by .github/workflows/gw2.yml for each push to gw2-on-mac. One asset per commit, dxmt-arm64-<full sha>.tar.xz, in the layout of the engine's lib/wine/dxgi/dxmt; the 30 newest stay."
+          fi
+          # a lightweight tag, which git describe (the arm64 job's VERSION) skips
+          [[ $(gh api "repos/$GH_REPO/git/ref/tags/$RELEASE" -q .object.type) == commit ]]
+          uploaded=0
+          if gh release view "$RELEASE" --json assets -q '.assets[].name' | grep -qxF "$NAME"; then
+            echo "$NAME is there already, and a published file is never replaced"
+          else
+            gh release upload "$RELEASE" "$NAME"
+            uploaded=1
+          fi
+          # the 30 newest assets stay
+          id=$(gh api "repos/$GH_REPO/releases/tags/$RELEASE" -q .id)
+          gh api --paginate "repos/$GH_REPO/releases/$id/assets?per_page=100" -q '.[] | [.created_at, .id, .name] | @tsv' |
+            grep -P '\tdxmt-arm64-[0-9a-f]{40}\.tar\.xz$' | sort -r | tail -n +31 | while IFS=$'\t' read -r _ asset old; do
+              echo "deleting $old"
+              gh api -X DELETE "repos/$GH_REPO/releases/assets/$asset"
+            done
+          digest=$(gh api "repos/$GH_REPO/releases/tags/$RELEASE" -q ".assets[] | select(.name == \"$NAME\") | .digest")
+          echo "$RELEASE has $NAME, $digest" | tee -a "$GITHUB_STEP_SUMMARY"
+          [[ $digest == sha256:* ]]
+          # what anyone downloads by URL is what GitHub reports, and, when this run uploaded it, this archive
+          url="https://github.com/$GH_REPO/releases/download/$RELEASE/$NAME"
+          # --retry-all-errors: a 404 too, in case the URL lags behind the upload
+          curl -fsSL --retry 5 --retry-all-errors -o "$RUNNER_TEMP/download.tar.xz" "$url"
+          [[ $digest == "sha256:$(sha256sum "$RUNNER_TEMP/download.tar.xz" | cut -d' ' -f1)" ]]
+          (( !uploaded )) || cmp "$RUNNER_TEMP/download.tar.xz" "$NAME"
+          echo "$url" | tee -a "$GITHUB_STEP_SUMMARY"
+          latest=$(gh api "repos/$GH_REPO/releases/latest" -q .tag_name 2>/dev/null || true)
+          echo "releases/latest: ${latest:-none}"
+          [[ $latest != "$RELEASE" ]]

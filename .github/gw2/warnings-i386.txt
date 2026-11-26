@@ -1,0 +1,1 @@
+src/dxgi/dxgi_adapter.cpp: warning: no return statement in function returning non-void [-Wreturn-type]
