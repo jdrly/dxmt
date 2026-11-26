@@ -1,6 +1,7 @@
 #pragma once
 #include "Metal.hpp"
 #include "dxmt_command.hpp"
+#include "dxmt_gw2_layer_poll.hpp"
 #include "dxmt_gw2_mtl4_encoding.hpp"
 #include "rc/util_rc.hpp"
 #include "util_cpu_fence.hpp"
@@ -115,6 +116,8 @@ private:
   WMTColorSpace display_colorspace_ = WMTColorSpaceSRGB;
   WMTHDRMetadata display_hdr_metadata_;
   WMTEDRValue display_edr_value_{0.0, 1.0};
+  // gw2 (#156): when synchronizeLayerProperties asks the bridge for the values above again
+  gw2::LayerPropsPoll layer_poll_;
   uint64_t gamma_version_ = 0;
   std::array<float, DXMT_GAMMA_CP_COUNT * 4> gamma_lut_rgba_;
   WMT::Reference<WMT::Texture> gamma_lut_texture_;

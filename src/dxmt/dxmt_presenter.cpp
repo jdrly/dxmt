@@ -5,17 +5,24 @@
 #include "dxmt_presenter.hpp"
 #include "dxmt_gw2_lifetime.hpp"
 #include "dxmt_gw2_stats.hpp"
+#include "dxmt_gw2_switches.hpp"
 #include "util_likely.hpp"
 #include "log/log.hpp"
 
 
 namespace dxmt {
 
+namespace {
+// gw2 (#156): how often Present asks the bridge for the layer's screen values, in ms (0: every Present)
+sw::Switch<uint32_t> kLayerPropsPollMs{"DXMT_LAYER_PROPS_POLL_MS", 250, sw::legacy::strtoul32};
+} // namespace
+
 Presenter::Presenter(WMT::Device device, WMT::MetalLayer layer, InternalCommandLibrary &lib, float scale_factor, uint8_t sample_count) :
     device_(device),
     layer_(layer),
     lib_(lib),
-    sample_count_(sample_count) {
+    sample_count_(sample_count),
+    layer_poll_(int64_t(kLayerPropsPollMs()) * 1'000'000) {
   layer_.getProps(layer_props_);
   layer_props_.device = device;
   layer_props_.opaque = true;
@@ -50,6 +57,7 @@ Presenter::changeLayerProperties(
   layer_props_.drawable_height = height;
   layer_props_.drawable_width = width;
   colorspace_ = colorspace;
+  layer_poll_.invalidate(); // gw2 (#156): a resize asks the bridge again at the next Present
   if (should_invalidated)
     pso_valid.clear(); // defer changes
   else
@@ -115,15 +123,32 @@ Presenter::changeDisplaySync(bool enabled) {
 
 Presenter::PresentState
 Presenter::synchronizeLayerProperties() {
-  uint64_t display_setting_version = 0;
+  // gw2 (#156): the bridge call walks the layer's view, window and screen and builds the screen's
+  // device description on every call; between asks the last answer stands (DXMT_LAYER_PROPS_POLL_MS)
+  if (layer_poll_.due(gw2::nowNs())) {
+    uint64_t display_setting_version = 0;
+    auto last_colorspace = display_colorspace_;
+    auto last_edr = display_edr_value_;
 
-  WMTQueryDisplaySettingForLayer(
-      layer_.handle, &display_setting_version, &display_colorspace_, &display_hdr_metadata_, &display_edr_value_
-  );
+    WMTQueryDisplaySettingForLayer(
+        layer_.handle, &display_setting_version, &display_colorspace_, &display_hdr_metadata_, &display_edr_value_
+    );
 
-  if (display_setting_version != display_setting_version_) {
-    display_setting_version_ = display_setting_version;
-    pso_valid.clear();
+    bool changed = display_setting_version != display_setting_version_ || display_colorspace_ != last_colorspace ||
+                   display_edr_value_.maximum_edr_color_component_value != last_edr.maximum_edr_color_component_value ||
+                   display_edr_value_.maximum_potential_edr_color_component_value !=
+                       last_edr.maximum_potential_edr_color_component_value;
+    if (changed)
+      Logger::info(str::format(
+          "Presenter: display setting version=", display_setting_version, " colorspace=", (int)display_colorspace_,
+          " edr=", display_edr_value_.maximum_edr_color_component_value,
+          " potential=", display_edr_value_.maximum_potential_edr_color_component_value
+      ));
+
+    if (display_setting_version != display_setting_version_) {
+      display_setting_version_ = display_setting_version;
+      pso_valid.clear();
+    }
   }
 
   auto final_colorspace = display_setting_version_ > 0 ? display_colorspace_ : colorspace_;
