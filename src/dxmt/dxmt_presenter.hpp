@@ -5,6 +5,7 @@
 #include "util_cpu_fence.hpp"
 #include "winemetal.h"
 #include <atomic>
+#include <chrono>
 
 namespace dxmt {
 
@@ -68,6 +69,9 @@ public:
 
   PresentState synchronizeLayerProperties();
 
+  // gw2: how long the last nextDrawable took (#3)
+  std::chrono::high_resolution_clock::duration lastNextDrawable() const { return last_next_drawable_; }
+
   WMT::MetalDrawable encodeCommands(
       WMT::CommandBuffer cmdbuf, WMT::Texture backbuffer, DXMTPresentMetadata metadata,
       std::function<void(WMT::RenderCommandEncoder)> &&wait_fences,
@@ -77,6 +81,7 @@ public:
 private:
   void buildRenderPipelineState(bool is_pq, bool with_hdr_metadata, bool is_ms, bool gamma_enable);
 
+  std::chrono::high_resolution_clock::duration last_next_drawable_{};
   WMT::Device device_;
   WMT::MetalLayer layer_;
   InternalCommandLibrary &lib_;

@@ -9,6 +9,7 @@
 #include "dxmt_context.hpp"
 #include "dxmt_hud_state.hpp"
 #include "dxmt_statistics.hpp"
+#include "dxmt_gw2_stats.hpp"
 #include "dxmt_presenter.hpp"
 #include "log/log.hpp"
 #include "d3d11_resource.hpp"
@@ -26,6 +27,7 @@
 #include <atomic>
 #include <cfloat>
 #include <format>
+#include <algorithm>
 #include <thread>
 
 /**
@@ -755,7 +757,9 @@ public:
     if (PresentFlags & DXGI_PRESENT_TEST)
       return hr;
 
+    PresentStart();
     ThrottleBackground();
+    int64_t gw2_present_t0 = gw2::nowNs();
 
     if (should_exit_fs)
       SetFullscreenState(FALSE, nullptr);
@@ -844,10 +848,46 @@ public:
 
     lock.unlock(); // since PresentBoundary() will and should only stall current thread
 
+    if (gw2::statsEnabled())
+      gw2::apiAdd(gw2::Api::Present, uint64_t(gw2::nowNs() - gw2_present_t0));
+
     cmd_queue.PresentBoundary();
 
     return hr;
   };
+
+  // gw2 (#3): the game's own pacing, HITCH lines and the startup line, at the top of Present on
+  // the game's render thread.
+  void PresentStart() {
+    if (!gw2::statsEnabled())
+      return;
+    static const double s_hitch_ms = [] {
+      auto v = env::getEnvVar("DXMT_HITCH_MS");
+      return v.empty() ? 50.0 : std::strtod(v.c_str(), nullptr);
+    }();
+    gw2::logStartup(str::format(
+        "chunks=", kCommandChunkCount, " cpus=", GetActiveProcessorCount(ALL_PROCESSOR_GROUPS), " refresh=",
+        init_refresh_rate_ != DBL_MAX ? init_refresh_rate_ : 0.0
+    ));
+    gw2::apiCall(gw2::Api::Present);
+    double interval = gw2::appPresent();
+    auto &cmd_queue = device_->GetDXMTDevice().queue();
+    if (s_hitch_ms > 0 && interval >= s_hitch_ms) {
+      auto ms = [](auto d) { return std::chrono::duration<double, std::milli>(d).count(); };
+      auto &f = cmd_queue.CurrentFrameStatistics();
+      auto api = gw2::apiFrameOfThisThread();
+      std::string cats;
+      for (unsigned i = 0; i < gw2::kApiCount; i++)
+        if (api.calls[i])
+          cats += str::format(" ", gw2::kApiNames[i], "=", std::format("{:.1f}", api.ns[i] / 1e6), "/", api.calls[i]);
+      Logger::info(std::format(
+          "HITCH frame={} ms={:.1f} commit={:.1f} sync={:.1f}x{} latency={:.1f} bgsleep={}{}", cmd_queue.CurrentFrameSeq(),
+          interval, ms(f.commit_interval), ms(f.sync_interval), f.sync_count, ms(f.present_latency_interval),
+          bg_fps_ ? "on" : "off", cats.empty() ? std::string(" dxmt=none") : " dxmt(ms/calls):" + cats
+      ));
+    }
+    gw2::apiFrameReset();
+  }
 
   // gw2: the background throttle (d9mt 42b0c47). When the window isn't visible, macOS doesn't make
   // presents wait for vsync, so after a Cmd+Tab the game rendered uncapped in the background and
@@ -920,6 +960,8 @@ public:
     uint32_t frames = 0, cb = 0, rp = 0, rp_opt = 0, clear = 0, split = 0, sync = 0, stall = 0;
     double frame_max = 0, drawable = 0, drawable_max = 0, commit = 0, commit_max = 0, sync_ms = 0, sync_max = 0;
     double prepare = 0, flush = 0, flush_max = 0, latency = 0, latency_max = 0;
+    double next_drawable = 0, next_drawable_max = 0, wait = 0, wait_max = 0;
+    uint32_t br_plain = 0, br_deadline = 0, br_after = 0;
   } stats_;
   bool stats_enabled_ = env::getEnvVar("DXMT_STATS") != "0";
   std::atomic<double> stats_deadline_ms_ = 0;
@@ -954,6 +996,14 @@ public:
     w.flush_max = std::max(w.flush_max, ms(frame.encode_flush_interval - frame.drawable_blocking_interval));
     w.latency += ms(frame.present_latency_interval);
     w.latency_max = std::max(w.latency_max, ms(frame.present_latency_interval));
+    w.next_drawable += ms(frame.next_drawable_interval);
+    w.next_drawable_max = std::max(w.next_drawable_max, ms(frame.next_drawable_interval));
+    double wait = ms(frame.commit_interval + frame.sync_interval + frame.present_latency_interval);
+    w.wait += wait;
+    w.wait_max = std::max(w.wait_max, wait);
+    w.br_plain += frame.present_plain;
+    w.br_deadline += frame.present_deadline;
+    w.br_after += frame.present_after;
     double elapsed = ms(now - w.start);
     if (elapsed < 2000)
       return;
@@ -967,8 +1017,71 @@ public:
         w.sync_max, w.stall, w.prepare / n, w.flush / n, w.flush_max, w.latency / n, w.latency_max, frame.latency,
         stats_sync_interval_.load(), stats_deadline_ms_.load()
     ));
+    Logger::info(std::format(
+        "STATS2 nextdrawable={:.2f}/{:.1f} present=plain:{}/deadline:{}/after:{} wait={:.2f}/{:.1f}", w.next_drawable / n,
+        w.next_drawable_max, w.br_plain, w.br_deadline, w.br_after, w.wait / n, w.wait_max
+    ));
+    LogPace(elapsed);
+    LogGpu();
+    gw2::emitSections(elapsed, w.frames);
     w = StatsWindow{};
     w.start = w.last = now;
+  }
+
+  // gw2 (#3): the game's own Present-to-Present interval on its render thread, and the render
+  // thread's time inside DXMT (Draw/Dispatch sampled 1 in 16 and scaled; Map includes its waits).
+  void LogPace(double elapsed) {
+    auto app = gw2::appDrain();
+    auto api = gw2::apiDrain();
+    if (app.empty())
+      return;
+    std::sort(app.begin(), app.end());
+    auto pct = [&](double p) { return app[std::min(app.size() - 1, size_t(p * (app.size() - 1) + 0.5))]; };
+    uint32_t slow33 = 0, slow50 = 0;
+    for (double v : app) {
+      slow33 += v > 33.4;
+      slow50 += v > 50.0;
+    }
+    double frames = app.size();
+    std::string dxmt;
+    double total = 0;
+    for (unsigned i = 0; i < gw2::kApiCount; i++) {
+      total += api.ns[i] / 1e6;
+      dxmt += std::format(" {}={:.2f}/{:.0f}", gw2::kApiNames[i], api.ns[i] / 1e6 / frames, api.calls[i] / frames);
+    }
+    Logger::info(std::format(
+        "PACE app=p50:{:.1f}/p95:{:.1f}/p99:{:.1f}/max:{:.1f} slow33={} slow50={} n={} dxmt={:.2f}ms/frame (sampled 1/16 "
+        "draw+dispatch; ms/calls per frame:{})",
+        pct(0.50), pct(0.95), pct(0.99), app.back(), slow33, slow50, app.size(), total / frames, dxmt
+    ));
+  }
+
+  // gw2 (#3): per frame, the union of DXMT's command buffers' GPU execution spans (not the GPU's
+  // active time) and the gap between one frame's last GPU end and the next one's first GPU start.
+  void LogGpu() {
+    auto frames = gw2::gpuSpanDrain();
+    if (frames.empty())
+      return;
+    double span = 0, span_max = 0, gap = 0, gap_max = 0;
+    uint32_t gaps = 0, buffers = 0, missing = 0;
+    for (size_t i = 0; i < frames.size(); i++) {
+      double s = frames[i].span_ns / 1e6;
+      span += s;
+      span_max = std::max(span_max, s);
+      buffers += frames[i].buffers;
+      missing += frames[i].missing;
+      if (i && frames[i].first_ns && frames[i - 1].last_ns && frames[i].first_ns > frames[i - 1].last_ns) {
+        double g = (frames[i].first_ns - frames[i - 1].last_ns) / 1e6;
+        gap += g;
+        gap_max = std::max(gap_max, g);
+        gaps++;
+      }
+    }
+    double n = frames.size();
+    Logger::info(std::format(
+        "GPU gpuspan={:.2f}/{:.1f} gpugap={:.2f}/{:.1f} frames={} buffers={:.1f} missing={}", span / n, span_max,
+        gaps ? gap / gaps : 0.0, gap_max, frames.size(), buffers / n, missing
+    ));
   }
 
   void UpdateStatistics(const FrameStatisticsContainer& statistics, uint64_t frame_id) {

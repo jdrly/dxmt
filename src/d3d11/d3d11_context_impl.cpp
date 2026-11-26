@@ -21,6 +21,7 @@
  */
 
 #include "Metal.hpp"
+#include "dxmt_gw2_stats.hpp"
 #include "d3d11_annotation.hpp"
 #include "d3d11_context.hpp"
 #include "d3d11_device_child.hpp"
@@ -1293,6 +1294,7 @@ public:
   void
   STDMETHODCALLTYPE
   Draw(UINT VertexCount, UINT StartVertexLocation) override {
+    GW2_API_SAMPLED(Draw);
     if (unlikely(!VertexCount))
       return;
     std::lock_guard<mutex_t> lock(mutex);
@@ -1326,6 +1328,7 @@ public:
   void
   STDMETHODCALLTYPE
   DrawIndexed(UINT IndexCount, UINT StartIndexLocation, INT BaseVertexLocation) override {
+    GW2_API_SAMPLED(Draw);
     if (unlikely(!IndexCount))
       return;
     std::lock_guard<mutex_t> lock(mutex);
@@ -1369,6 +1372,7 @@ public:
   STDMETHODCALLTYPE
   DrawInstanced(UINT VertexCountPerInstance, UINT InstanceCount, UINT StartVertexLocation, UINT StartInstanceLocation)
       override {
+    GW2_API_SAMPLED(Draw);
     if (unlikely(!VertexCountPerInstance || !InstanceCount))
       return;
     std::lock_guard<mutex_t> lock(mutex);
@@ -1408,6 +1412,7 @@ public:
       UINT IndexCountPerInstance, UINT InstanceCount, UINT StartIndexLocation, INT BaseVertexLocation,
       UINT StartInstanceLocation
   ) override {
+    GW2_API_SAMPLED(Draw);
     if (unlikely(!IndexCountPerInstance || !InstanceCount))
       return;
     std::lock_guard<mutex_t> lock(mutex);
@@ -1610,6 +1615,7 @@ public:
   void
   STDMETHODCALLTYPE
   DrawIndexedInstancedIndirect(ID3D11Buffer *pBufferForArgs, UINT AlignedByteOffsetForArgs) override {
+    GW2_API_SAMPLED(Draw);
     std::lock_guard<mutex_t> lock(mutex);
 
     WMTPrimitiveType Primitive;
@@ -1652,6 +1658,7 @@ public:
   void
   STDMETHODCALLTYPE
   DrawInstancedIndirect(ID3D11Buffer *pBufferForArgs, UINT AlignedByteOffsetForArgs) override {
+    GW2_API_SAMPLED(Draw);
     std::lock_guard<mutex_t> lock(mutex);
 
     WMTPrimitiveType Primitive;
@@ -1830,6 +1837,7 @@ public:
   void
   STDMETHODCALLTYPE
   DrawAuto() override {
+    GW2_API_SAMPLED(Draw);
     std::lock_guard<mutex_t> lock(mutex);
 
     EmitST([](ArgumentEncodingContext &enc) { enc.setCompatibilityFlag(FeatureCompatibility::UnsupportedDrawAuto); });
@@ -1838,6 +1846,7 @@ public:
   void
   STDMETHODCALLTYPE
   Dispatch(UINT ThreadGroupCountX, UINT ThreadGroupCountY, UINT ThreadGroupCountZ) override {
+    GW2_API_SAMPLED(Dispatch);
     std::lock_guard<mutex_t> lock(mutex);
 
     if (!PreDispatch())
@@ -1853,6 +1862,7 @@ public:
   void
   STDMETHODCALLTYPE
   DispatchIndirect(ID3D11Buffer *pBufferForArgs, UINT AlignedByteOffsetForArgs) override {
+    GW2_API_SAMPLED(Dispatch);
     std::lock_guard<mutex_t> lock(mutex);
 
     if (!PreDispatch())
