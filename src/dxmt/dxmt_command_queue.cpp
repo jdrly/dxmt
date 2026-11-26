@@ -23,6 +23,7 @@
 #include "dxmt_gw2_residency.hpp"
 #include "dxmt_gw2_metal4.hpp"
 #include "dxmt_gw2_stats.hpp"
+#include "dxmt_gw2_switches.hpp"
 #include "Metal.hpp"
 #include "dxmt_statistics.hpp"
 #include "util_env.hpp"
@@ -40,17 +41,17 @@ namespace dxmt {
 
 namespace {
 
-// gw2 (#8): DXMT_CHUNKS, the ring's size: 32 (default, upstream's), 64 or 128.
+// gw2 (#8): DXMT_CHUNKS, the ring's size: 32 (default, upstream's), 64 or 128 (strtoul's value;
+// anything else is the default, with a warning). Read at each queue's creation, as before.
+// gw2 (#60): declared here; the startup line shows the ring in effect (LogStartup's field).
+sw::Switch<uint32_t> kChunks{"DXMT_CHUNKS", kCommandChunkCount, sw::legacy::ulongOneOf<32, 64, 128>};
+
 uint32_t
 ChunkCountFromEnv() {
-  auto v = env::getEnvVar("DXMT_CHUNKS");
-  if (v.empty())
-    return kCommandChunkCount;
-  auto n = std::strtoul(v.c_str(), nullptr, 10);
-  if (n == 32 || n == 64 || n == 128)
-    return n;
-  WARN("DXMT_CHUNKS=", v, " is not 32, 64 or 128; using ", kCommandChunkCount);
-  return kCommandChunkCount;
+  auto v = kChunks.requested();
+  if (!v.empty() && !sw::legacy::ulongIsOneOf<32, 64, 128>(v))
+    WARN("DXMT_CHUNKS=", v, " is not 32, 64 or 128; using ", kCommandChunkCount);
+  return kChunks.parse(v);
 }
 
 // gw2 (#8): the Metal queue's bound on uncompleted command buffers. Unset DXMT_CHUNKS keeps
@@ -58,7 +59,7 @@ ChunkCountFromEnv() {
 // buffer: one per frame in flight, and SetMaximumFrameLatency allows at most 16 frames.
 uint32_t
 MetalBufferCount(uint32_t chunks) {
-  if (env::getEnvVar("DXMT_CHUNKS").empty())
+  if (kChunks.requested().empty())
     return kCommandChunkCount;
   return chunks + 16;
 }
@@ -188,7 +189,7 @@ CommandQueue::CommandQueue(WMT::Device device) :
   // gw2 (#8): the ring and the frame latency in effect, once per device
   g_ring_chunks.store(chunk_count_, std::memory_order_relaxed);
   Logger::info(str::format(
-      "CommandQueue: chunks=", chunk_count_, env::getEnvVar("DXMT_CHUNKS").empty() ? " (default)" : " (DXMT_CHUNKS)",
+      "CommandQueue: chunks=", chunk_count_, kChunks.requested().empty() ? " (default)" : " (DXMT_CHUNKS)",
       " metalbuffers=", metal_buffer_count_, " maxlatency=", max_latency_,
       max_latency_override_ ? " (DXMT_MAX_FRAME_LATENCY, replaces the game's)" : " (until the game sets it)"
   ));

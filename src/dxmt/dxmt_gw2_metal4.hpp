@@ -16,6 +16,11 @@ namespace dxmt::gw2 {
 // DXMT_METAL4 ("0" is Metal 3; anything else, or unset, asks for Metal 4: the default)
 bool metal4Requested();
 
+// gw2 (#60): DXMT_METALFX_SPATIAL_SWAPCHAIN=1 (exactly "1"), read from the environment at each call
+// (as both callers always did): CreateSwapChain makes the MetalFX spatial swapchain, and the device
+// stays on Metal 3.
+bool metalfxSpatialSwapchain();
+
 // Whether this process's queues take the Metal 4 path (DXMT_METAL4 on, on a device that has it).
 bool metal4Active();
 

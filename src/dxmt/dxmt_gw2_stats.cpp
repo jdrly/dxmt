@@ -1,4 +1,5 @@
 #include "dxmt_gw2_stats.hpp"
+#include "dxmt_gw2_switches.hpp"
 #include "log/log.hpp"
 #include "util_env.hpp"
 #include <algorithm>
@@ -11,10 +12,22 @@
 
 namespace dxmt::gw2 {
 
+namespace {
+// gw2 (#60): on unless exactly "0". The startup line shows the process's value (it exists only
+// with STATS on, where it always said 1).
+sw::Switch<bool> kStats{"DXMT_STATS", true, sw::legacy::notZero};
+sw::Effective kStatsLine{"DXMT_STATS", [] { return sw::formatValue(statsEnabled()); }};
+} // namespace
+
 bool
 statsEnabled() {
-  static const bool enabled = env::getEnvVar("DXMT_STATS") != "0";
+  static const bool enabled = kStats();
   return enabled;
+}
+
+bool
+statsReadNow() {
+  return kStats();
 }
 
 double
