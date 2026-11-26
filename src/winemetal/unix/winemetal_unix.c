@@ -16,6 +16,7 @@
 #include "../winemetal_thunks.h"
 #include "../airconv_thunks.h"
 #include "pso_archive.h"
+#include "visibility_slots.h"
 
 typedef int NTSTATUS;
 #define STATUS_SUCCESS 0
@@ -1800,13 +1801,9 @@ _CreateMetalViewFromHWND(void *obj) {
 /* gw2 (#1): the visibility of a metal view's window, for the background throttle's occlusion
    policy (d9mt 42b0c47 reads the same NSWindow state). AppKit state is read on the main thread:
    a call returns the cached flags of the previous refresh and queues at most one asynchronous
-   refresh per view, so the render thread never waits for the main thread. */
-#define WMT_VISIBILITY_SLOTS 8
-static struct {
-  _Atomic(void *) view;
-  _Atomic uint64_t flags;
-  _Atomic int pending;
-} g_visibility[WMT_VISIBILITY_SLOTS];
+   refresh per view, so the render thread never waits for the main thread. The slots, and why a
+   reused slot never gets a stale refresh (#20), are in visibility_slots.h. */
+static struct wmt_visibility_table g_visibility = WMT_VISIBILITY_TABLE_INIT;
 
 static NTSTATUS
 _MetalView_visibility(void *obj) {
@@ -1816,22 +1813,13 @@ _MetalView_visibility(void *obj) {
   if (!view)
     return STATUS_SUCCESS;
 
-  int slot = -1;
-  for (int i = 0; i < WMT_VISIBILITY_SLOTS && slot < 0; i++)
-    if (atomic_load(&g_visibility[i].view) == (void *)view)
-      slot = i;
-  for (int i = 0; i < WMT_VISIBILITY_SLOTS && slot < 0; i++) {
-    void *expected = NULL;
-    if (atomic_compare_exchange_strong(&g_visibility[i].view, &expected, (void *)view)) {
-      atomic_store(&g_visibility[i].flags, 0);
-      atomic_store(&g_visibility[i].pending, 0);
-      slot = i;
-    }
-  }
-  if (slot < 0)
+  struct wmt_visibility_lookup r = wmt_visibility_lookup(&g_visibility, view);
+  if (r.slot < 0)
     return STATUS_SUCCESS; /* more live views than slots: unknown, the throttle treats it as visible */
 
-  if (!atomic_exchange(&g_visibility[slot].pending, 1)) {
+  if (r.refresh) {
+    int slot = r.slot;
+    uint64_t generation = r.generation;
     /* the block retains the view until it has run */
     dispatch_async(dispatch_get_main_queue(), ^{
       uint64_t flags = WMTViewVisibilityKnown;
@@ -1846,13 +1834,12 @@ _MetalView_visibility(void *obj) {
       } else {
         flags |= WMTViewVisibilityNoWindow;
       }
-      if (atomic_load(&g_visibility[slot].view) == (void *)view)
-        atomic_store(&g_visibility[slot].flags, flags);
-      atomic_store(&g_visibility[slot].pending, 0);
+      /* gw2 (#20): dropped if the view was released (and its slot perhaps reused) meanwhile */
+      wmt_visibility_publish(&g_visibility, slot, generation, flags);
     });
   }
 
-  params->ret = atomic_load(&g_visibility[slot].flags);
+  params->ret = r.flags;
   return STATUS_SUCCESS;
 }
 
@@ -1860,12 +1847,8 @@ static NTSTATUS
 _ReleaseMetalView(void *obj) {
   struct unixcall_generic_obj_noret *params = obj;
 
-  /* gw2 (#1): free the view's visibility slot */
-  for (int i = 0; i < WMT_VISIBILITY_SLOTS; i++) {
-    void *expected = (void *)params->handle;
-    if (expected && atomic_compare_exchange_strong(&g_visibility[i].view, &expected, NULL))
-      atomic_store(&g_visibility[i].flags, 0);
-  }
+  /* gw2 (#1, #20): free the view's visibility slot; a refresh still in flight for it is dropped */
+  wmt_visibility_release(&g_visibility, (const void *)params->handle);
 
   void (*pfn_macdrv_view_release_metal_view)(macdrv_metal_view v) = NULL;
 
