@@ -115,6 +115,14 @@ _MTLCommandQueue_commandBuffer(void *obj) {
   return STATUS_SUCCESS;
 }
 
+/* gw2 (#31): the command buffer doesn't retain what its commands use; DXMT keeps it alive */
+static NTSTATUS
+_MTLCommandQueue_commandBufferWithUnretainedReferences(void *obj) {
+  struct unixcall_generic_obj_obj_ret *params = obj;
+  params->ret = (obj_handle_t)[(id<MTLCommandQueue>)params->handle commandBufferWithUnretainedReferences];
+  return STATUS_SUCCESS;
+}
+
 static NTSTATUS
 _MTLCommandBuffer_commit(void *obj) {
   struct unixcall_generic_obj_noret *params = obj;
@@ -3474,6 +3482,7 @@ const void *__wine_unix_call_funcs[] = {
     &_WMTPSOArchiveQuery,
     NULL, /* 152: reserved for jdrly/dxmt #5 */
     &_WMTSetThreadQoSClassSelf, /* 153, gw2 #9 */
+    &_MTLCommandQueue_commandBufferWithUnretainedReferences, /* 154, gw2 (#31) */
 };
 
 #ifndef DXMT_NATIVE
@@ -3632,5 +3641,6 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_WMTPSOArchiveQuery,
     NULL, /* 152: reserved for jdrly/dxmt #5 */
     &_WMTSetThreadQoSClassSelf, /* 153, gw2 #9 */
+    &_MTLCommandQueue_commandBufferWithUnretainedReferences, /* 154, gw2 (#31) */
 };
 #endif

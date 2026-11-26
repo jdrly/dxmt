@@ -3,6 +3,7 @@
 #include "Metal.hpp"
 #include "dxmt_format.hpp"
 #include "dxmt_presenter.hpp"
+#include "dxmt_gw2_lifetime.hpp"
 #include "dxmt_gw2_stats.hpp"
 #include "util_likely.hpp"
 #include "log/log.hpp"
@@ -201,6 +202,14 @@ Presenter::encodeCommands(
   encoder.endEncoding();
 
   return drawable;
+}
+
+void
+Presenter::gw2LifetimeUse(uint32_t queue, uint64_t seq) const {
+  using gw2::lifetime::Kind;
+  gw2::lifetime::use(queue, seq, present_blit_, Kind::Pipeline);
+  gw2::lifetime::use(queue, seq, present_scale_, Kind::Pipeline);
+  gw2::lifetime::use(queue, seq, gamma_lut_texture_, Kind::Texture);
 }
 
 void
