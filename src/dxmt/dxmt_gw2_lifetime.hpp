@@ -126,6 +126,10 @@ allocationFreed(Allocation *allocation) {
     allocationFreedSlow(allocation);
 }
 
+// gw2 (#185): DXMT_PRESENTER_FREE=1: a presenter is deleted when its last reference goes (off by
+// default: it stays, as before)
+bool presenterFree();
+
 // For the startup line: "1" or "0"; checkState() also "unbuilt" (asked for, not in this build)
 const char *unretainedState();
 const char *checkState();
