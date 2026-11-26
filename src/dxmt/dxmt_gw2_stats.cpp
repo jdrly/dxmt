@@ -77,10 +77,22 @@ std::atomic<uint64_t> g_other_calls[kApiCount];
 std::atomic<uint64_t> g_other_ns[kApiCount];
 thread_local bool t_presenter = false;
 thread_local int t_depth = 0;
-thread_local uint32_t t_sample_counter[kApiCount]; // per category: one can't use up another's samples
+thread_local uint32_t t_sample_state = 0; // sampleDraw's xorshift32 state, seeded per thread
 thread_local ThreadInterval t_interval;
 constexpr uint32_t kSampleEvery = 16;
 } // namespace
+
+uint32_t
+sampleDraw() {
+  uint32_t x = t_sample_state;
+  if (!x) // seeded from the thread id (Knuth's multiplicative hash), never 0
+    x = (uint32_t(GetCurrentThreadId()) * 2654435761u) | 1u;
+  x ^= x << 13;
+  x ^= x >> 17;
+  x ^= x << 5;
+  t_sample_state = x;
+  return x;
+}
 
 void
 apiAdd(Api api, uint64_t ns) {
@@ -131,8 +143,11 @@ ApiScope::ApiScope(Api api, bool sampled) : api_(api) {
     return; // nested: the outer scope counts
   outer_ = true;
   apiCall(api);
-  if (sampled && (t_sample_counter[(unsigned)api]++ % kSampleEvery) != 0)
-    return;
+  if (sampled) {
+    draw_ = sampleDraw();
+    if ((draw_ >> 28) != 0)
+      return;
+  }
   scale_ = sampled ? kSampleEvery : 1;
   t0_ = nowNs();
 }

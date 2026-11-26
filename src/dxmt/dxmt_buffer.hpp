@@ -134,6 +134,12 @@ public:
     return current_suballocation_;
   }
 
+  // gw2 (#25): the bytes of the Metal buffer (a whole page when suballocated)
+  uint64_t
+  pageLength() const noexcept {
+    return info_.length;
+  }
+
   void
   updateContents(uint64_t offset, const void *data, uint64_t length, uint32_t suballocation = 0) noexcept {
     if (likely(mappedMemory_ != nullptr && !flags_.test(BufferAllocationFlag::GpuManaged))) {
@@ -147,7 +153,10 @@ public:
   small_vector<GenericAccessTracker, 1> fenceTrackers;
 
 private:
-  BufferAllocation(WMT::Device device, const WMTBufferInfo &info, Flags<BufferAllocationFlag> flags);
+  BufferAllocation(
+      WMT::Device device, const WMTBufferInfo &info, Flags<BufferAllocationFlag> flags,
+      uint32_t page_size = DXMT_PAGE_SIZE
+  );
   BufferAllocation(
       WMT::Device device, const WMTBufferInfo &info, Flags<BufferAllocationFlag> flags, WMT::Heap heap,
       uint64_t heap_offset
@@ -183,7 +192,8 @@ public:
     return current_.ptr();
   }
 
-  Rc<BufferAllocation> allocate(Flags<BufferAllocationFlag> flags);
+  // gw2 (#25): page_size, the page SuballocateFromOnePage suballocates from (a power of two)
+  Rc<BufferAllocation> allocate(Flags<BufferAllocationFlag> flags, uint32_t page_size = DXMT_PAGE_SIZE);
   Rc<BufferAllocation> allocate(Flags<BufferAllocationFlag> flags, WMT::Heap heap, uint64_t heap_offset);
 
   Rc<BufferAllocation> rename(Rc<BufferAllocation> &&newAllocation);

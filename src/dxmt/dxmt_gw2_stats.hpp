@@ -7,6 +7,8 @@
 //   STATS. A feature adds its numbers without touching the STATS line.
 // - API time: time inside DXMT's entry points (Present, Map, Flush, Create*, Draw*, Dispatch*).
 //   Draw and Dispatch each time one call in 16 of their own and scale it; all calls are counted.
+//   The 1 in 16 is a per-thread pseudo-random draw (sampleDraw), not a fixed position: a counter
+//   aliases with call patterns that repeat (Map/Unmap alternate) and times only part of them.
 //   Nested entry points (Flush -> Flush1) count once. A thread that presents keeps its time per
 //   Present-to-Present interval (takeThreadInterval); every other thread's time is pooled
 //   (otherDrain), so worker threads never land in the render thread's numbers.
@@ -67,6 +69,10 @@ ThreadInterval takeThreadInterval();
 // The other threads' API time since the last drain.
 ApiTotals otherDrain();
 
+// The calling thread's next pseudo-random value (xorshift32, never 0). A sampler takes its 1 in 16
+// from the top 4 bits: `(draw >> 28) == k`; ApiScope uses k = 0.
+uint32_t sampleDraw();
+
 class ApiScope {
 public:
   ApiScope(Api api, bool sampled);
@@ -74,10 +80,19 @@ public:
   ApiScope(const ApiScope &) = delete;
   ApiScope &operator=(const ApiScope &) = delete;
 
+  // gw2 (#25): the sampleDraw() this scope decided with, 0 if it didn't draw (not sampled, nested,
+  // stats off). Another sampler of the same call can reuse it with another k, so the two never time
+  // the same call.
+  uint32_t
+  draw() const {
+    return draw_;
+  }
+
 private:
   Api api_;
   int64_t t0_ = 0;
   uint32_t scale_ = 0; // 0: not timed
+  uint32_t draw_ = 0;
   bool outer_ = false;
 };
 

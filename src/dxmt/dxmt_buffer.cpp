@@ -29,16 +29,18 @@ namespace dxmt {
 
 std::atomic_uint64_t global_buffer_seq = {0};
 
-BufferAllocation::BufferAllocation(WMT::Device device, const WMTBufferInfo &info, Flags<BufferAllocationFlag> flags) :
+BufferAllocation::BufferAllocation(
+    WMT::Device device, const WMTBufferInfo &info, Flags<BufferAllocationFlag> flags, uint32_t page_size
+) :
     info_(info),
     flags_(flags) {
   // (sub)allocate a minimum of 256B buffer so that texture can be created
   info_.length = std::max(info_.length, 256ull);
   suballocation_size_ = info_.length;
-  if (flags_.test(BufferAllocationFlag::SuballocateFromOnePage) && suballocation_size_ <= DXMT_PAGE_SIZE) {
+  if (flags_.test(BufferAllocationFlag::SuballocateFromOnePage) && suballocation_size_ <= page_size) {
     suballocation_size_ = align(info_.length, 16);
-    suballocation_count_ = DXMT_PAGE_SIZE / suballocation_size_;
-    info_.length = DXMT_PAGE_SIZE;
+    suballocation_count_ = page_size / suballocation_size_;
+    info_.length = page_size;
   }
   fenceTrackers.resize(suballocation_count_);
   if (flags_.test(BufferAllocationFlag::CpuPlaced)) {
@@ -169,7 +171,7 @@ Buffer::createView(BufferViewDescriptor const &descriptor) {
 }
 
 Rc<BufferAllocation>
-Buffer::allocate(Flags<BufferAllocationFlag> flags) {
+Buffer::allocate(Flags<BufferAllocationFlag> flags, uint32_t page_size) {
   WMTResourceOptions options = WMTResourceHazardTrackingModeUntracked;
   if (flags.test(BufferAllocationFlag::CpuWriteCombined)) {
     options |= WMTResourceOptionCPUCacheModeWriteCombined;
@@ -184,7 +186,7 @@ Buffer::allocate(Flags<BufferAllocationFlag> flags) {
   info.memory.set(0);
   info.length = length_;
   info.options = options;
-  return new BufferAllocation(device_, info, flags);
+  return new BufferAllocation(device_, info, flags, page_size);
 };
 
 Rc<BufferAllocation>

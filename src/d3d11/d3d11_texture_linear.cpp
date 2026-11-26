@@ -6,6 +6,7 @@
 #include "dxmt_staging.hpp"
 #include "dxmt_texture.hpp"
 #include "d3d11_resource.hpp"
+#include "dxmt_gw2_map.hpp"
 
 namespace dxmt {
 
@@ -72,6 +73,7 @@ TDynamicLinearTexture(
       }
     }
     dynamic_ = new DynamicLinearTexture(this->texture_.ptr(), flags);
+    this->gw2_map_kind_ = (uint8_t)gw2::MapKind::LinTex; // gw2 (#25)
   }
   Rc<StagingResource> staging(UINT) final { return nullptr; }
   Rc<DynamicBuffer> dynamicBuffer(UINT*, UINT*) final { return {}; };
