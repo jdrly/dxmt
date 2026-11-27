@@ -315,7 +315,7 @@ slots it doesn't visit would have moved no counter.
 skip saves at most the `same…` count, and fewer where a pass begins before the next draw. Since #369,
 with `DXMT_SKIP_SAME_STATE` on, the `samefactor` calls that also keep the blend state and sample mask
 mark nothing, and neither do the `samedss` calls (a state object that isn't DXMT's falls through to
-upstream's path, and `samedss` may still count it). The commands fall by fewer than those calls: a
+upstream's path, and `samedss` may still count it). The commands can fall by fewer than those calls: a
 draw emits one command for any number of marks, and a changing call before the draw marks again.
 `RSSetState(NULL)` still marks on every call. A `same…` count under a tenth of its command count says a skip in that
 setter would save little. `soset=0.0` in every window says GW2 calls `SOSetTargets` fewer than once in 20 frames, not that it never does. A deferred context's
