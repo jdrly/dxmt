@@ -1,7 +1,9 @@
 // gw2-test: pure
 // gw2-build: clang++ -std=c++20 -Wall -Wextra -Itests/gw2/shim -Isrc/dxmt tests/gw2/setter_count_test.cpp src/dxmt/dxmt_gw2_setters.cpp -o $OUT
-// gw2-run: "$OUT" on
-// gw2-run: "$OUT" off
+// gw2-run: "$OUT" on skip
+// gw2-run: "$OUT" on noskip
+// gw2-run: "$OUT" off skip
+// gw2-run: "$OUT" off noskip
 //
 // gw2 (#365): the PSO line's setter fields (src/dxmt/dxmt_gw2_setters.hpp). The context isn't built here (it
 // needs the PE toolchain and Metal), so its steps are copied from src/d3d11/d3d11_context_impl.cpp: the state
@@ -14,6 +16,12 @@
 //   factor, a factor of -0 for 0, a changed state or reference, RSSetState(NULL) with a state bound don't), and
 //   blendcmd, dsscmd and rscmd equal the commands the draws emitted; the next window reads 0.0.
 // - off: nothing is counted, and every field reads 0.0.
+//
+// gw2 (#369): the second argument is DXMT_SKIP_SAME_STATE. The copied setters call the fork's skipSameBlend and
+// SameDepthStencil::skipSame where the context does. With skip, an OMSetBlendState with the state, factor and
+// mask the context has, and an OMSetDepthStencilState with its state and reference, mark nothing, so a draw after
+// them emits nothing; a changed factor, mask, blend state, depth-stencil state or reference still marks. With
+// noskip every call marks as before. samefactor and samedss read the same either way, with DXMT_STATS on or off.
 //
 // Run: tests/gw2/run.zsh pure, or the commands above with $OUT set.
 
@@ -43,34 +51,60 @@ statsEnabled() {
 using namespace dxmt::gw2;
 
 // Stand-ins for the state objects: only their addresses matter.
+struct Blend {};
 struct Dss {};
 struct Rs {};
 
+// The fields of D3D11OutputMergerStageState the two setters use, as state_ = {} leaves them.
+struct OutputMerger {
+  const Dss *DepthStencilState = nullptr;
+  uint32_t StencilRef = 0;
+  const Blend *BlendState = nullptr;
+  float BlendFactor[4] = {}; // zeros, not D3D's 1, 1, 1, 1
+  uint32_t SampleMask = 0;
+};
+
 // The context's part of the four setters and of PreDraw.
 struct Context {
+  bool skip; // DXMT_SKIP_SAME_STATE
   SetterCounters setters;
-  float blend_factor[4] = {}; // state_ = {}: zeros, not D3D's 1, 1, 1, 1
-  const Dss *dss = nullptr;
-  uint32_t stencil_ref = 0;
+  OutputMerger om;
   const Rs *rs = nullptr;
   bool dirty_blend = false, dirty_dss = false, dirty_rs = false;
-  // the commands PreDraw emitted
-  unsigned emitted_blend = 0, emitted_dss = 0, emitted_rs = 0;
+  // the commands PreDraw emitted, and the pipeline invalidations
+  unsigned emitted_blend = 0, emitted_dss = 0, emitted_rs = 0, invalidated = 0;
+
+  explicit Context(bool skip_same_state) : skip(skip_same_state) {}
 
   void
-  omSetBlendState(const float *factor) {
-    setters.blendFactor(blend_factor, factor);
+  omSetBlendState(const float *factor, const Blend *state = nullptr, uint32_t mask = 0) {
+    if (setters.skipSameBlend(skip, om, state, factor, mask))
+      return;
+    bool invalidate = false;
+    if (state != om.BlendState) {
+      om.BlendState = state;
+      invalidate = true;
+    }
+    setters.blendFactor(om.BlendFactor, factor);
     if (factor)
-      std::memcpy(blend_factor, factor, sizeof(float[4]));
+      std::memcpy(om.BlendFactor, factor, sizeof(float[4]));
     else
-      blend_factor[0] = blend_factor[1] = blend_factor[2] = blend_factor[3] = 1.0f;
+      om.BlendFactor[0] = om.BlendFactor[1] = om.BlendFactor[2] = om.BlendFactor[3] = 1.0f;
+    if (om.SampleMask != mask) {
+      om.SampleMask = mask;
+      invalidate = true;
+    }
+    if (invalidate)
+      invalidated++;
     dirty_blend = true;
   }
   void
   omSetDepthStencilState(const Dss *state, uint32_t ref) {
-    SameDepthStencil same(setters, dss, stencil_ref);
-    dss = state;
-    stencil_ref = ref;
+    SameDepthStencil same(setters, om.DepthStencilState, om.StencilRef);
+    if (same.skipSame(skip, state, ref))
+      return;
+    om.DepthStencilState = state;
+    om.StencilRef = ref;
     dirty_dss = true;
   }
   void
@@ -129,9 +163,10 @@ field(const std::string &line, const char *name) {
 
 int
 main(int argc, char **argv) {
-  bool on = argc > 1 && std::strcmp(argv[1], "on") == 0;
-  if (argc < 2 || (!on && std::strcmp(argv[1], "off") != 0)) {
-    std::printf("usage: %s on|off\n", argv[0]);
+  bool on = argc > 2 && std::strcmp(argv[1], "on") == 0;
+  bool skip = argc > 2 && std::strcmp(argv[2], "skip") == 0;
+  if (argc < 3 || (!on && std::strcmp(argv[1], "off") != 0) || (!skip && std::strcmp(argv[2], "noskip") != 0)) {
+    std::printf("usage: %s on|off skip|noskip\n", argv[0]);
     return 2;
   }
   g_stats = on;
@@ -150,7 +185,7 @@ main(int argc, char **argv) {
   unsigned want_factor = 0, want_dss = 0, want_rs = 0, want_so = 0;
 
   // chunk 1
-  Context ctx;
+  Context ctx(skip);
   ctx.newPass();
   ctx.draw(); // all three commands
   ctx.omSetBlendState(nullptr); // 1, 1, 1, 1 for the context's zeros: changed
@@ -195,17 +230,62 @@ main(int argc, char **argv) {
   ctx.newPass();
   ctx.draw(); // all three
   ctx.draw(); // nothing marked: none
-  ctx.omSetDepthStencilState(nullptr, 2);
+  ctx.omSetDepthStencilState(nullptr, 2); // the same, after a draw
   want_dss++;
-  ctx.draw(); // dss
+  ctx.draw(); // dss, without the switch
+  ctx.omSetBlendState(negzero); // the same, after a draw
+  want_factor++;
+  ctx.draw(); // blend, without the switch
   ctx.setters.publish();
 
-  CHECK(ctx.emitted_blend == 3 && ctx.emitted_dss == 4 && ctx.emitted_rs == 3);
+  // the switch saves the two commands after a draw; the same calls before a draw saved nothing
+  CHECK(ctx.emitted_blend == (skip ? 3u : 4u) && ctx.emitted_dss == (skip ? 3u : 4u) && ctx.emitted_rs == 3);
+
+  // Each call's mark, on a context that never publishes: a draw clears the marks, then one call.
+  {
+    Context m(skip);
+    Blend blend_a, blend_b;
+    m.newPass();
+    m.omSetBlendState(half, &blend_a, 0xff);
+    m.omSetDepthStencilState(&dss_a, 1);
+    m.draw();
+    unsigned invalidated = m.invalidated;
+    auto blend = [&](const float *factor, const Blend *state, uint32_t mask) {
+      m.draw();
+      m.omSetBlendState(factor, state, mask);
+      return m.dirty_blend;
+    };
+    auto dss = [&](const Dss *state, uint32_t ref) {
+      m.draw();
+      m.omSetDepthStencilState(state, ref);
+      return m.dirty_dss;
+    };
+    CHECK(blend(half, &blend_a, 0xff) == !skip); // the same
+    CHECK(m.invalidated == invalidated);
+    CHECK(blend(ones, &blend_a, 0xff));          // factor
+    CHECK(m.invalidated == invalidated);
+    CHECK(blend(nullptr, &blend_a, 0xff) == !skip); // null is 1, 1, 1, 1: the same
+    CHECK(blend(ones, &blend_a, 0x0f));          // mask
+    CHECK(m.invalidated == ++invalidated);
+    CHECK(blend(ones, &blend_b, 0x0f));          // blend state
+    CHECK(m.invalidated == ++invalidated);
+    CHECK(blend(ones, nullptr, 0x0f));           // blend state, to none
+    CHECK(m.invalidated == ++invalidated);
+    CHECK(blend(ones, nullptr, 0x0f) == !skip);  // none on none
+    CHECK(m.om.BlendState == nullptr && m.om.SampleMask == 0x0f && sameBlendFactor(m.om.BlendFactor, ones));
+    CHECK(dss(&dss_a, 1) == !skip); // the same
+    CHECK(dss(&dss_a, 2));          // reference
+    CHECK(dss(&dss_b, 2));          // state
+    CHECK(dss(nullptr, 2));         // state, to none
+    CHECK(dss(nullptr, 2) == !skip); // none on none
+    CHECK(dss(nullptr, 0));         // reference
+    CHECK(m.om.DepthStencilState == nullptr && m.om.StencilRef == 0);
+  }
 
   const uint32_t frames = 2;
   bool any = !on;
   std::string line = setterFields(frames, any);
-  std::printf("%s: %s\n", on ? "on" : "off", line.c_str());
+  std::printf("%s %s: %s\n", on ? "on" : "off", skip ? "skip" : "noskip", line.c_str());
   CHECK(line.starts_with("samefactor="));
   CHECK(any == on);
   auto per_frame = [&](unsigned count) { return on ? double(count) / frames : 0.0; };
