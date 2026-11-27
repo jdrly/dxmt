@@ -11,6 +11,8 @@ std::atomic<uint64_t> g_setters[kSetterCount];
 
 void
 SetterCounters::publish() {
+  if (!on)
+    return;
   for (unsigned i = 0; i < kSetterCount; i++) {
     if (n[i])
       g_setters[i].fetch_add(n[i], std::memory_order_relaxed);

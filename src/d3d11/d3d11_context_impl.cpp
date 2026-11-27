@@ -3105,9 +3105,8 @@ public:
   STDMETHODCALLTYPE
   OMSetDepthStencilState(ID3D11DepthStencilState *pDepthStencilState, UINT StencilRef) override {
     std::lock_guard<mutex_t> lock(mutex);
-    // gw2 (#365): the state and reference before the call, for PSO samedss
-    const void *gw2_dss = state_.OutputMerger.DepthStencilState;
-    const UINT gw2_ref = state_.OutputMerger.StencilRef;
+    // gw2 (#365): PSO samedss, compares what the call stored with what was there when it returns
+    gw2::SameDepthStencil gw2_dss(gw2_pso_.setters, state_.OutputMerger.DepthStencilState, state_.OutputMerger.StencilRef);
 
     if (auto expected = com_cast<IMTLD3D11DepthStencilState>(pDepthStencilState)) {
       state_.OutputMerger.DepthStencilState = expected.ptr();
@@ -3115,7 +3114,6 @@ public:
       state_.OutputMerger.DepthStencilState = nullptr;
     }
     state_.OutputMerger.StencilRef = StencilRef;
-    gw2_pso_.setters.depthStencil(gw2_dss, gw2_ref, state_.OutputMerger.DepthStencilState, StencilRef); // gw2 (#365)
     dirty_state.set(DirtyState::DepthStencilState);
   }
 
@@ -3160,7 +3158,7 @@ public:
         ERR("RSSetState: invalid ID3D11RasterizerState object.");
       }
     } else {
-      gw2_pso_.setters.nullRasterizer(!state_.Rasterizer.RasterizerState); // gw2 (#365)
+      gw2_pso_.setters.nullRasterizer(state_.Rasterizer.RasterizerState); // gw2 (#365)
       if (state_.Rasterizer.RasterizerState) {
         if (state_.Rasterizer.RasterizerState->IsScissorEnabled() != default_rasterizer_state->IsScissorEnabled()) {
           dirty_state.set(DirtyState::Scissors);

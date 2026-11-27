@@ -57,14 +57,33 @@ struct SetterCounters {
     if (on && before == after && before_ref == after_ref)
       n[(unsigned)Setter::SameDss]++;
   }
-  // RSSetState(NULL), before it clears the state.
+  // RSSetState(NULL), with the state it is about to clear.
   void
-  nullRasterizer(bool none_set) {
-    if (on && none_set)
+  nullRasterizer(const void *current) {
+    if (on && !current)
       n[(unsigned)Setter::NullRs]++;
   }
   // Adds the counts to the shared totals and clears them (once a chunk).
   void publish();
+};
+
+// OMSetDepthStencilState's hook: made under the context's lock before the call stores anything, it keeps the
+// state and reference the context holds, and when the call returns it compares them with what the call stored.
+template <typename State>
+class SameDepthStencil {
+public:
+  SameDepthStencil(SetterCounters &counters, State *const &state, const uint32_t &ref)
+      : counters_(counters), state_(state), ref_(ref), before_(state), before_ref_(ref) {}
+  ~SameDepthStencil() { counters_.depthStencil(before_, before_ref_, state_, ref_); }
+  SameDepthStencil(const SameDepthStencil &) = delete;
+  SameDepthStencil &operator=(const SameDepthStencil &) = delete;
+
+private:
+  SetterCounters &counters_;
+  State *const &state_;
+  const uint32_t &ref_;
+  State *before_;
+  uint32_t before_ref_;
 };
 
 // Drains the shared totals into the seven fields, per frame: "samefactor=… samedss=… nullrs=… soset=…

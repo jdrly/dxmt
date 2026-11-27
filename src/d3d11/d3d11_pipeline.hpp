@@ -5,9 +5,9 @@
 #include "d3d11_input_layout.hpp"
 #include "d3d11_shader.hpp"
 #include "d3d11_state_object.hpp"
+#include "dxmt_gw2_setters.hpp" // gw2 (#365)
 #include "util_hash.hpp"
 #include "dxmt_gw2_stats.hpp"
-#include "dxmt_gw2_setters.hpp" // gw2 (#365)
 #include <atomic>
 
 struct MTL_GRAPHICS_PIPELINE_DESC {

@@ -49,7 +49,7 @@ struct Rs {};
 // The context's part of the four setters and of PreDraw.
 struct Context {
   SetterCounters setters;
-  float blend_factor[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  float blend_factor[4] = {}; // state_ = {}: zeros, not D3D's 1, 1, 1, 1
   const Dss *dss = nullptr;
   uint32_t stencil_ref = 0;
   const Rs *rs = nullptr;
@@ -68,11 +68,9 @@ struct Context {
   }
   void
   omSetDepthStencilState(const Dss *state, uint32_t ref) {
-    const void *before = dss;
-    uint32_t before_ref = stencil_ref;
+    SameDepthStencil same(setters, dss, stencil_ref);
     dss = state;
     stencil_ref = ref;
-    setters.depthStencil(before, before_ref, dss, ref);
     dirty_dss = true;
   }
   void
@@ -83,7 +81,7 @@ struct Context {
       rs = state;
       dirty_rs = true;
     } else {
-      setters.nullRasterizer(!rs);
+      setters.nullRasterizer(rs);
       rs = nullptr;
       dirty_rs = true;
     }
@@ -155,6 +153,9 @@ main(int argc, char **argv) {
   Context ctx;
   ctx.newPass();
   ctx.draw(); // all three commands
+  ctx.omSetBlendState(nullptr); // 1, 1, 1, 1 for the context's zeros: changed
+  ctx.omSetBlendState(nullptr);
+  want_factor++;
   ctx.omSetBlendState(half);
   ctx.omSetBlendState(half); // same
   want_factor++;
