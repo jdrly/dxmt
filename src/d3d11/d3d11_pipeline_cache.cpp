@@ -32,18 +32,32 @@ namespace gw2 {
 
 std::atomic<bool> g_pso_blend_hash = false;
 
+namespace {
+// gw2 (#366): off unless exactly "1"
+sw::Switch<bool> kPsoTable{"DXMT_PSO_TABLE", false, sw::legacy::exactlyOne};
+} // namespace
+
 const PsoSettings &
 psoSettings() {
   static const PsoSettings settings = [] {
     PsoSettings s = {
         .blend_hash = env::getEnvVar("DXMT_PSO_BLEND_HASH") != "0",
         .mru = env::getEnvVar("DXMT_PSO_MRU") != "0",
+        .table = kPsoTable(),
     };
+    s.table = s.table && s.mru; // gw2 (#366): the table takes the MRU's place, so DXMT_PSO_MRU=0 turns both off
     g_pso_blend_hash.store(s.blend_hash, std::memory_order_relaxed); // gw2 (#149)
     return s;
   }();
   return settings;
 }
+
+namespace {
+// gw2 (#366): the startup line's DXMT_PSO_TABLE: 1 in use, 0 off, unused when asked for with DXMT_PSO_MRU=0
+sw::Effective kPsoTableLine{"DXMT_PSO_TABLE", [] {
+  return std::string(psoSettings().table ? "1" : kPsoTable() ? "unused" : "0");
+}};
+} // namespace
 
 std::atomic<uint64_t> g_pso_counters[(unsigned)PsoCounter::Count];
 
@@ -879,10 +893,10 @@ public:
     auto &pso = gw2::psoSettings();
     gw2::g_pso_stats.store(gw2::statsEnabled(), std::memory_order_relaxed); // gw2 (#149)
     Logger::info(std::format(
-        "PSO: blend hash {} (DXMT_PSO_BLEND_HASH), MRU {} (DXMT_PSO_MRU), "
+        "PSO: blend hash {} (DXMT_PSO_BLEND_HASH), MRU {} (DXMT_PSO_MRU, DXMT_PSO_TABLE), "
         "skip same state {} (DXMT_SKIP_SAME_STATE), skip same srv {} (DXMT_SKIP_SAME_SRV), "
         "skip empty slots {} (DXMT_SKIP_EMPTY_SLOTS)",
-        pso.blend_hash ? "on" : "off", pso.mru ? "on, 4 entries" : "off",
+        pso.blend_hash ? "on" : "off", pso.table ? "on, 64 slots by hash" : pso.mru ? "on, 4 entries" : "off",
         gw2::skipSameState() ? "on" : "off", gw2::skipSameSrv() ? "on" : "off", gw2::skipEmptySlots() ? "on" : "off"
     ));
 
