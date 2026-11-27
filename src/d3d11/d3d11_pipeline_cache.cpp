@@ -173,7 +173,9 @@ psoSection(double window_ms, uint32_t frames) {
   double wait = drain(g_pso_wait_ns) * double(kPsoSampleEvery) / 1e6;
   double held = drain(g_pso_held_ns) * double(kPsoSampleEvery) / 1e6;
   auto at = [&](PsoCounter k) { return double(c[(unsigned)k]); };
-  if (!at(PsoCounter::Build) && !at(PsoCounter::Lookup) && !at(PsoCounter::TopologyKept) &&
+  bool setters_any = false; // gw2 (#365)
+  std::string setters = setterFields(frames, setters_any);
+  if (!setters_any && !at(PsoCounter::Build) && !at(PsoCounter::Lookup) && !at(PsoCounter::TopologyKept) &&
       !at(PsoCounter::LayoutSame) && !at(PsoCounter::NullShaderEmpty) && !at(PsoCounter::ShaderSame) &&
       !at(PsoCounter::VertexBufferSame) && !at(PsoCounter::IndexBufferSame) && !at(PsoCounter::SrvCall) &&
       !at(PsoCounter::SamplerCall))
@@ -182,7 +184,7 @@ psoSection(double window_ms, uint32_t frames) {
   return std::format(
       "builds={:.1f} mru={:.1f} lookups={:.1f} equal={:.1f} depth={:.2f}/{} new={} topokept={:.1f} "
       "lock={:.3f}/{:.3f} samelayout={:.1f} nullshader={:.1f} sameshader={:.1f} samevb={:.1f} sameib={:.1f} "
-      "srv={:.1f}/{:.1f}/{:.1f}/{:.1f}/{} smp={:.1f}/{:.1f}/{:.1f}",
+      "srv={:.1f}/{:.1f}/{:.1f}/{:.1f}/{} smp={:.1f}/{:.1f}/{:.1f} {}",
       at(PsoCounter::Build) / n, at(PsoCounter::MruHit) / n, at(PsoCounter::Lookup) / n, at(PsoCounter::Equal) / n,
       samples ? double(depth_sum) / samples : 0.0, depth_max, c[(unsigned)PsoCounter::New],
       at(PsoCounter::TopologyKept) / n, wait / n, held / n, at(PsoCounter::LayoutSame) / n,
@@ -190,7 +192,7 @@ psoSection(double window_ms, uint32_t frames) {
       at(PsoCounter::IndexBufferSame) / n,
       at(PsoCounter::SrvCall) / n, at(PsoCounter::SrvSlot) / n, at(PsoCounter::SrvSame) / n,
       at(PsoCounter::SrvSet) / n, c[(unsigned)PsoCounter::SrvHazardMissed], at(PsoCounter::SamplerCall) / n,
-      at(PsoCounter::SamplerSlot) / n, at(PsoCounter::SamplerSet) / n
+      at(PsoCounter::SamplerSlot) / n, at(PsoCounter::SamplerSet) / n, setters
   );
 }
 

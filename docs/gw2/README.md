@@ -261,12 +261,13 @@ Present falls into the window in which its sleep ended.
 
 ### PSO
 
-`PSO builds= mru= lookups= equal= depth=avg/max new= topokept= lock=wait/held samelayout= nullshader= sameshader= samevb= sameib= srv=calls/slots/same/set/missed smp=calls/slots/set` (jdrly/dxmt #6, #146, #147, #206):
+`PSO builds= mru= lookups= equal= depth=avg/max new= topokept= lock=wait/held samelayout= nullshader= sameshader= samevb= sameib= srv=calls/slots/same/set/missed smp=calls/slots/set samefactor= samedss= nullrs= soset= blendcmd= dsscmd= rscmd=` (jdrly/dxmt #6, #146, #147, #206, #365):
 the pipeline lookup on the render thread. Counts are per frame (encode-thread frames of the
 window) unless noted; all contexts and all three pipeline caches (plain, geometry,
 tessellation) together. Omitted when the window had no builds, lookups, `topokept`, `same…`
-counts, shader resource or sampler calls. Each context counts `builds`, `mru`, `topokept`, the
-`same…` fields of #146 and #206 and #147's `srv` and `smp` with plain increments and hands them over once per chunk, a deferred context at `FinishCommandList` (#149).
+counts, shader resource or sampler calls, and none of #365's seven fields. Each context counts `builds`, `mru`, `topokept`, the
+`same…` fields of #146 and #206, #147's `srv` and `smp` and #365's seven fields with plain increments and hands them over once per chunk, a deferred context at `FinishCommandList` (#149). #365's fields
+live in `dxmt_gw2_setters.hpp` and always print together, zeros included.
 
 | Field | Meaning |
 |---|---|
@@ -285,6 +286,13 @@ counts, shader resource or sampler calls. Each context counts `builds`, `mru`, `
 | `sameib` | (#146) `IASetIndexBuffer` calls with the same buffer, format and offset (null on null included) |
 | `srv` | (#147) `XXSetShaderResources`, all stages: calls, slots (the sum of their `NumViews`), slots whose bound view was the incoming one with a clear hazard bit, the ones the switch leaves (`same`; with the switch off, a slot in `missed`'s case set again counts too), slots that emitted a bind or an unbind (`set`), each per frame; then `missed`, a **window total**: bound slots given a view that can be an output while the slot's hazard bit was clear (the case `DXMT_SKIP_SAME_SRV` corrects) |
 | `smp` | (#147) `XXSetSamplers`, all stages: calls, slots, slots that emitted a bind or an unbind, per frame |
+| `samefactor` | (#365) `OMSetBlendState` calls whose blend factor is the context's, bit for bit (a null factor is 1, 1, 1, 1; `-0` for `0` is a change), whatever the blend state and sample mask |
+| `samedss` | (#365) `OMSetDepthStencilState` calls with the state and the stencil reference the context has (null on null included) |
+| `nullrs` | (#365) `RSSetState(NULL)` calls while no rasterizer state is set. `RSSetState` with the bound state already returns before it marks anything, so it isn't counted |
+| `soset` | (#365) `SOSetTargets` calls, refused ones included |
+| `blendcmd` | (#365) Blend factor and stencil reference commands the draws emit (`PreDraw`) |
+| `dsscmd` | (#365) Depth-stencil state commands the draws emit |
+| `rscmd` | (#365) Rasterizer state commands the draws emit |
 
 With both switches off the numbers measure the upstream lookup, except that a kept topology change
 (`topokept`) builds no key: `mru=0`, `lookups` = `builds` (give or take the chunk in flight at the window's edge).
@@ -300,6 +308,13 @@ calls with `same` close to `slots` are what the switch saves; narrow calls that 
 little to do. `missed` at 0 through play says the hazard-bit correction never acts in GW2. `DXMT_SKIP_EMPTY_SLOTS`
 changes none of these numbers: `slots` still adds each call's `NumViews` and `NumSamplers`, and the
 slots it doesn't visit would have moved no counter.
+
+#365's fields change no behaviour and have no switch. The three setters mark their state on every
+call, and a draw emits one command for each marked state, so `blendcmd`, `dsscmd` and `rscmd` are what
+the marks cost today. A new render pass marks all three too, so a skip would save at most the `same…`
+count, and fewer where a pass begins before the next draw. A `same…` count under a tenth of its command count says a skip in that
+setter would save little. `soset` at 0 says GW2 never calls `SOSetTargets`. A deferred context's
+commands count when it records them, not when the immediate context executes its list.
 
 ### RING
 
@@ -1392,6 +1407,14 @@ more than 64, null and non-null entries, the last call repeated or partly replac
 through the full and the skipping walk on two sets; after every step both emitted the same binds and
 unbinds in the same order, moved the same counters, and hold the same views and bound, dirty and hazard
 bits. It prints both walks' ns a call on GW2's shape (32 slots, 3 non-null) without asserting on them.
+
+`setter_count_test.cpp` (pure, #365) checks the PSO line's seven setter fields (`dxmt_gw2_setters.hpp`).
+The context's part of `OMSetBlendState`, `OMSetDepthStencilState`, `RSSetState`, `SOSetTargets`, a new
+render pass and `PreDraw` is copied from the context, with the counting hooks where the context has
+them. Each state is set twice, next to a changed factor, a factor of `-0` for `0`, a changed state, a
+changed reference and `RSSetState(NULL)` with a state bound, which don't count. The counts go out over
+two chunks, and the fields read back from `setterFields` equal the expected calls and the commands the
+draws emitted. The next window reads 0. A second run with `DXMT_STATS` off reads 0 everywhere.
 
 `emit_window_test.cpp` (pure, #148) checks the emit window (`dxmt_gw2_emit_window.hpp`) over the
 fork's own ring allocator and command list, with a fake queue that commits and completes chunks as

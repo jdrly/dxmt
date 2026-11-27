@@ -2329,6 +2329,7 @@ public:
   STDMETHODCALLTYPE
   SOSetTargets(UINT NumBuffers, ID3D11Buffer *const *ppSOTargets, const UINT *pOffsets) override {
     std::lock_guard<mutex_t> lock(mutex);
+    gw2_pso_.setters.count(gw2::Setter::SoSet); // gw2 (#365): every call, refused ones included
 
     if (!ValidateMultiSOTargets(NumBuffers, ppSOTargets))
       return;
@@ -3062,6 +3063,7 @@ public:
         should_invalidate_pipeline = true;
       }
     }
+    gw2_pso_.setters.blendFactor(state_.OutputMerger.BlendFactor, BlendFactor); // gw2 (#365): before the store
     if (BlendFactor) {
       memcpy(state_.OutputMerger.BlendFactor, BlendFactor, sizeof(float[4]));
     } else {
@@ -3103,6 +3105,9 @@ public:
   STDMETHODCALLTYPE
   OMSetDepthStencilState(ID3D11DepthStencilState *pDepthStencilState, UINT StencilRef) override {
     std::lock_guard<mutex_t> lock(mutex);
+    // gw2 (#365): the state and reference before the call, for PSO samedss
+    const void *gw2_dss = state_.OutputMerger.DepthStencilState;
+    const UINT gw2_ref = state_.OutputMerger.StencilRef;
 
     if (auto expected = com_cast<IMTLD3D11DepthStencilState>(pDepthStencilState)) {
       state_.OutputMerger.DepthStencilState = expected.ptr();
@@ -3110,6 +3115,7 @@ public:
       state_.OutputMerger.DepthStencilState = nullptr;
     }
     state_.OutputMerger.StencilRef = StencilRef;
+    gw2_pso_.setters.depthStencil(gw2_dss, gw2_ref, state_.OutputMerger.DepthStencilState, StencilRef); // gw2 (#365)
     dirty_state.set(DirtyState::DepthStencilState);
   }
 
@@ -3154,6 +3160,7 @@ public:
         ERR("RSSetState: invalid ID3D11RasterizerState object.");
       }
     } else {
+      gw2_pso_.setters.nullRasterizer(!state_.Rasterizer.RasterizerState); // gw2 (#365)
       if (state_.Rasterizer.RasterizerState) {
         if (state_.Rasterizer.RasterizerState->IsScissorEnabled() != default_rasterizer_state->IsScissorEnabled()) {
           dirty_state.set(DirtyState::Scissors);
@@ -5416,6 +5423,7 @@ public:
     UpdateVertexBuffer();
     UpdateSOTargets();
     if (dirty_state.any(DirtyState::DepthStencilState)) {
+      gw2_pso_.setters.count(gw2::Setter::DssCmd); // gw2 (#365)
       IMTLD3D11DepthStencilState *state =
           state_.OutputMerger.DepthStencilState ? state_.OutputMerger.DepthStencilState : default_depth_stencil_state;
       EmitST([state, stencil_ref = state_.OutputMerger.StencilRef](ArgumentEncodingContext& enc) {
@@ -5427,6 +5435,7 @@ public:
       });
     }
     if (dirty_state.any(DirtyState::RasterizerState)) {
+      gw2_pso_.setters.count(gw2::Setter::RsCmd); // gw2 (#365)
       IMTLD3D11RasterizerState *state =
           state_.Rasterizer.RasterizerState ? state_.Rasterizer.RasterizerState : default_rasterizer_state;
       EmitST([state](ArgumentEncodingContext& enc) {
@@ -5442,6 +5451,7 @@ public:
       }
     }
     if (dirty_state.any(DirtyState::BlendFactorAndStencilRef)) {
+      gw2_pso_.setters.count(gw2::Setter::BlendCmd); // gw2 (#365)
       EmitST([r = state_.OutputMerger.BlendFactor[0], g = state_.OutputMerger.BlendFactor[1],
             b = state_.OutputMerger.BlendFactor[2], a = state_.OutputMerger.BlendFactor[3],
             stencil_ref = state_.OutputMerger.StencilRef](ArgumentEncodingContext &enc) {
