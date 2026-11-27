@@ -40,8 +40,8 @@ commit, not a rebase tool.
   - *Shipped, unset* means the code is in the DLL and the fork's default applies.
   - *Not in play* means a diagnostic nobody turns on, or code that is gone at head.
   - 0.2.1 bundles my fork at `da80816` (#339), by the release notes of `v0.2.1-rc.1`. Of the
-    commits after it, #358 and the sync of #355 change the DLLs. #358 adds the only new switch,
-    so every switch below is in 0.2.1 except `DXMT_MTL4_PRESENT_FENCES`.
+    commits after it, #358 and the sync of #355 change the DLLs. #358 adds one new switch and #366
+    another, so every switch below is in 0.2.1 except `DXMT_MTL4_PRESENT_FENCES` and `DXMT_PSO_TABLE`.
 - **App names it.** Where the app's `arm64` branch has the variable's name. *Release* is
   `rules_text` or `game_env`. *Dev list* is `DEV_SWITCHES` or `DEV_ROWS`, which only a
   development build reads. *Gone list* is `DEV_GONE`. Dropping a switch that the release or the
