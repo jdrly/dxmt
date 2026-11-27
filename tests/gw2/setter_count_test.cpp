@@ -61,7 +61,7 @@ struct OutputMerger {
   uint32_t StencilRef = 0;
   const Blend *BlendState = nullptr;
   float BlendFactor[4] = {}; // zeros, not D3D's 1, 1, 1, 1
-  uint32_t SampleMask = 0;
+  uint32_t SampleMask = 0xffffffff;
 };
 
 // The context's part of the four setters and of PreDraw.
@@ -77,7 +77,7 @@ struct Context {
   explicit Context(bool skip_same_state) : skip(skip_same_state) {}
 
   void
-  omSetBlendState(const float *factor, const Blend *state = nullptr, uint32_t mask = 0) {
+  omSetBlendState(const float *factor, const Blend *state = nullptr, uint32_t mask = 0xffffffff) {
     if (setters.skipSameBlend(skip, om, state, factor, mask))
       return;
     bool invalidate = false;
@@ -245,11 +245,7 @@ main(int argc, char **argv) {
   {
     Context m(skip);
     Blend blend_a, blend_b;
-    m.newPass();
-    m.omSetBlendState(half, &blend_a, 0xff);
-    m.omSetDepthStencilState(&dss_a, 1);
-    m.draw();
-    unsigned invalidated = m.invalidated;
+    unsigned invalidated = 0;
     auto blend = [&](const float *factor, const Blend *state, uint32_t mask) {
       m.draw();
       m.omSetBlendState(factor, state, mask);
@@ -260,6 +256,13 @@ main(int argc, char **argv) {
       m.omSetDepthStencilState(state, ref);
       return m.dirty_dss;
     };
+    CHECK(blend(zero, nullptr, 0xffffffff) == !skip); // what state_ = {} holds
+    CHECK(dss(nullptr, 0) == !skip);
+    m.newPass();
+    m.omSetBlendState(half, &blend_a, 0xff);
+    m.omSetDepthStencilState(&dss_a, 1);
+    m.draw();
+    invalidated = m.invalidated;
     CHECK(blend(half, &blend_a, 0xff) == !skip); // the same
     CHECK(m.invalidated == invalidated);
     CHECK(blend(ones, &blend_a, 0xff));          // factor

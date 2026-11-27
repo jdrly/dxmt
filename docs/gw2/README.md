@@ -313,9 +313,11 @@ slots it doesn't visit would have moved no counter.
 #365's fields have no switch of their own. A draw emits one command for each marked state, so
 `blendcmd`, `dsscmd` and `rscmd` are what the marks cost. A new render pass marks all three too, so a
 skip saves at most the `same…` count, and fewer where a pass begins before the next draw. Since #369,
-with `DXMT_SKIP_SAME_STATE` on, `OMSetBlendState` skips its mark only when the blend state and sample
-mask are the context's too, so `blendcmd` falls by the `samefactor` calls that also keep those two;
-`OMSetDepthStencilState` skips every call `samedss` counts. `RSSetState(NULL)` still marks on every call. A `same…` count under a tenth of its command count says a skip in that
+with `DXMT_SKIP_SAME_STATE` on, the `samefactor` calls that also keep the blend state and sample mask
+mark nothing, and neither do the `samedss` calls (a state object that isn't DXMT's falls through to
+upstream's path, and `samedss` may still count it). The commands fall by fewer than those calls: a
+draw emits one command for any number of marks, and a changing call before the draw marks again.
+`RSSetState(NULL)` still marks on every call. A `same…` count under a tenth of its command count says a skip in that
 setter would save little. `soset=0.0` in every window says GW2 calls `SOSetTargets` fewer than once in 20 frames, not that it never does. A deferred context's
 commands count when it records them, not when the immediate context executes its list.
 
