@@ -13,7 +13,7 @@
 //   check, under the dependency lock);
 // - parked jobs released by a completion go to a continuation queue that workers take first;
 // - 2 workers at the start; a submit that finds every worker running adds one, up to 2 x CPUs;
-//   all TIME_CRITICAL (gw2 #152: Options::priority, DXMT_COMPILE_PRIORITY in production).
+//   all TIME_CRITICAL.
 //
 // What C1 adds: each job's state (queued, running, parked, building, complete, and what it is parked
 // on) is owned here and kept with DXMT_STATS off too; STATS only adds the timeline (timestamps) that
@@ -176,7 +176,6 @@ template <typename Job> struct JobTraits {
 struct Options {
   unsigned initial_workers = 2;
   unsigned max_workers = 0; // 0: 2 x CPUs
-  gw2::ThreadPriority priority = gw2::ThreadPriority::Critical; // gw2 (#152): each worker's, at its start
   Policy policy = Policy::Legacy;
   unsigned speculative_jobs = 1; // gw2 (#159): declared: speculative jobs at once while they are slow
 };
@@ -341,7 +340,7 @@ Service<Job, Traits>::workerLoop() {
   }
   Traits traits;
   std::vector<Job> released;
-  gw2::compileWorkerPriority(options_.priority); // gw2 (#152)
+  SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
   while (!destroyed_.load()) {
     Job job;
     {
@@ -563,7 +562,7 @@ template <typename Job, typename Traits>
 void
 Service<Job, Traits>::workerLoopDeclared() {
   std::vector<Job> released;
-  gw2::compileWorkerPriority(options_.priority); // gw2 (#152)
+  SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
   while (!destroyed_.load()) {
     Job job;
     bool speculative = false;

@@ -18,7 +18,6 @@
 #include "visibility_slots.h"
 #include "mtl4.h"
 #include "mtl4fx.h" // gw2 (#56)
-#include "winemetal_gw2_unix.h"
 
 typedef int NTSTATUS;
 #define STATUS_SUCCESS 0

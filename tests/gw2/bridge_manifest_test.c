@@ -63,16 +63,17 @@ main(void) {
   CHECK(WMTReserved_83 == 83);
   CHECK(WMTCall_MTLCommandBuffer_presentDrawableWithDeadline == 146);
   CHECK(WMTCall_MetalView_visibility == 147);
+  CHECK(WMTReserved_153 == 153); // was #9's call, a hole since #363
   CHECK(WMTCall_MTLDevice_metal4Support == 155);
   CHECK(WMTCall_MTL4CommandEncoder_barrier == 178);
   CHECK(WMTReserved_179 == 179 && WMTReserved_189 == 189);
   CHECK(WMTCall_MTLDevice_supportsMetal4FX == 190);
   CHECK(WMTCall_CacheEnumerate == 193 && WMTReserved_194 == 194 && WMTReserved_199 == 199); // lane C (#64; 193: W2/W3)
-  CHECK(WMTCall_WMTSetThreadBasePrioritySelf == 200); // #151
+  CHECK(WMTReserved_200 == 200); // was #151's call, a hole since #363
   CHECK(WMTCall_MTLResidencySet_allocationCount == 201); // #153
   CHECK(WMTReserved_202 == 202); // was #242's call, a hole since #277
   CHECK(WMTCall_Count == 203);
-  CHECK(calls == 181 && reserved == 22 && wow64 == 9);
+  CHECK(calls == 179 && reserved == 24 && wow64 == 9);
 
 #ifdef DXMT_NATIVE
   // Through the real table: a handler at every call number, NULL at every reserved one

@@ -46,8 +46,9 @@ What follows from the rule:
   hold. `pace` gave up at frame 181 in every session, so it never acted. I let all three run as
   plans 003 to 005, wave by wave. #157 and #221, the issues for `DXMT_PRESENT_QUEUE` and its test,
   closed as not planned on 2026-11-17, with a pointer to #281.
-- Not decided yet: `DXMT_RENDER_THREAD_PRIORITY`, `DXMT_CONTROL`, and `DXMT_WARM=functions`. The
-  AIR reader pool (`DXMT_AIR_READERS`) was dropped on 2026-11-26 (ADR 0019).
+- Not decided yet: `DXMT_WARM=functions`. The AIR reader pool (`DXMT_AIR_READERS`) was dropped on
+  2026-11-26 (ADR 0019), and `DXMT_RENDER_THREAD_PRIORITY`, `DXMT_CONTROL` and six more switches
+  on 2026-11-27 (ADR 0020).
 
 ## Alternatives I rejected
 

@@ -41,21 +41,6 @@ hitchMs() {
   return ms;
 }
 
-namespace {
-std::atomic<uint64_t> vblank_calls{0};
-} // namespace
-
-void
-vblankCall() {
-  if (statsEnabled())
-    vblank_calls.fetch_add(1, std::memory_order_relaxed);
-}
-
-uint64_t
-vblankCalls() {
-  return vblank_calls.load(std::memory_order_relaxed);
-}
-
 // gw2 (#28): QueryPerformanceCounter, not std::chrono::steady_clock. mingw's libstdc++ builds
 // steady_clock on gettimeofday (the wall clock: 1 us steps in Wine on macOS, and it can step back,
 // which made a scope's unsigned delta wrap). Every clock with sub-ms steps is a crossing into Wine's

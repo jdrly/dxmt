@@ -1,5 +1,5 @@
 <!-- Needs the Mac run: a PR that touches one of these paths starts with the line below and claims no
-result of it. CONTRIBUTING's "The Mac run" names the eight tests. Any other PR deletes the line.
+result of it. CONTRIBUTING's "The Mac run" names the seven tests. Any other PR deletes the line.
 
 - `src/winemetal/`, but not `src/winemetal/unix/cache.c` or `src/winemetal/unix/visibility_slots.h`
 - `src/dxmt/dxmt_gw2_mtl4_*`
@@ -9,7 +9,7 @@ result of it. CONTRIBUTING's "The Mac run" names the eight tests. Any other PR d
 - `src/dxmt/dxmt_command.metal` and `src/dxmt/dxmt_command_constants.hpp`
 - `src/dxmt/dxmt_gw2_lifetime.*`
 - `src/dxmt/dxmt_gw2_residency.*`
-- the eight tests' own files in `tests/gw2/`
+- the seven tests' own files in `tests/gw2/`
 - `tests/gw2/run.zsh`
 -->
 Needs the Mac run: `tests/gw2/run.zsh metal`

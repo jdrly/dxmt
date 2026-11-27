@@ -480,24 +480,6 @@ struct unixcall_mtldevice_newicb {
   obj_handle_t ret;
 };
 
-/* gw2 (#9): fixed-size fields only, so the 32-bit and 64-bit layouts match (one wow64 entry). */
-struct unixcall_wmt_set_thread_qos {
-  uint32_t qos_class;
-  int32_t relative_priority;
-  uint32_t ret_old_qos_class;
-  uint32_t ret_new_qos_class;
-  int32_t ret;
-  uint32_t padding;
-};
-
-/* gw2 (#151): 32-bit fields only, one layout for 32-bit and 64-bit (one wow64 entry). */
-struct unixcall_wmt_set_thread_base_priority {
-  int32_t base_priority;
-  int32_t ret_old_base;
-  int32_t ret_new_base;
-  int32_t ret;
-};
-
 /* gw2 (#32): Metal 4. Only 64-bit fields and WMTMemoryPointers, so the 32-bit and
    64-bit layouts match and both tables use the same function. */
 struct unixcall_mtl4_new_argtable {

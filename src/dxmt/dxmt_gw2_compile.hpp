@@ -11,7 +11,6 @@
 //
 // Everything is counted only with DXMT_STATS on.
 
-#include "dxmt_gw2_thread_priority.hpp"
 #include <atomic>
 #include <cstdint>
 #include <string>
@@ -60,12 +59,6 @@ int64_t compileNowNs(); // the timeline's clock
 bool compileDemand();
 // A demand promoted a job (counted for COMPILE's promoted=, with DXMT_STATS).
 void compilePromoted();
-
-// gw2 (#152): DXMT_COMPILE_PRIORITY, the compile workers' priority: critical (default), normal or
-// utility, as DXMT_THREAD_PRIORITY's (dxmt_gw2_thread_priority.hpp). compilePriority() reads it, at
-// each device's pipeline cache; each worker applies it at its start (compileWorkerPriority).
-ThreadPriority compilePriority();
-void compileWorkerPriority(ThreadPriority mode);
 
 // Around a demand for a job that isn't done yet (compile::demand); with the job's record, the wait
 // is classified by what the job was doing when it started (#46).

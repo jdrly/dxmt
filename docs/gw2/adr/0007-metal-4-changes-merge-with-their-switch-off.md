@@ -27,12 +27,12 @@ rented on 2026-11-12, whose first use was these tests.
   - `src/dxmt/dxmt_command.metal` and `src/dxmt/dxmt_command_constants.hpp`
   - `src/dxmt/dxmt_gw2_lifetime.*`
   - `src/dxmt/dxmt_gw2_residency.*`
-  - the eight tests' own files in `tests/gw2/`
+  - the seven tests' own files in `tests/gw2/`
   - `tests/gw2/run.zsh`
 
-  The eight tests are the ones that show something only on a Mac with Metal 4, listed in
-  [CONTRIBUTING](../../../.github/CONTRIBUTING.md#the-mac-run). `thread_priority_test` needs a real
-  Mac, not Metal 4, and is registered as `metal` so that run keeps it. At `28e574e` the runner
+  The seven tests are the ones that show something only on a Mac with Metal 4, listed in
+  [CONTRIBUTING](../../../.github/CONTRIBUTING.md#the-mac-run). There were eight until #363 deleted
+  `thread_priority_test`, which needed a real Mac, not Metal 4. At `28e574e` the runner
   printed passed 38, skipped 8 (run 44603994415) and the rented M1 passed 46, skipped 0: the 34
   pure tests printed the same on both, so a Mac run of them repeats the runner. Of the 85 pull
   requests merged between 2026-11-11 and the audit on 2026-11-19, at most 34 touched one of these

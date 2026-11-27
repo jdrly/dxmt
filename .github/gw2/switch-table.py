@@ -4,9 +4,8 @@
   .github/gw2/switch-table.py --self-test
 
 A switch the sources read is a string literal "DXMT_..." anywhere under src/: a sw::Switch
-declaration, an env::getEnvVar or getenv read, a name constant, a helper such as
-ThreadPrioritySwitch. The table is the one under "## Switches": a row's first cell is the name in
-backticks. The two sets must be equal, apart from NOT_MINE below.
+declaration, an env::getEnvVar or getenv read, a name constant. The table is the one under
+"## Switches": a row's first cell is the name in backticks. The two sets must be equal, apart from NOT_MINE below.
 
 It also compares the Default column with the fallback of every sw::Switch<bool> and
 sw::Switch<uint32_t> declared with a literal: true is "on", false is "off", 0 is "off" or "0",

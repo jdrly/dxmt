@@ -6,7 +6,6 @@
 #include "wsi_monitor.hpp"
 #include "dxgi_interfaces.h"
 #include "dxgi_object.hpp"
-#include "dxmt_gw2_stats.hpp"
 #include "d3d10_1.h"
 #include "Metal.hpp"
 
@@ -280,7 +279,6 @@ public:
 
   WMT::Device STDMETHODCALLTYPE GetMTLDevice() final { return device_; }
   D3DKMT_HANDLE STDMETHODCALLTYPE GetLocalD3DKMT() final { return local_kmt_; }
-  uint64_t STDMETHODCALLTYPE GetVBlankCalls() final { return gw2::vblankCalls(); }
 
 private:
   WMT::Reference<WMT::Device> device_;

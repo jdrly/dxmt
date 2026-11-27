@@ -8,7 +8,7 @@
 //   it when it retires the chunk, after the GPU completed every buffer of it; retire() gives it back.
 //   The pool makes an allocator only when it has none idle and keeps at most kIdleAllocators idle
 //   (one more is released). With DXMT_MTL4_ALLOCATOR_POOL=0 (Mtl4Queue's allocator_pool false), one
-//   MTL4CommandAllocator per chunk slot (the ring's size, DXMT_CHUNKS), made with the queue and reset
+//   MTL4CommandAllocator per chunk slot (the ring's size, 32), made with the queue and reset
 //   the same way.
 // - A chunk commits one command buffer, or several (the present split commits the frame before
 //   nextDrawable and the present pass gets its own, and queue-level events commit as well). Each commit carries its own

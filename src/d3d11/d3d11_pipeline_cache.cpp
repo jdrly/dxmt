@@ -38,7 +38,6 @@ psoSettings() {
     PsoSettings s = {
         .blend_hash = env::getEnvVar("DXMT_PSO_BLEND_HASH") != "0",
         .mru = env::getEnvVar("DXMT_PSO_MRU") != "0",
-        .topology_keep = env::getEnvVar("DXMT_PSO_TOPOLOGY_KEEP") != "0",
     };
     g_pso_blend_hash.store(s.blend_hash, std::memory_order_relaxed); // gw2 (#149)
     return s;
@@ -865,9 +864,7 @@ public:
   PipelineCache(MTLD3D11Device *pDevice) :
       scache_(ShaderCache::getInstance(pDevice->GetDXMTDevice().metalVersion())),
       // gw2 (C2): the declared policy with DXMT_COMPILE_DEMAND=1, and with warming (it needs the speculative lane)
-      // gw2 (#152): DXMT_COMPILE_PRIORITY
-      scheduler_(compile::Options{.priority = gw2::compilePriority(),
-                                  .policy = gw2::compileDemand() || gw2::warmMode() != gw2::WarmMode::Off
+      scheduler_(compile::Options{.policy = gw2::compileDemand() || gw2::warmMode() != gw2::WarmMode::Off
                                                 ? compile::Policy::Declared
                                                 : compile::Policy::Legacy,
                                   // gw2 (#159): only warming submits speculative jobs
@@ -880,10 +877,10 @@ public:
     auto &pso = gw2::psoSettings();
     gw2::g_pso_stats.store(gw2::statsEnabled(), std::memory_order_relaxed); // gw2 (#149)
     Logger::info(std::format(
-        "PSO: blend hash {} (DXMT_PSO_BLEND_HASH), MRU {} (DXMT_PSO_MRU), topology keep {} (DXMT_PSO_TOPOLOGY_KEEP), "
+        "PSO: blend hash {} (DXMT_PSO_BLEND_HASH), MRU {} (DXMT_PSO_MRU), "
         "skip same state {} (DXMT_SKIP_SAME_STATE), skip same srv {} (DXMT_SKIP_SAME_SRV), "
         "skip empty slots {} (DXMT_SKIP_EMPTY_SLOTS)",
-        pso.blend_hash ? "on" : "off", pso.mru ? "on, 4 entries" : "off", pso.topology_keep ? "on" : "off",
+        pso.blend_hash ? "on" : "off", pso.mru ? "on, 4 entries" : "off",
         gw2::skipSameState() ? "on" : "off", gw2::skipSameSrv() ? "on" : "off", gw2::skipEmptySlots() ? "on" : "off"
     ));
 

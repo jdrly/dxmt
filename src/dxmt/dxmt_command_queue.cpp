@@ -51,20 +51,16 @@ CommandChunk::allocate_cpu_heap(size_t size, size_t alignment) {
 }
 
 CommandQueue::CommandQueue(WMT::Device device) :
-    chunk_count_(gw2::queueChunkCount()),
-    metal_buffer_count_(gw2::queueMetalBufferCount(chunk_count_)),
-    max_latency_override_(gw2::queueMaxLatencyOverride()),
     unretained_(gw2::lifetime::unretained()),
     lifetime_id_(gw2::lifetime::attachQueue()), // gw2 (#31): logs the command buffer mode once per queue
     retire_recovery_(gw2::queueRetireRecovery()), // gw2 (#113)
     release_pool_(gw2::queueReleasePool()),       // gw2 (#269)
-    thread_priority_(gw2::queueThreadPriority().read()), // gw2 (#151)
     // gw2 (#69): Metal 3's policy until the constructor knows whether the queue is on Metal 4
-    ledger_(chunk_count_, {.unretained = unretained_, .lifetime_check = gw2::lifetime::check()}),
+    ledger_(kCommandChunkCount, {.unretained = unretained_, .lifetime_check = gw2::lifetime::check()}),
     encodeThread([this]() { this->EncodingThread(); }),
     finishThread([this]() { this->WaitForFinishThread(); }),
     device(device),
-    commandQueue(device.newCommandQueue(metal_buffer_count_)),
+    commandQueue(device.newCommandQueue(kCommandChunkCount)),
     shared_event_listener(SharedEventListener_create()),
     event_listener_thread([this]() { SharedEventListener_start(this->shared_event_listener); }),
     staging_allocator({
@@ -83,7 +79,7 @@ CommandQueue::CommandQueue(WMT::Device device) :
     argument_encoding_ctx(*this, device, cmd_library),
     initializer(device),
     counter_pool(device) {
-  for (unsigned i = 0; i < kCommandChunkCountMax; i++) {
+  for (unsigned i = 0; i < kCommandChunkCount; i++) {
     auto &chunk = chunks[i];
     chunk.queue = this;
     chunk.reset();
@@ -122,7 +118,7 @@ void
 CommandQueue::CommitCurrentChunk() {
   emit_window_.reset(); // gw2 (#148): the window's slab is this chunk's; the next chunk takes its own
   auto chunk_id = ready_for_encode.load(std::memory_order_relaxed);
-  auto &chunk = chunks[chunk_id % chunk_count_];
+  auto &chunk = chunks[chunk_id % kCommandChunkCount];
   chunk.chunk_id = chunk_id;
   chunk.chunk_event_id = GetNextEventSeqId();
   chunk.frame_ = frame_count;
@@ -134,8 +130,8 @@ CommandQueue::CommitCurrentChunk() {
   ready_for_encode.notify_one();
 
   auto t0 = clock::now();
-  // gw2 (#8): at most chunk_count_ - 1 chunks in flight; a full ring blocks here (a ring stall)
-  const uint64_t ring_limit = chunk_count_ - 1;
+  // gw2 (#8): at most kCommandChunkCount - 1 chunks in flight; a full ring blocks here (a ring stall)
+  const uint64_t ring_limit = kCommandChunkCount - 1;
   bool ring_full = chunk_ongoing.load(std::memory_order_acquire) >= ring_limit;
   if (ring_full)
     chunk_ongoing.wait(ring_limit, std::memory_order_acquire);
@@ -253,14 +249,14 @@ uint32_t
 CommandQueue::EncodingThread() {
 #if ASYNC_ENCODING
   env::setThreadName("dxmt-encode-thread");
-  gw2::queueThreadPriority().apply(thread_priority_, "dxmt-encode-thread"); // gw2 (#151)
+  SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
   uint64_t internal_seq = 1;
   while (!stopped.load()) {
     ready_for_encode.wait(internal_seq, std::memory_order_acquire);
     if (stopped.load())
       break;
     // perform...
-    auto &chunk = chunks[internal_seq % chunk_count_];
+    auto &chunk = chunks[internal_seq % kCommandChunkCount];
     CommitChunkInternal(chunk, internal_seq);
     internal_seq++;
   }
@@ -272,13 +268,13 @@ CommandQueue::EncodingThread() {
 uint32_t
 CommandQueue::WaitForFinishThread() {
   env::setThreadName("dxmt-finish-thread");
-  gw2::queueThreadPriority().apply(thread_priority_, "dxmt-finish-thread"); // gw2 (#151)
+  SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
   uint64_t internal_seq = 1;
   while (!stopped.load()) {
     ready_for_commit.wait(internal_seq, std::memory_order_acquire);
     if (stopped.load())
       break;
-    auto &chunk = chunks[internal_seq % chunk_count_];
+    auto &chunk = chunks[internal_seq % kCommandChunkCount];
     // gw2 (#78): every commit of the chunk completed (Metal 4: and its completion event), with their
     // records (#77); then its report
     bool stats = gw2::statsEnabled();
@@ -351,8 +347,7 @@ CommandQueue::RetireChunk(CommandChunk &chunk, uint64_t seq, CompletedChunk &&co
 // used. The finish thread stopped without retiring every committed chunk: the submission drains first
 // (Metal 4 waits for every committed command buffer; Metal 3 for its chunks' buffers when the residency
 // set (#29), DXMT_UNRETAINED=1 or DXMT_LIFETIME_CHECK=1 (#31) need it), and its token lets the ledger
-// release the holds: chunk by chunk as before (its own state, then its ring slot's holds), the chunks
-// past the ring (never used) last.
+// release the holds: chunk by chunk as before (its own state, then its ring slot's holds).
 void
 CommandQueue::DrainChunks() {
   auto drained = submission_->drain();
@@ -360,13 +355,9 @@ CommandQueue::DrainChunks() {
   if (!ledger_.drain(drained, [this](uint32_t slot) { chunks[slot].reset(); })) {
     // never expected: the holds stay until the ledger goes with the queue; the chunks' own state goes now
     RetirementRefused("RetirementLedger", "drain", 0);
-    for (unsigned i = 0; i < chunk_count_; i++)
+    for (unsigned i = 0; i < kCommandChunkCount; i++)
       chunks[i].reset();
   }
-  for (unsigned i = chunk_count_; i < kCommandChunkCountMax; i++) {
-    auto &chunk = chunks[i];
-    chunk.reset();
-  };
 }
 
 // gw2 (#66): never expected. A refused hold stays held until the queue goes (never released early); a
@@ -383,7 +374,7 @@ CommandQueue::RetirementRefused(const char *who, const char *what, uint64_t seq)
   auto n = ledger_refusals_.fetch_add(1, std::memory_order_relaxed) + 1;
   if (n > 8)
     return;
-  ERR(who, ": refused a ", what, " for chunk ", seq, " (ring slot ", seq % chunk_count_, ", retired up to ",
+  ERR(who, ": refused a ", what, " for chunk ", seq, " (ring slot ", seq % kCommandChunkCount, ", retired up to ",
       ledger_.retired(), ", refusal ", n, "; only the first 8 are logged)");
 }
 
@@ -402,7 +393,7 @@ CommandQueue::RetireRecovered(uint64_t seq, const gw2::RetireStep &step, const g
       text = str::format("RetirementLedger: chunk ", seq, " follows the refused retirement before it (retired up to ",
                          o.before, "); ");
     else
-      text = str::format("RetirementLedger: refused a retirement for chunk ", seq, " (ring slot ", seq % chunk_count_,
+      text = str::format("RetirementLedger: refused a retirement for chunk ", seq, " (ring slot ", seq % kCommandChunkCount,
                          ", retired up to ", o.before, ", refusal ", n, "; only the first 8 are logged); ");
     if (o.recovered)
       text += str::format("recovered: retired up to ", o.after, " by sequence (", o.chunks,
@@ -415,7 +406,7 @@ CommandQueue::RetireRecovered(uint64_t seq, const gw2::RetireStep &step, const g
     if (!text.empty())
       text += "; ChunkSubmission: refused it too, ";
     else
-      text = str::format("ChunkSubmission: refused a retirement for chunk ", seq, " (ring slot ", seq % chunk_count_,
+      text = str::format("ChunkSubmission: refused a retirement for chunk ", seq, " (ring slot ", seq % kCommandChunkCount,
                          ", retired up to ", ledger_.retired(), ", refusal ", n, "; only the first 8 are logged); ");
     text += step.submission_recovered ? "recovered: retired the chunk it last waited for"
                                       : "not recovered: it didn't last wait for this chunk, or retired it already";
@@ -478,7 +469,7 @@ CommandQueue::ReportCompletedChunk(CommandChunk &chunk, const CompletedChunk &co
 }
 
 void CommandQueue::Retain(uint64_t seq, Allocation* allocation) {
-  auto &chunk = chunks[seq % chunk_count_];
+  auto &chunk = chunks[seq % kCommandChunkCount];
   auto &tracker = chunk.ref_tracker;
   gw2::lifetime::useAllocation(lifetime_id_, seq, allocation); // gw2 (#31)
   constexpr size_t block_size = decltype(reftracker_storage_allocator)::block_size;

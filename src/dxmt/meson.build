@@ -28,7 +28,6 @@ dxmt_src = [
 dxmt_src += [
   'dxmt_gw2_stats.cpp',
   'dxmt_gw2_switches.cpp',
-  'dxmt_gw2_thread_priority.cpp', # gw2 (#151, #152)
   'dxmt_compile_builder.cpp',
   'dxmt_compile_recipe.cpp',
   'dxmt_gw2_compile.cpp',
@@ -37,7 +36,6 @@ dxmt_src += [
   'dxmt_gw2_timestamp.cpp',
   'dxmt_gw2_map.cpp',
   'dxmt_gw2_rebind.cpp',
-  'dxmt_gw2_control.cpp',
   'dxmt_gw2_residency.cpp',
   'dxmt_gw2_lifetime.cpp',
   'dxmt_gw2_recipe.cpp',

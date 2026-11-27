@@ -34,7 +34,6 @@
 #include "dxmt_gw2_retirement.hpp"
 #include "dxmt_gw2_submission.hpp"
 #include "dxmt_gw2_stats.hpp"
-#include "dxmt_gw2_thread_priority.hpp"
 #include "dxmt_occlusion_query.hpp"
 #include "dxmt_resource_initializer.hpp"
 #include "dxmt_ring_bump_allocator.hpp"
@@ -98,9 +97,6 @@ private:
 };
 
 constexpr uint32_t kCommandChunkCount = 32;
-// gw2 (#8): the chunk array's size; the ring itself is CommandQueue::ChunkCount() (DXMT_CHUNKS:
-// 32, 64 or 128). Every chunks[seq % n] uses the runtime count.
-constexpr uint32_t kCommandChunkCountMax = 128;
 
 class CommandQueue;
 
@@ -242,17 +238,11 @@ private:
   CpuFence frame_latency_fence_;
   std::atomic_bool stopped;
 
-  // gw2 (#8): the ring's size (DXMT_CHUNKS), the Metal queue's bound on command buffers, and
-  // DXMT_MAX_FRAME_LATENCY (0: none). Declared before the threads and the Metal queue.
-  const uint32_t chunk_count_;
-  const uint32_t metal_buffer_count_;
-  const uint32_t max_latency_override_;
   // gw2 (#31): DXMT_UNRETAINED, and this queue's id for DXMT_LIFETIME_CHECK's stamps
   const bool unretained_;
   const uint32_t lifetime_id_;
   const bool retire_recovery_; // gw2 (#113): DXMT_RETIRE_RECOVERY
   const bool release_pool_;    // gw2 (#269): DXMT_RELEASE_POOL
-  const gw2::ThreadPriority thread_priority_; // gw2 (#151): DXMT_THREAD_PRIORITY (before the threads)
 
 public:
   // gw2 (#8): one frame's RING totals, kept by CommitCurrentChunk until the next frame's first commit
@@ -268,13 +258,13 @@ public:
 private:
   RingFrame ring_frame_;
 
-  std::array<CommandChunk, kCommandChunkCountMax> chunks;
-  // gw2 (#66): what the chunks hold until they retire, one ring slot per place in the ring (chunk_count_);
+  std::array<CommandChunk, kCommandChunkCount> chunks;
+  // gw2 (#66): what the chunks hold until they retire, one ring slot per place in the ring;
   // declared before the threads
   RetirementLedger ledger_;
   uint64_t encoder_seq = 1;
   uint64_t frame_count = 0;
-  uint32_t max_latency_ = max_latency_override_ ? max_latency_override_ : 3; // gw2 (#8)
+  uint32_t max_latency_ = 3;
 
   dxmt::thread encodeThread;
   dxmt::thread finishThread;
@@ -390,7 +380,7 @@ public:
   CommandChunk *
   CurrentChunk() {
     auto id = ready_for_encode.load(std::memory_order_relaxed);
-    return &chunks[id % chunk_count_];
+    return &chunks[id % kCommandChunkCount];
   };
 
   uint64_t
@@ -466,12 +456,6 @@ public:
   uint32_t GetMaxLatency() { return max_latency_; }
 
   void SetMaxLatency(uint32_t value) { max_latency_ = value; };
-
-  // gw2 (#8): DXMT_MAX_FRAME_LATENCY, 0 when unset
-  uint32_t MaxLatencyOverride() const { return max_latency_override_; }
-
-  // gw2 (#8): the ring's chunk count in effect (DXMT_CHUNKS)
-  uint32_t ChunkCount() const { return chunk_count_; }
 
   void
   WaitCPUFence(uint64_t seq) {
