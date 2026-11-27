@@ -25,6 +25,7 @@
 #include "dxmt_gw2_timestamp.hpp"
 #include "dxmt_gw2_map.hpp"
 #include "dxmt_gw2_subsample.hpp"
+#include "dxmt_gw2_pso_table.hpp" // gw2 (#366)
 #include <format>
 #include <string_view>
 #include "d3d11_annotation.hpp"
@@ -4875,6 +4876,8 @@ public:
   */
   bool
   LookupPipelineMru(const MTL_GRAPHICS_PIPELINE_DESC &desc, MTLCompiledGraphicsPipeline **ppPipeline) {
+    if (pso_table_) // gw2 (#366): DXMT_PSO_TABLE in place of the 4 entries
+      return pso_table_->find(desc, *ppPipeline);
     std::equal_to<MTL_GRAPHICS_PIPELINE_DESC> equal;
     for (uint32_t i = 0; i < pso_mru_count_; i++) {
       auto &entry = pso_mru_[(pso_mru_next_ + kPsoMruSize - 1 - i) % kPsoMruSize];
@@ -4888,6 +4891,10 @@ public:
 
   void
   InsertPipelineMru(const MTL_GRAPHICS_PIPELINE_DESC &desc, MTLCompiledGraphicsPipeline *pipeline) {
+    if (pso_table_) { // gw2 (#366)
+      pso_table_->insert(desc, pipeline);
+      return;
+    }
     pso_mru_[pso_mru_next_] = {desc, pipeline};
     pso_mru_next_ = (pso_mru_next_ + 1) % kPsoMruSize;
     pso_mru_count_ = std::min(pso_mru_count_ + 1, kPsoMruSize);
@@ -5710,6 +5717,11 @@ protected:
   uint32_t pso_mru_count_ = 0;
   uint32_t pso_mru_next_ = 0;
   bool pso_mru_enabled_ = gw2::psoSettings().mru;
+  // gw2 (#366): DXMT_PSO_TABLE's table, allocated only with it and DXMT_PSO_MRU on
+  std::unique_ptr<gw2::PsoTable<MTL_GRAPHICS_PIPELINE_DESC, MTLCompiledGraphicsPipeline *>> pso_table_ =
+      gw2::psoSettings().mru && gw2::psoSettings().table
+          ? std::make_unique<gw2::PsoTable<MTL_GRAPHICS_PIPELINE_DESC, MTLCompiledGraphicsPipeline *>>()
+          : nullptr;
   const bool gw2_skip_same_state_ = gw2::skipSameState(); // gw2 (#146): DXMT_SKIP_SAME_STATE, cached
   const bool gw2_skip_same_srv_ = gw2::skipSameSrv();     // gw2 (#147): DXMT_SKIP_SAME_SRV, cached
   const bool gw2_skip_empty_slots_ = gw2::skipEmptySlots(); // gw2 (#203): DXMT_SKIP_EMPTY_SLOTS, cached

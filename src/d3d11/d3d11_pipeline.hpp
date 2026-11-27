@@ -36,6 +36,7 @@ namespace dxmt::gw2 {
 struct PsoSettings {
   bool blend_hash; // DXMT_PSO_BLEND_HASH: the blend state's fingerprint in the key's hash
   bool mru;        // DXMT_PSO_MRU: a per-context MRU in front of the pipeline cache
+  bool table;      // gw2 (#366): DXMT_PSO_TABLE as asked; with mru: 64 slots by hash in place of its 4 entries
 };
 const PsoSettings &psoSettings();
 // gw2 (#149): psoSettings().blend_hash for the pipeline key's hash and compare, a load instead of a
