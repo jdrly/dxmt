@@ -5,6 +5,7 @@
 #include "d3d11_input_layout.hpp"
 #include "d3d11_shader.hpp"
 #include "d3d11_state_object.hpp"
+#include "dxmt_gw2_setters.hpp" // gw2 (#365)
 #include "util_hash.hpp"
 #include "dxmt_gw2_stats.hpp"
 #include <atomic>
@@ -102,6 +103,7 @@ extern std::atomic<uint64_t> g_pso_counters[(unsigned)PsoCounter::Count];
 struct PsoContextCounters {
   bool on = statsEnabled(); // DXMT_STATS, cached: off, nothing is counted
   uint32_t n[(unsigned)PsoCounter::Count] = {};
+  SetterCounters setters; // gw2 (#365): the PSO line's setter fields, published with the rest
   ~PsoContextCounters() { publish(); }
   void
   count(PsoCounter c) {
@@ -120,6 +122,7 @@ struct PsoContextCounters {
         g_pso_counters[i].fetch_add(n[i], std::memory_order_relaxed);
       n[i] = 0;
     }
+    setters.publish();
   }
 };
 } // namespace dxmt::gw2
