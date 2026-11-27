@@ -45,7 +45,6 @@ psoSettings() {
         .mru = env::getEnvVar("DXMT_PSO_MRU") != "0",
         .table = kPsoTable(),
     };
-    s.table = s.table && s.mru; // gw2 (#366): the table takes the MRU's place, so DXMT_PSO_MRU=0 turns both off
     g_pso_blend_hash.store(s.blend_hash, std::memory_order_relaxed); // gw2 (#149)
     return s;
   }();
@@ -55,7 +54,8 @@ psoSettings() {
 namespace {
 // gw2 (#366): the startup line's DXMT_PSO_TABLE: 1 in use, 0 off, unused when asked for with DXMT_PSO_MRU=0
 sw::Effective kPsoTableLine{"DXMT_PSO_TABLE", [] {
-  return std::string(psoSettings().table ? "1" : kPsoTable() ? "unused" : "0");
+  auto &s = psoSettings();
+  return std::string(!s.table ? "0" : s.mru ? "1" : "unused");
 }};
 } // namespace
 
@@ -896,7 +896,7 @@ public:
         "PSO: blend hash {} (DXMT_PSO_BLEND_HASH), MRU {} (DXMT_PSO_MRU, DXMT_PSO_TABLE), "
         "skip same state {} (DXMT_SKIP_SAME_STATE), skip same srv {} (DXMT_SKIP_SAME_SRV), "
         "skip empty slots {} (DXMT_SKIP_EMPTY_SLOTS)",
-        pso.blend_hash ? "on" : "off", pso.table ? "on, 64 slots by hash" : pso.mru ? "on, 4 entries" : "off",
+        pso.blend_hash ? "on" : "off", !pso.mru ? "off" : pso.table ? "on, 64 slots by hash" : "on, 4 entries",
         gw2::skipSameState() ? "on" : "off", gw2::skipSameSrv() ? "on" : "off", gw2::skipEmptySlots() ? "on" : "off"
     ));
 

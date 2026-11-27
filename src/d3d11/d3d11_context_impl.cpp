@@ -5717,9 +5717,9 @@ protected:
   uint32_t pso_mru_count_ = 0;
   uint32_t pso_mru_next_ = 0;
   bool pso_mru_enabled_ = gw2::psoSettings().mru;
-  // gw2 (#366): DXMT_PSO_TABLE's table, allocated only with the switch on
+  // gw2 (#366): DXMT_PSO_TABLE's table, allocated only with it and DXMT_PSO_MRU on
   std::unique_ptr<gw2::PsoTable<MTL_GRAPHICS_PIPELINE_DESC, MTLCompiledGraphicsPipeline *>> pso_table_ =
-      gw2::psoSettings().table
+      gw2::psoSettings().mru && gw2::psoSettings().table
           ? std::make_unique<gw2::PsoTable<MTL_GRAPHICS_PIPELINE_DESC, MTLCompiledGraphicsPipeline *>>()
           : nullptr;
   const bool gw2_skip_same_state_ = gw2::skipSameState(); // gw2 (#146): DXMT_SKIP_SAME_STATE, cached
