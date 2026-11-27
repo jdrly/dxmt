@@ -53,6 +53,8 @@ psoBlendHash() {
 // they invalidate the pipeline or emit a command. Read once per process.
 // gw2 (#206): so does XXSetShader with the pointer the stage was last given while it still holds
 // that shader, before its QueryInterface.
+// gw2 (#369): and OMSetBlendState and OMSetDepthStencilState that set what the context has, before
+// they mark their state (src/dxmt/dxmt_gw2_setters.hpp).
 bool skipSameState();
 
 // gw2 (#147): DXMT_SKIP_SAME_SRV (default off): XXSetShaderResources keeps a slot's hazard bit set

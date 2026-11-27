@@ -3051,6 +3051,9 @@ public:
   STDMETHODCALLTYPE
   OMSetBlendState(ID3D11BlendState *pBlendState, const FLOAT BlendFactor[4], UINT SampleMask) override {
     std::lock_guard<mutex_t> lock(mutex);
+    // gw2 (#369): DXMT_SKIP_SAME_STATE, the blend state, factor and mask the context has: no mark (PSO samefactor)
+    if (gw2_pso_.setters.skipSameBlend(gw2_skip_same_state_, state_.OutputMerger, pBlendState, BlendFactor, SampleMask))
+      return;
 
     bool should_invalidate_pipeline = false;
     if (auto expected = com_cast<IMTLD3D11BlendState>(pBlendState)) {
@@ -3108,6 +3111,8 @@ public:
     std::lock_guard<mutex_t> lock(mutex);
     // gw2 (#365): PSO samedss, compares what the call stored with what was there when it returns
     gw2::SameDepthStencil gw2_dss(gw2_pso_.setters, state_.OutputMerger.DepthStencilState, state_.OutputMerger.StencilRef);
+    if (gw2_dss.skipSame(gw2_skip_same_state_, pDepthStencilState, StencilRef))
+      return; // gw2 (#369): DXMT_SKIP_SAME_STATE, the state and reference the context has: no mark (PSO samedss)
 
     if (auto expected = com_cast<IMTLD3D11DepthStencilState>(pDepthStencilState)) {
       state_.OutputMerger.DepthStencilState = expected.ptr();
