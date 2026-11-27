@@ -40,8 +40,8 @@ commit, not a rebase tool.
   - *Shipped, unset* means the code is in the DLL and the fork's default applies.
   - *Not in play* means a diagnostic nobody turns on, or code that is gone at head.
   - 0.2.1 bundles my fork at `da80816` (#339), by the release notes of `v0.2.1-rc.1`. Of the
-    commits after it, #358 and the sync of #355 change the DLLs. #358 adds one new switch and #366
-    another, so every switch below is in 0.2.1 except `DXMT_MTL4_PRESENT_FENCES` and `DXMT_PSO_TABLE`.
+    commits after it, #358 and the sync of #355 change the DLLs. #358 adds the only new switch,
+    so every switch below is in 0.2.1 except `DXMT_MTL4_PRESENT_FENCES`.
 - **App names it.** Where the app's `arm64` branch has the variable's name. *Release* is
   `rules_text` or `game_env`. *Dev list* is `DEV_SWITCHES` or `DEV_ROWS`, which only a
   development build reads. *Gone list* is `DEV_GONE`. Dropping a switch that the release or the
@@ -63,7 +63,7 @@ commit, not a rebase tool.
 | `stats-and-counters` | 7 | The 2 s `STATS`, `PACE`, `GPU` and `HITCH` lines, long log lines cut for Wine, and four counters: `CREATE`, `WaitForVBlank`, autoreleases on a thread without a pool, biased draws into emulated D24 targets | `DXMT_STATS` (on, read since `9688571`), `DXMT_HITCH_MS` (50) | `DXMT_STATS=1` set with Debug logging. Unset it is on anyway | Release: `DXMT_STATS`. The session report reads `STATS`, `HITCH`, `PRESENT`, `COMPILE`, `METAL4` and `WARM` | Every measurement in `docs/research/` since 2026-10-28 comes from these lines | **keep.** Diagnostics the app reads. The `WaitForVBlank` count **dropped** on 2026-11-27 (#363, ADR 0020): `vblank` was 0.0 in all 11,348 windows that have it |
 | `pace-scope` | 6 | The timing scope around each D3D11 call: off emulated TLS, on `QueryPerformanceCounter`, one call in 64 timed, the clock's own cost taken off. Two commits are its native test | none of its own, under `DXMT_STATS` | shipped, on with `DXMT_STATS` | no | #37 took the scope from 0.11 to 0.02 µs a call, about 2.3 ms a frame before (`dxmt-squeeze-2026-11-03.md`) | **keep.** Diagnostic |
 | `thread-priorities` | 3 | Three switches for where threads run: the game's render thread (#14), DXMT's encode and finish threads (#167), the compile workers (#170) | `DXMT_RENDER_THREAD_PRIORITY` (off), `DXMT_THREAD_PRIORITY` (`critical`), `DXMT_COMPILE_PRIORITY` (`critical`). Each default is upstream's behaviour | shipped, unset | Comment only. The dev list leaves all three out because lower priorities cost frames in crowds on 0.1.x | The switch table says "no result yet" for #151 and #152. The render thread already runs on the S cores (the workspace's `AGENTS.md`, `HEAT_RENDER` "measured and not worth it") | **dropped** on 2026-11-27 (#363, ADR 0020). None became a default and no session ran another value. Bridge calls 153 and 200 are holes now, and `thread_priority_test` went with the topic |
-| `pipeline-lookup` | 2 | The pipeline key hashes the blend state, each context checks its last 4 pipelines first, a topology change of the same class keeps the pipeline (#17), and a draw skips a bind of the pipeline its encoder already has (#36) | `DXMT_PSO_BLEND_HASH` (on), `DXMT_PSO_MRU` (on), `DXMT_PSO_TABLE` (off, #366), `DXMT_PSO_TOPOLOGY_KEEP` (on), `DXMT_SKIP_REBIND` (on) | shipped, unset | no | #36 with #38 removes 55% of the pipeline binds a frame (`dxmt-squeeze-2026-11-03.md`, round 2) | **keep.** Always on but `DXMT_PSO_TABLE`, which came after 0.2.1 and waits for a dev-list row in the app (`DXMT_PSO_TABLE=1`) and #366's session. `DXMT_PSO_TOPOLOGY_KEEP` lost its switch on 2026-11-27 (#363, ADR 0020) and its path stays always on: `topokept` was 0.0 in 21,729 of 21,732 windows, and `PSO topokept` still counts it |
+| `pipeline-lookup` | 2 | The pipeline key hashes the blend state, each context checks its last 4 pipelines first, a topology change of the same class keeps the pipeline (#17), and a draw skips a bind of the pipeline its encoder already has (#36) | `DXMT_PSO_BLEND_HASH` (on), `DXMT_PSO_MRU` (on), `DXMT_PSO_TOPOLOGY_KEEP` (on), `DXMT_SKIP_REBIND` (on) | shipped, unset | no | #36 with #38 removes 55% of the pipeline binds a frame (`dxmt-squeeze-2026-11-03.md`, round 2) | **keep.** Always on. `DXMT_PSO_TOPOLOGY_KEEP` lost its switch on 2026-11-27 (#363, ADR 0020) and its path stays always on: `topokept` was 0.0 in 21,729 of 21,732 windows, and `PSO topokept` still counts it |
 | `chunk-ring` | 1 | The `RING` line, a ring size switch, and a switch that replaces the game's frame latency | `DXMT_CHUNKS` (unset, 32), `DXMT_MAX_FRAME_LATENCY` (unset) | shipped, unset | Comment only: `DXMT_CHUNKS`, "a value only I can choose" | "No evidence for a bigger ring": 0 stalls, occupancy 1.5 to 1.7, peak 3 of 32 (`dxmt-squeeze-2026-11-03.md`, which proposes closing #8) | **keep** the `RING` line, at upstream's 32. Both switches **dropped** on 2026-11-27 (#363, ADR 0020): the ring peaked at 4 to 9 of 32 with 0 stalls in 68 sessions |
 | `compile-diagnostics` | 4 | The `COMPILE` section: the encode thread's pipeline waits and what each waited for, a variant's time by stage, the head start from `CreateShader` | `DXMT_COMPILE_WAIT_MS` (2) | shipped, on with `DXMT_STATS` | no. The session report reads `COMPILE` | 188 encode-thread waits, 645 ms, none of them queued, on 2026-11-04 (the workspace's `AGENTS.md`, shader warming). That number is what sent warming after builds, not the queue | **keep.** Diagnostic. `1de145b` also brought the first PSO archive, which `gone-pso-archive` deletes |
 | `commits-and-timestamps` | 4 | The `CMDS` line, timestamp queries estimated in place of a commit per query (#26), no flush on a `GetData` poll (#190), and #280, which takes out the deferral and `boundary` mode the first two added | `DXMT_TIMESTAMP_MODE` (`estimate`), `DXMT_GETDATA_SKIP_FLUSH` (on) | shipped, unset | no | 36 command buffers a frame before. With #27, busy Lion's Arch went from about 55 to 60 FPS and saved about one core (`timestamp-map-ab-2026-10-28.md`). All 1,419 `TIMESTAMP` windows of the long dev.23 session say `mode=estimate` (`upstream-watch-triage-2026-11-25.md`) | **keep.** Always on |
@@ -116,6 +116,13 @@ Sum: 9 + 4 + 1 + 7 + 6 + 3 + 2 + 1 + 4 + 4 + 4 + 1 + 10 + 10 + 5 + 3 + 1 + 10 + 
   (`chunk-ring`, whose `RING` line stays) and `DXMT_PRESENTER_FREE` (`teardown-robustness`). Each
   default is what the build did before. `DXMT_PSO_TOPOLOGY_KEEP` (`pipeline-lookup`) lost only its
   switch: it was on, so its path stays always on.
+- **`DXMT_PSO_TABLE`** (`pipeline-lookup`), dropped on 2026-11-27 (#370). It came after 0.2.1
+  (#366) and kept a context's plain pipelines in 64 slots by hash in place of the 4-entry list. In
+  my dev.5 session it found 54% of pipeline changes without the device cache, where dev.4's list
+  found 40%, and the cache's lock fell from 0.079 to 0.061 ms a frame. GW2 cycles through more
+  pipelines a frame than 64 recent ones hold, and the 0.02 ms a frame it saves is below the bar I
+  dropped `macdrv-calls` at. The removal commit takes out the table, its switch and its test.
+  `DXMT_PSO_MRU` stays as it was. The app's `DEV_GONE` row came first (jdrly/gw2-on-mac #386).
 
 In DXMT a drop is a removal commit on `gw2-on-mac`, as #276 to #288 were, because DXMT moves by
 merge and its topics share files.
@@ -128,7 +135,6 @@ merge and its topics share files.
   - `DXMT_MTL4_PRESENT_FENCES` (`metal4-present`);
   - `DXMT_DRAIN_SPLITS` (`teardown-robustness`);
   - `DXMT_SKIP_SAME_SRV` (`per-call-cuts`);
-  - `DXMT_PSO_TABLE` (`pipeline-lookup`);
   - `DXMT_COMPILE_DEMAND` and `DXMT_WARM_JOBS` (`compile-service`, `shader-warming`).
 
   ADR 0010 says a tested switch is deleted or becomes the default. None of these has its test
