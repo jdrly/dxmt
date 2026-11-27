@@ -1,6 +1,6 @@
 /*
- * gw2 (#291): my fork's bridge declarations that have no upstream declaration to sit next to: thread
- * priority (#9, #151), Metal 4 (#32) and MetalFX for GW2's Subsample pass (#56).
+ * gw2 (#291): my fork's bridge declarations that have no upstream declaration to sit next to: Metal 4
+ * (#32) and MetalFX for GW2's Subsample pass (#56).
  * winemetal.h includes this file in its middle. It isn't at winemetal.h's end because upstream
  * appends every new bridge call there. A new declaration of that kind goes here.
  */
@@ -8,31 +8,6 @@
 #define _WINEMETAL_GW2_H
 
 #include "winemetal.h"
-
-/* gw2 (#9): macOS QoS classes, the values of qos_class_t (<sys/qos.h>). */
-enum WMTQoSClass {
-  WMTQoSClassUnspecified = 0x00,
-  WMTQoSClassBackground = 0x09,
-  WMTQoSClassUtility = 0x11,
-  WMTQoSClassDefault = 0x15,
-  WMTQoSClassUserInitiated = 0x19,
-  WMTQoSClassUserInteractive = 0x21,
-};
-
-/* gw2 (#9): pthread_set_qos_class_self_np(qos, relative_priority) on the calling thread (a unix
-   call runs on the thread that makes it). Returns 0 or the errno; *old_qos is qos_class_self()
-   before the call, *new_qos after it. On failure the thread is unchanged. */
-WINEMETAL_API int WMTSetThreadQoSClassSelf(
-    enum WMTQoSClass qos, int relative_priority, enum WMTQoSClass *old_qos, enum WMTQoSClass *new_qos
-);
-
-/* gw2 (#151): sets the calling thread's Mach base priority to base_priority (20 is the utility
-   band, which macOS keeps on the P cores) with a THREAD_PRECEDENCE_POLICY call, as the heat ntdll
-   does for HEAT_QOS=1=utility. pthread QoS is no use on a Wine thread: macOS refuses it once the
-   wineserver has set Mach policies. Returns 0 or the kern_return_t; -1 if the task's priority
-   couldn't be read (nothing set). *old_base and *new_base are the thread's base priority before
-   and after (-1 if unreadable). */
-WINEMETAL_API int WMTSetThreadBasePrioritySelf(int base_priority, int *old_base, int *new_base);
 
 /*
  * gw2 (#32): Metal 4 (DXMT_METAL4); its call numbers are in winemetal_calls.h. The unix side is

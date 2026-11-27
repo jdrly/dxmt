@@ -174,23 +174,6 @@ strtoul32(const std::string &raw, const uint32_t &fallback) {
   return raw.empty() ? fallback : uint32_t(std::strtoul(raw.c_str(), nullptr, 10));
 }
 
-// Whether strtoul(raw) is one of `Allowed` (the full unsigned long, not truncated).
-template <unsigned long... Allowed>
-bool
-ulongIsOneOf(const std::string &raw) {
-  auto n = std::strtoul(raw.c_str(), nullptr, 10);
-  return ((n == Allowed) || ...);
-}
-
-// strtoul(raw) if it is one of `Allowed`, else the fallback ("" too).
-template <unsigned long... Allowed>
-uint32_t
-ulongOneOf(const std::string &raw, const uint32_t &fallback) {
-  if (raw.empty() || !ulongIsOneOf<Allowed...>(raw))
-    return fallback;
-  return uint32_t(std::strtoul(raw.c_str(), nullptr, 10));
-}
-
 } // namespace legacy
 
 } // namespace dxmt::sw

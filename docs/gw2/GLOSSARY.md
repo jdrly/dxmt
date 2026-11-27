@@ -14,18 +14,11 @@ A `DXMT_*` setting, with a fallback and a grammar, read by the module that decla
 _Avoid_: flag, option, env var
 
 **Requested value**:
-What the environment or the control file asks a switch for, as raw text.
+What the environment asks a switch for, as raw text.
 
 **Effective value**:
 What the process actually uses after parsing, fallbacks and capability checks; the startup line
 shows it.
-
-**Live switch**:
-A switch the control file may change while the game runs.
-_Avoid_: hot reload
-
-**Control file**:
-The file named by `DXMT_CONTROL` that carries live overrides.
 
 ### Compile service
 
@@ -82,7 +75,7 @@ _Avoid_: frame
 A chunk's identity within one command queue (`seq`, from 1), distinct from its **ring slot**.
 
 **Ring slot**:
-A chunk's reused place in the queue's ring (`seq % DXMT_CHUNKS`). Always "ring slot": a bridge call's
+A chunk's reused place in the queue's ring (`seq % kCommandChunkCount`, 32). Always "ring slot": a bridge call's
 position is its **call number**, so neither is called a bare "slot".
 _Avoid_: slot (alone)
 

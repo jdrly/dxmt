@@ -73,13 +73,12 @@ If two sources conflict, report the conflict instead of silently choosing one.
 
 ## The Mac run
 
-GitHub's runner has no Metal 4 and runs its jobs clamped to the utility band. Eight tests show
-something only on a Mac with Metal 4: `mtl4_bridge_test`, `mtl4_queue_test`,
-`mtl4_specialize_test`, `paired_replay_test`, `presenter_layer_set_test`, the Metal 4 halves of
-`chunk_submission_test` and `mtl4fx_test`, and `thread_priority_test`. The Mac run is
-`tests/gw2/run.zsh metal` on such a Mac. It runs those eight and the three Metal tests the runner
-passes too. The pure tests print on a Mac what they print on the runner, so the Mac run leaves them
-out.
+GitHub's runner has no Metal 4. Seven tests show something only on a Mac with Metal 4:
+`mtl4_bridge_test`, `mtl4_queue_test`, `mtl4_specialize_test`, `paired_replay_test`,
+`presenter_layer_set_test`, and the Metal 4 halves of `chunk_submission_test` and `mtl4fx_test`.
+The Mac run is `tests/gw2/run.zsh metal` on such a Mac. It runs those seven and the three Metal
+tests the runner passes too. The pure tests print on a Mac what they print on the runner, so the
+Mac run leaves them out.
 
 A pull request owes the Mac run only when it touches one of these paths:
 
@@ -91,7 +90,7 @@ A pull request owes the Mac run only when it touches one of these paths:
 - `src/dxmt/dxmt_command.metal` and `src/dxmt/dxmt_command_constants.hpp`
 - `src/dxmt/dxmt_gw2_lifetime.*`
 - `src/dxmt/dxmt_gw2_residency.*`
-- the eight tests' own files in `tests/gw2/`
+- the seven tests' own files in `tests/gw2/`
 - `tests/gw2/run.zsh`
 
 The present paths are there because of `presenter_layer_set_test`. It compiles the present
@@ -213,6 +212,10 @@ The decisions these rules rest on, and the ones a change must stay consistent wi
   a Metal 3 present's fences go to the Metal 4 queue, behind `DXMT_MTL4_PRESENT_FENCES`.
 - [ADR 0019](../docs/gw2/adr/0019-the-air-reader-pool-is-dropped.md): the AIR reader pool
   (`DXMT_AIR_READERS`) is dropped.
+- [ADR 0020](../docs/gw2/adr/0020-the-switches-gw2-never-exercises-are-dropped.md): the switches GW2
+  never exercises (`DXMT_PSO_TOPOLOGY_KEEP`, `DXMT_CHUNKS`, `DXMT_MAX_FRAME_LATENCY`,
+  `DXMT_CONTROL`, the three thread priorities, `DXMT_PRESENTER_FREE`) and the `WaitForVBlank`
+  count are dropped.
 
 ## Definition of Done
 

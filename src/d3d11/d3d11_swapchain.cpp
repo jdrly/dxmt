@@ -11,7 +11,6 @@
 #include "dxmt_hud_state.hpp"
 #include "dxmt_statistics.hpp"
 #include "dxmt_gw2_compile.hpp"
-#include "dxmt_gw2_control.hpp"
 #include "dxmt_gw2_lifetime.hpp"
 #include "dxmt_gw2_recipe.hpp"
 #include "dxmt_gw2_present.hpp"
@@ -56,9 +55,6 @@ constexpr size_t kSwapchainLatency = 1;
 namespace dxmt {
 
 namespace {
-// gw2 (#9, #60): DXMT_RENDER_THREAD_PRIORITY, strtoul's value (unset: 0); RaiseRenderThreadPriority
-// acts on 1-3 and logs anything above
-sw::Switch<uint32_t> kRenderThreadPriority{"DXMT_RENDER_THREAD_PRIORITY", 0, sw::legacy::strtoul32};
 // gw2 (#314): DXMT_REFRESH_REQUERY, =1 only: the refresh rate is read again after exclusive
 // fullscreen (RestoreDisplayMode) and for a 0 Hz mode (ChangeDisplayMode)
 sw::Switch<bool> kRefreshRequery{"DXMT_REFRESH_REQUERY", false, sw::legacy::exactlyOne};
@@ -299,7 +295,6 @@ public:
       monitor_(wsi::getWindowMonitor(hWnd)),
       hud(WMT::DeveloperHUDProperties::instance()) {
 
-    gw2::controlStart(); // gw2 (#7): DXMT_CONTROL's poll thread, once per process
     if (steady_sleep_) { // gw2 (#314)
       static std::atomic<bool> logged{false};
       if (!logged.exchange(true))
@@ -940,7 +935,6 @@ public:
     if (PresentFlags & DXGI_PRESENT_TEST)
       return hr;
 
-    RaiseRenderThreadPriority();
     PresentStart();
     ThrottleBackground();
     // gw2 (#7): the pacing of this present; a frame cap that display sync can't express sleeps here
@@ -969,8 +963,7 @@ public:
     // (presentDrawable:atTime:). macOS runs the GPU at the lowest clock that meets the deadline it
     // can infer, and a plain present carries none: GW2 ran 78% of the time at the minimum clock,
     // the CPU waiting for a slow GPU (LASRecomp #203 measured the same). DXMT_PRESENT_DEADLINE=0
-    // turns it off; DXMT_PRESENT_DEADLINE=<ms> sets the deadline. gw2 (#7): DXMT_CONTROL's
-    // present_deadline replaces it while the control file sets it.
+    // turns it off; DXMT_PRESENT_DEADLINE=<ms> sets the deadline.
     double present_deadline = 0;
     double deadline_ms = PresentDeadlineMs();
     if (deadline_ms != 0) {
@@ -1112,7 +1105,6 @@ public:
     auto &compile = gw2::compileSettings();
     double refresh = init_refresh_rate_ != DBL_MAX ? init_refresh_rate_ : 0.0;
     std::string deadline = present_deadline_ms_ < 0 ? std::string("refresh") : std::format("{}", present_deadline_ms_);
-    std::string max_latency = queue.MaxLatencyOverride() ? std::to_string(queue.MaxLatencyOverride()) : "unset";
     gw2::logStartup(sw::startupLine(
         sw::processRegistry(),
         {
@@ -1127,17 +1119,12 @@ public:
             {"DXMT_BG_FPS", std::format("{}", bg.fps)},
             {"DXMT_BG_FPS_MINIMIZED", std::format("{}", bg.fps_minimized)},
             {"DXMT_BG_POLICY", bg.policy == BgPolicy::Occlusion ? "occlusion" : "focus"},
-            {"DXMT_RENDER_THREAD_PRIORITY", std::nullopt}, // read now, as RaiseRenderThreadPriority parses it
             {"DXMT_PSO_BLEND_HASH", std::format("{}", int(pso.blend_hash))},
             {"DXMT_PSO_MRU", std::format("{}", int(pso.mru))},
-            {"DXMT_PSO_TOPOLOGY_KEEP", std::format("{}", int(pso.topology_keep))},
-            {"DXMT_CHUNKS", std::format("{}", queue.ChunkCount())}, // the ring in effect
-            {"DXMT_MAX_FRAME_LATENCY", max_latency},
             {"DXMT_COMPILE_WAIT_MS", std::format("{}", compile.wait_ms)},
             {"DXMT_TIMESTAMP_MODE", gw2::timestampModeName(gw2::timestampMode())}, // gw2 (#24)
             {"DXMT_MAP_FAST", std::format("{}", int(gw2::mapFast()))},             // gw2 (#25)
             {"DXMT_SKIP_REBIND", std::format("{}", int(gw2::skipRebind()))},       // gw2 (#30)
-            {"DXMT_CONTROL", gw2::controlPath().empty() ? std::string("off") : gw2::controlPath()}, // gw2 (#7)
             {"DXMT_RESIDENCY_SET", gw2::residencySetState()},                      // gw2 (#29)
             {"DXMT_UNRETAINED", gw2::lifetime::unretainedState()},                 // gw2 (#31)
             {"DXMT_LIFETIME_CHECK", gw2::lifetime::checkState()},                  // gw2 (#31)
@@ -1151,69 +1138,6 @@ public:
             {"clockfloor", std::format("{}", gw2::clockFloorNs())}, // gw2 (#150): ns, off every timed interval
         }
     ));
-  }
-
-  // gw2 (#9): DXMT_RENDER_THREAD_PRIORITY raises the thread that calls Present (GW2's bgfx render
-  // thread, which makes every D3D11 call) on its first Present; it ran 22% of its time on
-  // Performance cores in Lion's Arch. =1: the macOS QoS class USER_INTERACTIVE, set on this thread
-  // through the bridge (pthread_set_qos_class_self_np). =2: Win32 SetThreadPriority(HIGHEST), which
-  // Wine's server turns into Mach scheduling policies (precedence, latency/throughput tier 0), not
-  // a QoS class. =3: both, SetThreadPriority first: Wine's thread_policy_set likely takes a thread
-  // out of its QoS class, so the QoS class goes last. Once per thread, logged; a failure leaves the
-  // thread as it was. No restore: the render thread lives as long as the game, and only the thread
-  // itself can change its QoS class, which a swapchain destroyed on another thread couldn't do.
-  void RaiseRenderThreadPriority() {
-    static const uint32_t s_mode = kRenderThreadPriority();
-    if (!s_mode)
-      return;
-    static thread_local bool t_done = false;
-    if (t_done)
-      return;
-    t_done = true;
-    DWORD tid = GetCurrentThreadId();
-    if (s_mode > 3) {
-      Logger::info(str::format("RenderThreadPriority: thread ", tid, ": DXMT_RENDER_THREAD_PRIORITY=", s_mode,
-                               " isn't 1, 2 or 3, left unchanged"));
-      return;
-    }
-    if (s_mode & 2) {
-      HANDLE self = GetCurrentThread();
-      int old_priority = GetThreadPriority(self);
-      BOOL ok = SetThreadPriority(self, THREAD_PRIORITY_HIGHEST);
-      DWORD err = ok ? 0 : GetLastError();
-      Logger::info(str::format(
-          "RenderThreadPriority: thread ", tid, " priority ", old_priority, " -> ", GetThreadPriority(self),
-          " (SetThreadPriority THREAD_PRIORITY_HIGHEST: ",
-          ok ? std::string("ok") : str::format("error ", err, ", left unchanged"), ")"
-      ));
-    }
-    if (s_mode & 1) {
-      WMTQoSClass old_qos, new_qos;
-      int err = WMTSetThreadQoSClassSelf(WMTQoSClassUserInteractive, 0, &old_qos, &new_qos);
-      Logger::info(str::format(
-          "RenderThreadPriority: thread ", tid, " QoS ", QoSName(old_qos), " -> ", QoSName(new_qos),
-          " (pthread_set_qos_class_self_np user-interactive: ",
-          err ? str::format("error ", err, ", left unchanged") : std::string("ok"), ")"
-      ));
-    }
-  }
-
-  static const char *QoSName(WMTQoSClass qos) {
-    switch (qos) {
-    case WMTQoSClassUnspecified:
-      return "unspecified";
-    case WMTQoSClassBackground:
-      return "background";
-    case WMTQoSClassUtility:
-      return "utility";
-    case WMTQoSClassDefault:
-      return "default";
-    case WMTQoSClassUserInitiated:
-      return "user-initiated";
-    case WMTQoSClassUserInteractive:
-      return "user-interactive";
-    }
-    return "other";
   }
 
   // gw2 (#314): the monitor's refresh rate now, read as the constructor reads it; DBL_MAX when
@@ -1305,28 +1229,11 @@ public:
     std::this_thread::sleep_until(cap_deadline_);
   }
 
-  // gw2 (#7): the deadline setting this Present uses (-1 one refresh, 0 off, > 0 ms): the control
-  // file's present_deadline if it sets one, else DXMT_PRESENT_DEADLINE. A change is logged with the
-  // frame it applies from (1-based, as HITCH counts). Render thread; two atomic loads, unless the
-  // control file's poll thread has queued lines to log.
+  // gw2 (#7): the deadline setting this Present uses (-1 one refresh, 0 off, > 0 ms):
+  // DXMT_PRESENT_DEADLINE. Render thread.
   double PresentDeadlineMs() {
-    gw2::controlLogPending(); // the poll thread's lines, before the change line they may explain
-    gw2::recipeLogPending();  // gw2 (#57): the recipe writer's lines (it never calls the logger)
-    int32_t us = gw2::controlPresentDeadlineUs();
-    double ms = us == gw2::kControlUnset ? present_deadline_ms_ : us < 0 ? -1.0 : us / 1000.0;
-    if (ms == deadline_applied_ms_)
-      return ms;
-    auto name = [](double v) {
-      return v < 0 ? std::string("refresh") : v == 0 ? std::string("off") : std::format("{} ms", v);
-    };
-    Logger::info(std::format(
-        "Present deadline: {} from frame {} (was {}; {})", name(ms), presentation_count_ + 1,
-        name(deadline_applied_ms_),
-        us == gw2::kControlUnset ? "DXMT_PRESENT_DEADLINE, the control file doesn't set it"
-                                 : "DXMT_CONTROL present_deadline"
-    ));
-    deadline_applied_ms_ = ms;
-    return ms;
+    gw2::recipeLogPending(); // gw2 (#57): the recipe writer's lines (it never calls the logger)
+    return present_deadline_ms_;
   }
 
   // gw2 (#7): the pacing in effect, once and on each change; also hands it to the PRESENT section.
@@ -1524,16 +1431,6 @@ public:
   bool stats_enabled_ = gw2::statsReadNow(); // gw2 (#60): the DXMT_STATS switch, read per swapchain
   std::atomic<double> stats_deadline_ms_ = 0;
   std::atomic<uint32_t> stats_sync_interval_ = 0;
-  uint64_t stats_vblank_ = 0; // gw2 (#250): VBlankCalls() at the window's start
-
-  // gw2 (#250): the process's WaitForVBlank calls so far, counted in dxgi.dll
-  uint64_t VBlankCalls() {
-    Com<IDXGIAdapter> adapter;
-    Com<IMTLDXGIAdapter> mtl_adapter;
-    if (FAILED(dxgi_device_->GetAdapter(&adapter)) || FAILED(adapter->QueryInterface(IID_PPV_ARGS(&mtl_adapter))))
-      return stats_vblank_;
-    return mtl_adapter->GetVBlankCalls();
-  }
 
   void LogStatistics(const FrameStatistics &frame) {
     auto ms = [](clock::duration d) { return std::chrono::duration<double, std::milli>(d).count(); };
@@ -1541,7 +1438,6 @@ public:
     auto &w = stats_;
     if (w.frames == 0 && w.start == clock::time_point{}) {
       w.start = w.last = now;
-      stats_vblank_ = VBlankCalls();
       return;
     }
     w.frame_max = std::max(w.frame_max, ms(now - w.last));
@@ -1577,17 +1473,15 @@ public:
     if (elapsed < 2000)
       return;
     double n = w.frames;
-    uint64_t vblank = VBlankCalls();
     Logger::info(std::format(
         "STATS fps={:.1f} ms={:.1f}/{:.1f} cb={:.1f} rp={:.1f}(+{:.1f} merged) clear={:.1f} split={:.2f} "
         "drawable={:.2f}/{:.1f} commit={:.2f}/{:.1f} sync={:.1f}x {:.2f}/{:.1f} stall={} "
-        "encode={:.2f}+{:.2f}/{:.1f} latency={:.1f}/{:.1f} maxlatency={} interval={} deadline={:.1f} vblank={:.1f}",
+        "encode={:.2f}+{:.2f}/{:.1f} latency={:.1f}/{:.1f} maxlatency={} interval={} deadline={:.1f}",
         n * 1000 / elapsed, elapsed / n, w.frame_max, w.cb / n, (w.rp - w.rp_opt) / n, w.rp_opt / n, w.clear / n,
         w.split / n, w.drawable / n, w.drawable_max, w.commit / n, w.commit_max, w.sync / n, w.sync_ms / n,
         w.sync_max, w.stall, w.prepare / n, w.flush / n, w.flush_max, w.latency / n, w.latency_max, frame.latency,
-        stats_sync_interval_.load(), stats_deadline_ms_.load(), (vblank - stats_vblank_) * 1000 / elapsed
+        stats_sync_interval_.load(), stats_deadline_ms_.load()
     ));
-    stats_vblank_ = vblank;
     Logger::info(std::format(
         "STATS2 nextdrawable={:.2f}/{:.1f} present=plain:{}/deadline:{}/after:{} wait={:.2f}/{:.1f}", w.next_drawable / n,
         w.next_drawable_max, w.br_plain, w.br_deadline, w.br_after, w.wait / n, w.wait_max
@@ -1968,13 +1862,12 @@ private:
     if (v.empty())
       return -1.0;
     try {
-      // gw2 (#7): NaN already meant one refresh (it is neither 0 nor > 0); as -1 it also compares
-      // equal to itself, so PresentDeadlineMs doesn't log it as a change on every Present
+      // gw2 (#7): NaN already meant one refresh (it is neither 0 nor > 0)
       double ms = std::stod(v);
       if (std::isnan(ms) || ms < 0)
         return -1.0; // as before: one refresh
-      // gw2 (#314): a deadline that isn't finite or is over the control file's limit never
-      // comes; it means one refresh, with one warning
+      // gw2 (#314): a deadline that isn't finite or is over 1000 ms never comes; it means one
+      // refresh, with one warning
       if (!gw2::presentDeadlineInRange(ms)) {
         static std::atomic<bool> warned{false};
         if (!warned.exchange(true))
@@ -1990,8 +1883,6 @@ private:
       return -1.0;
     }
   }();
-  // gw2 (#7): the deadline setting the last Present used (PresentDeadlineMs)
-  double deadline_applied_ms_ = present_deadline_ms_;
   HUDState hud;
   Rc<Presenter> presenter;
   ModeSetGuard modeset_guard_;

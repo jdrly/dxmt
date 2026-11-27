@@ -44,13 +44,6 @@ bool statsReadNow();
 // DXMT_HITCH_MS, resolved (default 50; 0 turns HITCH lines off)
 double hitchMs();
 
-// gw2 (#250): IDXGIOutput::WaitForVBlank, which returns at once, counts each call here with DXMT_STATS
-// on. Each DLL has its own copy of this library, and the count is dxgi.dll's: STATS (d3d11.dll) reads it
-// through IMTLDXGIAdapter::GetVBlankCalls.
-void vblankCall();
-// The calls counted since the process started.
-uint64_t vblankCalls();
-
 using SectionFn = std::string (*)(double window_ms, uint32_t frames);
 void registerSection(const char *name, SectionFn fn);
 void emitSections(double window_ms, uint32_t frames);

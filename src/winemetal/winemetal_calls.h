@@ -16,8 +16,7 @@
  *   deliberate change of its own.
  * - A hole is WMT_RESERVED with the issue (or lane) that reserved it.
  * - A fork call with no upstream call to sit next to is declared in winemetal_gw2.h, has its thunk in
- *   winemetal_gw2_thunks.c and its handler in a file of its own under unix/ (winemetal_gw2.c, mtl4.c,
- *   mtl4fx.c). Never at the end of winemetal.h, winemetal_thunks.c or winemetal_unix.c, where
+ *   winemetal_gw2_thunks.c and its handler in a file of its own under unix/ (mtl4.c, mtl4fx.c). Never at the end of winemetal.h, winemetal_thunks.c or winemetal_unix.c, where
  *   upstream appends each new call.
  *
  * No include guard: an includer defines the three macros, includes this file, and gets them back
@@ -192,8 +191,8 @@ WMT_RESERVED(150, "#275: was WMTPSOArchiveFlush (#5)")
 WMT_RESERVED(151, "#275: was WMTPSOArchiveQuery (#5)")
 /* gw2 (#46): cache.c */
 WMT_CALL(152, WMTGetMetalShaderCachePath, _WMTGetMetalShaderCachePath)
-/* gw2 (#9) */
-WMT_CALL(153, WMTSetThreadQoSClassSelf, _WMTSetThreadQoSClassSelf)
+/* gw2 (#9): the render thread's QoS class (DXMT_RENDER_THREAD_PRIORITY), deleted with its call (#363) */
+WMT_RESERVED(153, "#363: was WMTSetThreadQoSClassSelf (#9)")
 /* gw2 (#31) */
 WMT_CALL(154, MTLCommandQueue_commandBufferWithUnretainedReferences,
          _MTLCommandQueue_commandBufferWithUnretainedReferences)
@@ -245,8 +244,8 @@ WMT_RESERVED(196, "lane C, jdrly/dxmt #64")
 WMT_RESERVED(197, "lane C, jdrly/dxmt #64")
 WMT_RESERVED(198, "lane C, jdrly/dxmt #64")
 WMT_RESERVED(199, "lane C, jdrly/dxmt #64")
-/* gw2 (#151): DXMT_THREAD_PRIORITY=utility */
-WMT_CALL(200, WMTSetThreadBasePrioritySelf, _WMTSetThreadBasePrioritySelf)
+/* gw2 (#151): DXMT_THREAD_PRIORITY=utility, deleted with its call (#363) */
+WMT_RESERVED(200, "#363: was WMTSetThreadBasePrioritySelf (#151)")
 /* gw2 (#153): Metal 4 uses a chunk's residency set only when it has allocations */
 WMT_CALL(201, MTLResidencySet_allocationCount, _MTLResidencySet_allocationCount)
 /* gw2 (#277): DXMT_MTL4_PRESENT=done (#242), deleted with its call */

@@ -2,7 +2,6 @@
 #include "Metal.hpp"
 #include "dxmt_allocation.hpp"
 #include "dxmt_gw2_stats.hpp"
-#include "dxmt_gw2_switches.hpp"
 #include "log/log.hpp"
 #include "util_env.hpp"
 #include <atomic>
@@ -224,17 +223,6 @@ HookInstaller g_hook_installer;
 bool
 unretained() {
   static const bool on = readUnretained();
-  return on;
-}
-
-namespace {
-// gw2 (#185): off unless exactly "1"
-sw::Switch<bool> kPresenterFree{"DXMT_PRESENTER_FREE", false, sw::legacy::exactlyOne};
-} // namespace
-
-bool
-presenterFree() {
-  static const bool on = kPresenterFree();
   return on;
 }
 

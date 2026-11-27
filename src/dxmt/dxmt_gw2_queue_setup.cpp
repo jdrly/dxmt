@@ -10,10 +10,7 @@
 #include "dxmt_gw2_submission.hpp"
 #include "dxmt_gw2_switches.hpp"
 #include "log/log.hpp"
-#include "util_env.hpp"
 #include <algorithm>
-#include <atomic>
-#include <cstdlib>
 #include <format>
 #include <memory>
 #include <mutex>
@@ -23,11 +20,6 @@
 namespace dxmt {
 
 namespace {
-
-// gw2 (#8): DXMT_CHUNKS, the ring's size: 32 (default, upstream's), 64 or 128 (strtoul's value;
-// anything else is the default, with a warning). Read at each queue's creation, as before.
-// gw2 (#60): declared here; the startup line shows the ring in effect (LogStartup's field).
-sw::Switch<uint32_t> kChunks{"DXMT_CHUNKS", kCommandChunkCount, sw::legacy::ulongOneOf<32, 64, 128>};
 
 // gw2 (#113): DXMT_RETIRE_RECOVERY (on; 0: off): a refused retirement (never expected) recovers by
 // sequence with the completion its token proves, and refused holds go once their last chunk completed,
@@ -44,41 +36,6 @@ sw::Switch<bool> kReleasePool{"DXMT_RELEASE_POOL", true, sw::legacy::notZero};
 // command buffers the ledger still holds. Read at each queue's creation.
 sw::Switch<bool> kDrainSplits{"DXMT_DRAIN_SPLITS", false, sw::legacy::exactlyOne};
 
-uint32_t
-ChunkCountFromEnv() {
-  auto v = kChunks.requested();
-  if (!v.empty() && !sw::legacy::ulongIsOneOf<32, 64, 128>(v))
-    WARN("DXMT_CHUNKS=", v, " is not 32, 64 or 128; using ", kCommandChunkCount);
-  return kChunks.parse(v);
-}
-
-// gw2 (#8): the Metal queue's bound on uncompleted command buffers. Unset DXMT_CHUNKS keeps
-// upstream's 32 (the ring's size). Set, it is the ring plus headroom for the present split's extra
-// buffer: one per frame in flight, and SetMaximumFrameLatency allows at most 16 frames.
-uint32_t
-MetalBufferCount(uint32_t chunks) {
-  if (kChunks.requested().empty())
-    return kCommandChunkCount;
-  return chunks + 16;
-}
-
-// gw2 (#8): DXMT_MAX_FRAME_LATENCY, 1-16, replaces the latency the game sets; 0: not set.
-uint32_t
-MaxLatencyOverrideFromEnv() {
-  auto v = env::getEnvVar("DXMT_MAX_FRAME_LATENCY");
-  if (v.empty())
-    return 0;
-  auto n = std::strtoul(v.c_str(), nullptr, 10);
-  if (n >= 1 && n <= 16)
-    return n;
-  WARN("DXMT_MAX_FRAME_LATENCY=", v, " is not 1-16; ignored");
-  return 0;
-}
-
-// gw2 (#151): DXMT_THREAD_PRIORITY, the encode and finish threads' priority (critical, normal or
-// utility; see dxmt_gw2_thread_priority.hpp). Read at each queue's creation.
-gw2::ThreadPrioritySwitch kThreadPriority{"DXMT_THREAD_PRIORITY"};
-
 // gw2 (#8): the RING section. The render thread publishes each completed frame's totals (at the
 // next frame's first commit) under the mutex, and the 2 s window drains them under it, so a line
 // only ever holds whole frames and its averages divide by the frames it holds.
@@ -94,7 +51,6 @@ struct RingWindow {
 };
 std::mutex g_ring_mutex;
 RingWindow g_ring_window;
-std::atomic<uint32_t> g_ring_chunks{kCommandChunkCount};
 
 void
 PublishRingFrame(const CommandQueue::RingFrame &f) {
@@ -121,7 +77,7 @@ RingSection(double, uint32_t) {
     return {};
   double n = w.frames;
   return std::format(
-      "chunks={} occupancy={:.1f}/{} stalls={:.2f} stalled={} ms={:.2f}/{:.1f}", g_ring_chunks.load(),
+      "chunks={} occupancy={:.1f}/{} stalls={:.2f} stalled={} ms={:.2f}/{:.1f}", kCommandChunkCount,
       double(w.occupancy_sum) / w.commits, w.peak, w.stalls / n, w.stalled_frames, w.stall_ns / 1e6 / n,
       w.frame_stall_max_ns / 1e6
   );
@@ -131,21 +87,6 @@ RingSection(double, uint32_t) {
 
 namespace gw2 {
 
-uint32_t
-queueChunkCount() {
-  return ChunkCountFromEnv();
-}
-
-uint32_t
-queueMetalBufferCount(uint32_t chunks) {
-  return MetalBufferCount(chunks);
-}
-
-uint32_t
-queueMaxLatencyOverride() {
-  return MaxLatencyOverrideFromEnv();
-}
-
 bool
 queueRetireRecovery() {
   return kRetireRecovery();
@@ -154,11 +95,6 @@ queueRetireRecovery() {
 bool
 queueReleasePool() {
   return kReleasePool();
-}
-
-ThreadPrioritySwitch &
-queueThreadPriority() {
-  return kThreadPriority;
 }
 
 void
@@ -182,7 +118,7 @@ CommandQueue::gw2AttachSubmission(WMT::Device device) {
   if (gw2::metal4Active()) {
     // gw2 (#204): DXMT_MTL4_ALLOCATOR_POOL, read once per queue
     const bool allocator_pool = gw2::mtl4AllocatorPool();
-    auto mtl4 = std::make_unique<gw2::Mtl4Queue>(device, chunk_count_, allocator_pool);
+    auto mtl4 = std::make_unique<gw2::Mtl4Queue>(device, kCommandChunkCount, allocator_pool);
     if (!mtl4->valid())
       gw2::metal4Failed("creating the Metal 4 queue, its event or its allocators");
     else if (gw2::mtl4PresentMetal3() && !mtl4->enableMetal3Present())
@@ -202,7 +138,7 @@ CommandQueue::gw2AttachSubmission(WMT::Device device) {
       else
         Logger::info(str::format(
             "Metal 4: on (DXMT_METAL4=1, the default): this device's chunks go to an MTL4CommandQueue, with ",
-            chunk_count_, " command allocators (one per chunk slot; DXMT_MTL4_ALLOCATOR_POOL=0) and commit feedback"
+            kCommandChunkCount, " command allocators (one per chunk slot; DXMT_MTL4_ALLOCATOR_POOL=0) and commit feedback"
         ));
       // gw2 (#184): the queue holds only the device's set; a queue takes at most 32
       Logger::info("Metal 4: drawables stay resident through their layer's residency set, used by each present's "
@@ -233,7 +169,7 @@ CommandQueue::gw2AttachSubmission(WMT::Device device) {
   // gw2 (#78): Metal 3, unless the queue is on Metal 4
   if (!submission_)
     submission_ = std::make_unique<Metal3Submission>(
-        chunk_count_,
+        kCommandChunkCount,
         Metal3Submission::Hooks{
             .new_command_buffer = [this] { return CreateCommandBuffer(); },
             .before_commit = gw2::residencyBeforeCommit,
@@ -259,11 +195,9 @@ CommandQueue::gw2AttachSubmission(WMT::Device device) {
   );
 
   // gw2 (#8): the ring and the frame latency in effect, once per device
-  g_ring_chunks.store(chunk_count_, std::memory_order_relaxed);
   Logger::info(str::format(
-      "CommandQueue: chunks=", chunk_count_, kChunks.requested().empty() ? " (default)" : " (DXMT_CHUNKS)",
-      " metalbuffers=", metal_buffer_count_, " maxlatency=", max_latency_,
-      max_latency_override_ ? " (DXMT_MAX_FRAME_LATENCY, replaces the game's)" : " (until the game sets it)"
+      "CommandQueue: chunks=", kCommandChunkCount, " metalbuffers=", kCommandChunkCount, " maxlatency=", max_latency_,
+      " (until the game sets it)"
   ));
 }
 

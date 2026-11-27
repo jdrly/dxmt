@@ -1,44 +1,9 @@
 /*
- * gw2 (#291): my fork's PE thunks that have no upstream thunk to sit next to (thread priority,
- * Metal 4, MetalFX for GW2's Subsample pass). Not a translation unit of its own: winemetal_thunks.c
- * includes this file after its macros, so every build recipe that compiles winemetal_thunks.c gets
- * these thunks too. It isn't at winemetal_thunks.c's end because upstream appends every new thunk
+ * gw2 (#291): my fork's PE thunks that have no upstream thunk to sit next to (Metal 4, MetalFX for
+ * GW2's Subsample pass). Not a translation unit of its own: winemetal_thunks.c includes this file
+ * after its macros, so every build recipe that compiles winemetal_thunks.c gets these thunks too. It isn't at winemetal_thunks.c's end because upstream appends every new thunk
  * there. A new thunk of that kind goes here; don't add this file to a source list.
  */
-
-WINEMETAL_API int
-WMTSetThreadQoSClassSelf(
-    enum WMTQoSClass qos, int relative_priority, enum WMTQoSClass *old_qos, enum WMTQoSClass *new_qos
-) {
-  struct unixcall_wmt_set_thread_qos params;
-  params.qos_class = qos;
-  params.relative_priority = relative_priority;
-  params.ret_old_qos_class = 0;
-  params.ret_new_qos_class = 0;
-  params.ret = -1;
-  params.padding = 0;
-  UNIX_CALL(WMTSetThreadQoSClassSelf, &params);
-  if (old_qos)
-    *old_qos = (enum WMTQoSClass)params.ret_old_qos_class;
-  if (new_qos)
-    *new_qos = (enum WMTQoSClass)params.ret_new_qos_class;
-  return params.ret;
-}
-
-WINEMETAL_API int
-WMTSetThreadBasePrioritySelf(int base_priority, int *old_base, int *new_base) {
-  struct unixcall_wmt_set_thread_base_priority params;
-  params.base_priority = base_priority;
-  params.ret_old_base = -1;
-  params.ret_new_base = -1;
-  params.ret = -1;
-  UNIX_CALL(WMTSetThreadBasePrioritySelf, &params);
-  if (old_base)
-    *old_base = params.ret_old_base;
-  if (new_base)
-    *new_base = params.ret_new_base;
-  return params.ret;
-}
 
 // gw2 (#31)
 WINEMETAL_API obj_handle_t

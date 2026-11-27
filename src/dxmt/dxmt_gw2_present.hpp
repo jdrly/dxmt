@@ -38,6 +38,14 @@ void presentPassGpu(uint64_t frame, uint64_t gpu_start_ns, uint64_t gpu_end_ns);
 // isn't a whole number of refreshes), which missed vsyncs are counted against instead of vsyncs.
 void presentSetPacing(double refresh_ms, uint32_t vsyncs, double limiter_ms);
 
+// gw2 (#314): the longest present deadline DXMT_PRESENT_DEADLINE takes. A deadline is 0 (off) or a
+// finite number of ms up to this.
+constexpr double kMaxPresentDeadlineMs = 1000.0;
+inline bool
+presentDeadlineInRange(double ms) {
+  return std::isfinite(ms) && ms >= 0 && ms <= kMaxPresentDeadlineMs;
+}
+
 // gw2 (#157): the PRESENT section's skip count on a whole-refresh grid (shared with its test's oracle)
 // Refreshes skipped between two shown frames `gap_ms` apart, beyond the `vsyncs` the pacing asks for.
 inline int64_t

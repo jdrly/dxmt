@@ -33,9 +33,8 @@ struct MTL_GRAPHICS_PIPELINE_DESC {
 namespace dxmt::gw2 {
 // gw2 (#6): pipeline lookup switches (read once) and the counters of the PSO section.
 struct PsoSettings {
-  bool blend_hash;    // DXMT_PSO_BLEND_HASH: the blend state's fingerprint in the key's hash
-  bool mru;           // DXMT_PSO_MRU: a per-context MRU in front of the pipeline cache
-  bool topology_keep; // DXMT_PSO_TOPOLOGY_KEEP: keep the pipeline across topologies of one class
+  bool blend_hash; // DXMT_PSO_BLEND_HASH: the blend state's fingerprint in the key's hash
+  bool mru;        // DXMT_PSO_MRU: a per-context MRU in front of the pipeline cache
 };
 const PsoSettings &psoSettings();
 // gw2 (#149): psoSettings().blend_hash for the pipeline key's hash and compare, a load instead of a

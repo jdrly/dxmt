@@ -4845,11 +4845,11 @@ public:
   is the only place the key is built, and the topology reaches it only as TopologyClass and
   GSStripTopology, which is false without a GS. The plain pipeline is built from the key alone
   (MTLCompiledGraphicsPipelineImpl), and every draw reads the primitive type from the current
-  topology. DXMT_PSO_TOPOLOGY_KEEP=0 invalidates on every change, as before.
+  topology. Always on since #363 dropped DXMT_PSO_TOPOLOGY_KEEP; PSO's topokept counts it.
   */
   bool
   KeepsRenderPipelineAcrossTopology(D3D11_PRIMITIVE_TOPOLOGY from, D3D11_PRIMITIVE_TOPOLOGY to) {
-    if (!pso_topology_keep_ || cmdbuf_state != CommandBufferState::RenderPipelineReady)
+    if (cmdbuf_state != CommandBufferState::RenderPipelineReady)
       return false;
     if (state_.ShaderStages[PipelineStage::Geometry].Shader || state_.ShaderStages[PipelineStage::Hull].Shader ||
         state_.ShaderStages[PipelineStage::Domain].Shader)
@@ -5702,7 +5702,6 @@ protected:
   uint32_t pso_mru_count_ = 0;
   uint32_t pso_mru_next_ = 0;
   bool pso_mru_enabled_ = gw2::psoSettings().mru;
-  bool pso_topology_keep_ = gw2::psoSettings().topology_keep;
   const bool gw2_skip_same_state_ = gw2::skipSameState(); // gw2 (#146): DXMT_SKIP_SAME_STATE, cached
   const bool gw2_skip_same_srv_ = gw2::skipSameSrv();     // gw2 (#147): DXMT_SKIP_SAME_SRV, cached
   const bool gw2_skip_empty_slots_ = gw2::skipEmptySlots(); // gw2 (#203): DXMT_SKIP_EMPTY_SLOTS, cached

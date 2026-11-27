@@ -15,7 +15,6 @@
 //     src/dxmt/dxmt_gw2_switches.cpp -o /tmp/switches_test && /tmp/switches_test
 
 #include "dxmt_gw2_switches.hpp"
-#include "dxmt_gw2_control.hpp"
 #include "dxmt_gw2_present.hpp"
 #include "dxmt_gw2_shown_wait.hpp"
 #include <climits>
@@ -85,14 +84,6 @@ show(const std::optional<std::string> &v) {
 // --- legacy oracles: the reads R1 replaced, verbatim apart from reading `env` instead of getEnvVar
 // and a struct member instead of a function-local static
 
-constexpr uint32_t kCommandChunkCount = 32;
-
-struct Queue {
-  uint32_t chunks = 0, metal_buffers = 0;
-  bool warned = false;
-  std::string warning, marker;
-};
-
 struct Legacy {
   explicit Legacy(Env &e) : env(e) {}
   Env &env;
@@ -123,49 +114,15 @@ struct Legacy {
       depth_static = env.get("DXMT_DEPTH_PFV") == "1";
     return *depth_static;
   }
-  // d3d11_swapchain.cpp RaiseRenderThreadPriority: a function static
-  std::optional<uint32_t> rtp_static;
-  uint32_t
-  renderThreadPriority() {
-    if (!rtp_static)
-      rtp_static = [&] {
-        auto v = env.get("DXMT_RENDER_THREAD_PRIORITY");
-        return v.empty() ? 0u : uint32_t(std::strtoul(v.c_str(), nullptr, 10));
-      }();
-    return *rtp_static;
-  }
-  // dxmt_command_queue.cpp, per queue: ChunkCountFromEnv, MetalBufferCount, the CommandQueue line
-  Queue
-  makeQueue() {
-    Queue q;
-    q.chunks = [&] {
-      auto v = env.get("DXMT_CHUNKS");
-      if (v.empty())
-        return kCommandChunkCount;
-      auto n = std::strtoul(v.c_str(), nullptr, 10);
-      if (n == 32 || n == 64 || n == 128)
-        return uint32_t(n);
-      q.warned = true;
-      q.warning = "DXMT_CHUNKS=" + v + " is not 32, 64 or 128; using 32";
-      return kCommandChunkCount;
-    }();
-    q.metal_buffers = env.get("DXMT_CHUNKS").empty() ? kCommandChunkCount : q.chunks + 16;
-    q.marker = env.get("DXMT_CHUNKS").empty() ? " (default)" : " (DXMT_CHUNKS)";
-    return q;
-  }
   // d3d11_swapchain.cpp CreateSwapChain and dxmt_gw2_metal4.cpp metal4AttachQueue, each call
   bool
   metalfxSpatialSwapchain() {
     return env.get("DXMT_METALFX_SPATIAL_SWAPCHAIN") == "1";
   }
-  // LogStartup's own reads: the PFVs and the priority, read when the line is logged
+  // LogStartup's own reads: the PFVs, read when the line is logged
   std::string
   linePfv(const char *name) {
     return std::format("{}", int(env.get(name) == "1"));
-  }
-  std::string
-  lineRtp() {
-    return std::format("{}", std::strtoul(env.get("DXMT_RENDER_THREAD_PRIORITY").c_str(), nullptr, 10));
   }
 };
 
@@ -177,7 +134,6 @@ struct Migrated {
   sw::Switch<bool> stats;
   sw::Effective stats_line;
   sw::Switch<bool> stencil_pfv, depth_pfv;
-  sw::Switch<uint32_t> render_thread_priority, chunks;
   sw::Switch<bool> metalfx_spatial_swapchain;
 
   explicit Migrated(Env &env)
@@ -185,8 +141,6 @@ struct Migrated {
         stats_line{"DXMT_STATS", [this] { return sw::formatValue(statsEnabled()); }, registry},
         stencil_pfv{"DXMT_STENCIL_PFV", false, sw::legacy::exactlyOne, sw::Line::Listed, registry},
         depth_pfv{"DXMT_DEPTH_PFV", false, sw::legacy::exactlyOne, sw::Line::Listed, registry},
-        render_thread_priority{"DXMT_RENDER_THREAD_PRIORITY", 0, sw::legacy::strtoul32, sw::Line::Listed, registry},
-        chunks{"DXMT_CHUNKS", kCommandChunkCount, sw::legacy::ulongOneOf<32, 64, 128>, sw::Line::Listed, registry},
         metalfx_spatial_swapchain{
             "DXMT_METALFX_SPATIAL_SWAPCHAIN", false, sw::legacy::exactlyOne, sw::Line::Unlisted, registry
         } {}
@@ -217,30 +171,6 @@ struct Migrated {
       depth_static = depth_pfv();
     return *depth_static;
   }
-  // d3d11_swapchain.cpp
-  std::optional<uint32_t> rtp_static;
-  uint32_t
-  renderThreadPriority() {
-    if (!rtp_static)
-      rtp_static = render_thread_priority();
-    return *rtp_static;
-  }
-  // dxmt_command_queue.cpp
-  Queue
-  makeQueue() {
-    Queue q;
-    q.chunks = [&] {
-      auto v = chunks.requested();
-      if (!v.empty() && !sw::legacy::ulongIsOneOf<32, 64, 128>(v)) {
-        q.warned = true;
-        q.warning = "DXMT_CHUNKS=" + v + " is not 32, 64 or 128; using 32";
-      }
-      return chunks.parse(v);
-    }();
-    q.metal_buffers = chunks.requested().empty() ? kCommandChunkCount : q.chunks + 16;
-    q.marker = chunks.requested().empty() ? " (default)" : " (DXMT_CHUNKS)";
-    return q;
-  }
   // dxmt_gw2_metal4.cpp metalfxSpatialSwapchain()
   bool
   metalfxSpatialSwapchain() {
@@ -248,21 +178,11 @@ struct Migrated {
   }
 };
 
-static void
-checkQueue(const Queue &a, const Queue &b, const std::string &what) {
-  CHECK_EQ(a.chunks, b.chunks, what + ": chunks");
-  CHECK_EQ(a.metal_buffers, b.metal_buffers, what + ": metal buffers");
-  CHECK_EQ(a.warned, b.warned, what + ": warned");
-  CHECK_EQ(a.warning, b.warning, what + ": warning");
-  CHECK_EQ(a.marker, b.marker, what + ": marker");
-}
-
 // --- grammars: every spelling, a fresh process each
 
 static void
 testMigratedGrammars() {
-  const char *names[] = {"DXMT_STATS",  "DXMT_STENCIL_PFV", "DXMT_DEPTH_PFV", "DXMT_RENDER_THREAD_PRIORITY",
-                         "DXMT_CHUNKS", "DXMT_METALFX_SPATIAL_SWAPCHAIN"};
+  const char *names[] = {"DXMT_STATS", "DXMT_STENCIL_PFV", "DXMT_DEPTH_PFV", "DXMT_METALFX_SPATIAL_SWAPCHAIN"};
   for (auto &input : kInputs) {
     Env env, env2;
     if (input)
@@ -276,22 +196,21 @@ testMigratedGrammars() {
     CHECK_EQ(now.statsReadNow(), old.swapchainStats(), "DXMT_STATS per swapchain " + what);
     CHECK_EQ(now.stencilPfv(), old.stencilPfv(), "DXMT_STENCIL_PFV " + what);
     CHECK_EQ(now.depthPfv(), old.depthPfv(), "DXMT_DEPTH_PFV " + what);
-    CHECK_EQ(now.renderThreadPriority(), old.renderThreadPriority(), "DXMT_RENDER_THREAD_PRIORITY " + what);
-    checkQueue(now.makeQueue(), old.makeQueue(), "DXMT_CHUNKS " + what);
     CHECK_EQ(now.metalfxSpatialSwapchain(), old.metalfxSpatialSwapchain(), "DXMT_METALFX_SPATIAL_SWAPCHAIN " + what);
 
     // the registry's startup values, as LogStartup read them
     CHECK_EQ(*now.registry.effective("DXMT_STENCIL_PFV"), old.linePfv("DXMT_STENCIL_PFV"), "line " + what);
     CHECK_EQ(*now.registry.effective("DXMT_DEPTH_PFV"), old.linePfv("DXMT_DEPTH_PFV"), "line " + what);
-    // the old line printed strtoul's unsigned long, the new one the switch's uint32_t: the same on
-    // Windows (32-bit long; out-of-range text saturates to 4294967295 in both). Compared where this
-    // host's 64-bit long fits in 32 bits.
-    if (std::strtoul(input.value_or("").c_str(), nullptr, 10) <= UINT32_MAX)
-      CHECK_EQ(*now.registry.effective("DXMT_RENDER_THREAD_PRIORITY"), old.lineRtp(), "line " + what);
     CHECK(!now.registry.effective("DXMT_METALFX_SPATIAL_SWAPCHAIN")); // never on the line
     // every read above sampled the environment as often in both
     CHECK_EQ(env2.reads, env.reads, "source reads " + what);
-    CHECK(now.chunks.requested() == input.value_or("")); // the requested value is the raw text
+    CHECK(now.stencil_pfv.requested() == input.value_or("")); // the requested value is the raw text
+
+    // strtoul32 (DXMT_RENAME_TRIM, DXMT_LAYER_PROPS_POLL_MS) against the read it replaced, which
+    // DXMT_RENDER_THREAD_PRIORITY kept until #363: `v.empty() ? 0 : uint32_t(strtoul(v))`
+    auto v = input.value_or("");
+    CHECK_EQ(sw::legacy::strtoul32(v, 0), v.empty() ? 0u : uint32_t(std::strtoul(v.c_str(), nullptr, 10)),
+             "strtoul32 " + what);
   }
 }
 
@@ -300,18 +219,6 @@ testMigratedGrammars() {
 
 static void
 testReadSequences() {
-  // queues: each queue reads DXMT_CHUNKS anew (queue A 32, then 64 for queue B, then bad values)
-  {
-    Env env, env2;
-    Legacy old(env);
-    Migrated now(env2);
-    for (auto v : {"32", "64", "100", "", "128", "abc"}) {
-      env.vars["DXMT_CHUNKS"] = env2.vars["DXMT_CHUNKS"] = v;
-      int r0 = env.reads, r1 = env2.reads;
-      checkQueue(now.makeQueue(), old.makeQueue(), std::string("queue with ") + v);
-      CHECK_EQ(env2.reads - r1, env.reads - r0, std::string("source reads per queue, ") + v);
-    }
-  }
   // STATS: the process value is the first read's; each swapchain reads it again
   {
     Env env, env2;
@@ -329,23 +236,18 @@ testReadSequences() {
     // the startup line shows the process value (it exists only with STATS on): 1, as the literal was
     CHECK(*now.registry.effective("DXMT_STATS") == "1");
   }
-  // PFVs and the priority: the callers' statics keep the first value; the startup line reads now
+  // PFVs: the callers' statics keep the first value; the startup line reads now
   {
     Env env, env2;
     Legacy old(env);
     Migrated now(env2);
     env.vars["DXMT_STENCIL_PFV"] = env2.vars["DXMT_STENCIL_PFV"] = "1";
-    env.vars["DXMT_RENDER_THREAD_PRIORITY"] = env2.vars["DXMT_RENDER_THREAD_PRIORITY"] = "3";
     CHECK(now.stencilPfv() == old.stencilPfv() && now.stencilPfv());
-    CHECK(now.renderThreadPriority() == old.renderThreadPriority());
     env.vars["DXMT_STENCIL_PFV"] = env2.vars["DXMT_STENCIL_PFV"] = "0";
-    env.vars["DXMT_RENDER_THREAD_PRIORITY"] = env2.vars["DXMT_RENDER_THREAD_PRIORITY"] = "2";
     auto stencil_line = *now.registry.effective("DXMT_STENCIL_PFV");
     CHECK(stencil_line == old.linePfv("DXMT_STENCIL_PFV")); // 0 in both
     CHECK(stencil_line == "0");
-    CHECK(*now.registry.effective("DXMT_RENDER_THREAD_PRIORITY") == old.lineRtp()); // 2 in both
     CHECK(now.stencilPfv() == old.stencilPfv() && now.stencilPfv()); // the static still 1
-    CHECK(now.renderThreadPriority() == 3 && old.renderThreadPriority() == 3);
     CHECK(env2.reads == env.reads);
   }
   // logging first doesn't initialize a caller's static: the resource path's first read comes later
@@ -442,11 +344,6 @@ testRegistryRules() {
   CHECK(sw::legacy::notZero("", true) == true);
   CHECK(sw::legacy::exactlyOne("", false) == false);
   CHECK(sw::legacy::strtoul32("", 9) == 9);
-  CHECK(sw::legacy::ulongOneOf<32, 64, 128>("", 32) == 32);
-  CHECK(sw::legacy::ulongOneOf<32, 64, 128>("7", 32) == 32);
-  CHECK(sw::legacy::ulongOneOf<32, 64, 128>(" 128x", 32) == 128);
-  CHECK(sw::legacy::ulongIsOneOf<32, 64, 128>("064")); // strtoul base 10: leading zeros are decimal
-  CHECK(!sw::legacy::ulongIsOneOf<32, 64, 128>("0x40"));
 }
 
 // --- the startup line, byte for byte
@@ -459,13 +356,10 @@ struct LineValues {
   int cap_limiter = 1;
   uint32_t bg_fps = 10, bg_fps_minimized = 5;
   const char *bg_policy = "focus";
-  int blend_hash = 1, mru = 1, topology_keep = 1;
-  uint32_t ring = 32;
-  std::string max_latency = "unset";
+  int blend_hash = 1, mru = 1;
   double compile_wait_ms = 2;
   const char *timestamp_mode = "estimate";
   int map_fast = 1, skip_rebind = 1;
-  std::string control = "off";
   const char *residency = "1", *unretained = "1", *lifetime_check = "0", *metal4 = "1";
   const char *subsample = "off";
   int pso_record = 0;
@@ -475,22 +369,21 @@ struct LineValues {
 
 // pre-R1 LogStartup's format, verbatim (gw2-on-mac 0034ffa, d3d11_swapchain.cpp), reading `env` for
 // the switches it read itself
-// (less the three fields of a feature deleted in #275, and the two of the commit deferral deleted in #279)
+// (less the three fields of a feature deleted in #275, the two of the commit deferral deleted in #279,
+// and the five fields of the switches #363 dropped)
 static std::string
 legacyLine(const LineValues &x, Env &env) {
   return std::format(
       "DXMT_STATS=1 DXMT_HITCH_MS={} DXMT_PRESENT_SPLIT={} DXMT_DISPLAY_SYNC={} DXMT_PRESENT_DEADLINE={} "
       "DXMT_CAP_LIMITER={} DXMT_STENCIL_PFV={} DXMT_DEPTH_PFV={} DXMT_BG_FPS={} DXMT_BG_FPS_MINIMIZED={} "
-      "DXMT_BG_POLICY={} DXMT_RENDER_THREAD_PRIORITY={} DXMT_PSO_BLEND_HASH={} DXMT_PSO_MRU={} "
-      "DXMT_PSO_TOPOLOGY_KEEP={} DXMT_CHUNKS={} DXMT_MAX_FRAME_LATENCY={} DXMT_COMPILE_WAIT_MS={} "
-      "DXMT_TIMESTAMP_MODE={} DXMT_MAP_FAST={} DXMT_SKIP_REBIND={} DXMT_CONTROL={} "
+      "DXMT_BG_POLICY={} DXMT_PSO_BLEND_HASH={} DXMT_PSO_MRU={} DXMT_COMPILE_WAIT_MS={} "
+      "DXMT_TIMESTAMP_MODE={} DXMT_MAP_FAST={} DXMT_SKIP_REBIND={} "
       "DXMT_RESIDENCY_SET={} DXMT_UNRETAINED={} DXMT_LIFETIME_CHECK={} DXMT_METAL4={} "
       "DXMT_SUBSAMPLE_METALFX={} DXMT_PSO_RECORD={} cpus={} refresh={}",
       x.hitch_ms, x.present_split, x.display_sync, x.deadline, x.cap_limiter,
       int(env.get("DXMT_STENCIL_PFV") == "1"), int(env.get("DXMT_DEPTH_PFV") == "1"), x.bg_fps,
-      x.bg_fps_minimized, x.bg_policy, std::strtoul(env.get("DXMT_RENDER_THREAD_PRIORITY").c_str(), nullptr, 10),
-      x.blend_hash, x.mru, x.topology_keep, x.ring, x.max_latency, x.compile_wait_ms,
-      x.timestamp_mode, x.map_fast, x.skip_rebind, x.control,
+      x.bg_fps_minimized, x.bg_policy, x.blend_hash, x.mru, x.compile_wait_ms, x.timestamp_mode, x.map_fast,
+      x.skip_rebind,
       x.residency, x.unretained, x.lifetime_check, x.metal4, x.subsample, x.pso_record, x.cpus, x.refresh
   );
 }
@@ -510,17 +403,12 @@ generatedFields(const LineValues &x) {
       {"DXMT_BG_FPS", std::format("{}", x.bg_fps)},
       {"DXMT_BG_FPS_MINIMIZED", std::format("{}", x.bg_fps_minimized)},
       {"DXMT_BG_POLICY", x.bg_policy},
-      {"DXMT_RENDER_THREAD_PRIORITY", std::nullopt},
       {"DXMT_PSO_BLEND_HASH", std::format("{}", x.blend_hash)},
       {"DXMT_PSO_MRU", std::format("{}", x.mru)},
-      {"DXMT_PSO_TOPOLOGY_KEEP", std::format("{}", x.topology_keep)},
-      {"DXMT_CHUNKS", std::format("{}", x.ring)},
-      {"DXMT_MAX_FRAME_LATENCY", x.max_latency},
       {"DXMT_COMPILE_WAIT_MS", std::format("{}", x.compile_wait_ms)},
       {"DXMT_TIMESTAMP_MODE", x.timestamp_mode},
       {"DXMT_MAP_FAST", std::format("{}", x.map_fast)},
       {"DXMT_SKIP_REBIND", std::format("{}", x.skip_rebind)},
-      {"DXMT_CONTROL", x.control},
       {"DXMT_RESIDENCY_SET", x.residency},
       {"DXMT_UNRETAINED", x.unretained},
       {"DXMT_LIFETIME_CHECK", x.lifetime_check},
@@ -571,9 +459,6 @@ testStartupLine() {
   set.present_split = 0;
   set.deadline = "4.5";
   set.bg_policy = "occlusion";
-  set.ring = 128;
-  set.max_latency = "3";
-  set.control = "/tmp/dxmt control.txt";
   set.residency = "failed";
   set.lifetime_check = "unbuilt";
   set.metal4 = "unsupported";
@@ -584,25 +469,18 @@ testStartupLine() {
   checkLine(set,
             {{"DXMT_STENCIL_PFV", "1"},
              {"DXMT_DEPTH_PFV", "1"},
-             {"DXMT_RENDER_THREAD_PRIORITY", "3"},
-             {"DXMT_CHUNKS", "128"},
              {"DXMT_STATS", "1"}},
             "all set");
   checkLine(defaults,
             {{"DXMT_STENCIL_PFV", "true"},
              {"DXMT_DEPTH_PFV", " 1"},
-             {"DXMT_RENDER_THREAD_PRIORITY", "7x"},
-             {"DXMT_CHUNKS", "100"},
              {"DXMT_STATS", "yes"}},
             "malformed");
   checkLine(defaults,
             {{"DXMT_STENCIL_PFV", ""},
              {"DXMT_DEPTH_PFV", "0"},
-             {"DXMT_RENDER_THREAD_PRIORITY", ""},
-             {"DXMT_CHUNKS", ""},
              {"DXMT_STATS", ""}},
             "empty");
-  checkLine(defaults, {{"DXMT_RENDER_THREAD_PRIORITY", "+3"}, {"DXMT_CHUNKS", "064"}}, "signs and zeros");
 
   // a switch declared later and not named by LogStartup: after DXMT_PSO_RECORD, by name, before cpus
   Env env;
@@ -659,8 +537,8 @@ testMtl4DefaultsOn() {
   }
 }
 
-// gw2 (#314): the present deadline's range, which the control file's present_deadline and
-// DXMT_PRESENT_DEADLINE share (dxmt_gw2_control.hpp): 0 (off) or a finite number of ms up to 1000.
+// gw2 (#314): DXMT_PRESENT_DEADLINE's range (dxmt_gw2_present.hpp): 0 (off) or a finite number of ms
+// up to 1000.
 static void
 testPresentDeadlineRange() {
   for (double ms : {0.0, 8.0, 1000.0})
