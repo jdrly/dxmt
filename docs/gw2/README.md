@@ -313,7 +313,7 @@ slots it doesn't visit would have moved no counter.
 call, and a draw emits one command for each marked state, so `blendcmd`, `dsscmd` and `rscmd` are what
 the marks cost today. A new render pass marks all three too, so a skip would save at most the `same…`
 count, and fewer where a pass begins before the next draw. A `same…` count under a tenth of its command count says a skip in that
-setter would save little. `soset` at 0 says GW2 never calls `SOSetTargets`. A deferred context's
+setter would save little. `soset=0.0` in every window says GW2 calls `SOSetTargets` fewer than once in 20 frames, not that it never does. A deferred context's
 commands count when it records them, not when the immediate context executes its list.
 
 ### RING
