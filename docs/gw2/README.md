@@ -1412,7 +1412,6 @@ through the full and the skipping walk on two sets; after every step both emitte
 unbinds in the same order, moved the same counters, and hold the same views and bound, dirty and hazard
 bits. It prints both walks' ns a call on GW2's shape (32 slots, 3 non-null) without asserting on them.
 
-
 `setter_count_test.cpp` (pure, #365) checks the PSO line's seven setter fields (`dxmt_gw2_setters.hpp`).
 The context's part of `OMSetBlendState`, `OMSetDepthStencilState`, `RSSetState`, `SOSetTargets`, a new
 render pass and `PreDraw` is copied from the context, with the counting hooks where the context has

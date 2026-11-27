@@ -216,6 +216,8 @@ The decisions these rules rest on, and the ones a change must stay consistent wi
   never exercises (`DXMT_PSO_TOPOLOGY_KEEP`, `DXMT_CHUNKS`, `DXMT_MAX_FRAME_LATENCY`,
   `DXMT_CONTROL`, the three thread priorities, `DXMT_PRESENTER_FREE`) and the `WaitForVBlank`
   count are dropped.
+- [ADR 0021](../docs/gw2/adr/0021-the-hashed-pipeline-table-is-dropped.md): the hashed pipeline
+  table is dropped, and the 4-entry list stays.
 
 ## Definition of Done
 

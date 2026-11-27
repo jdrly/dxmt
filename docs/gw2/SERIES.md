@@ -116,13 +116,14 @@ Sum: 9 + 4 + 1 + 7 + 6 + 3 + 2 + 1 + 4 + 4 + 4 + 1 + 10 + 10 + 5 + 3 + 1 + 10 + 
   (`chunk-ring`, whose `RING` line stays) and `DXMT_PRESENTER_FREE` (`teardown-robustness`). Each
   default is what the build did before. `DXMT_PSO_TOPOLOGY_KEEP` (`pipeline-lookup`) lost only its
   switch: it was on, so its path stays always on.
-- **`DXMT_PSO_TABLE`** (`pipeline-lookup`), dropped on 2026-11-27 (#370). It came after 0.2.1
-  (#366) and kept a context's plain pipelines in 64 slots by hash in place of the 4-entry list. In
-  my dev.5 session it found 54% of pipeline changes without the device cache, where dev.4's list
-  found 40%, and the cache's lock fell from 0.079 to 0.061 ms a frame. GW2 cycles through more
-  pipelines a frame than 64 recent ones hold, and the 0.02 ms a frame it saves is below the bar I
-  dropped `macdrv-calls` at. The removal commit takes out the table, its switch and its test.
-  `DXMT_PSO_MRU` stays as it was. The app's `DEV_GONE` row came first (jdrly/gw2-on-mac #386).
+- **`DXMT_PSO_TABLE`** (`pipeline-lookup`), dropped on 2026-11-27 (#370,
+  [ADR 0021](adr/0021-the-hashed-pipeline-table-is-dropped.md)). It came after 0.2.1 (#366) and kept a
+  context's plain pipelines in 64 slots by hash in place of the 4-entry list. In my dev.5 session it
+  found 54% of pipeline changes without the device cache, where dev.4's list found 40%, and the
+  cache's lock fell from 0.079 to 0.061 ms a frame. GW2 cycles through more pipelines a frame than
+  64 recent ones hold, and the 0.02 ms a frame it saves is below the bar I dropped `macdrv-calls`
+  at. The removal commit takes out the table, its switch and its test. `DXMT_PSO_MRU` stays as it
+  was. The app's `DEV_GONE` row came first (jdrly/gw2-on-mac #386).
 
 In DXMT a drop is a removal commit on `gw2-on-mac`, as #276 to #288 were, because DXMT moves by
 merge and its topics share files.

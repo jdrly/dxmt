@@ -47,8 +47,8 @@ What follows from the rule:
   plans 003 to 005, wave by wave. #157 and #221, the issues for `DXMT_PRESENT_QUEUE` and its test,
   closed as not planned on 2026-11-17, with a pointer to #281.
 - Not decided yet: `DXMT_WARM=functions`. The AIR reader pool (`DXMT_AIR_READERS`) was dropped on
-  2026-11-26 (ADR 0019), and `DXMT_RENDER_THREAD_PRIORITY`, `DXMT_CONTROL` and six more switches
-  on 2026-11-27 (ADR 0020).
+  2026-11-26 (ADR 0019), `DXMT_RENDER_THREAD_PRIORITY`, `DXMT_CONTROL` and six more switches
+  on 2026-11-27 (ADR 0020), and the hashed pipeline table the same day (ADR 0021).
 
 ## Alternatives I rejected
 
